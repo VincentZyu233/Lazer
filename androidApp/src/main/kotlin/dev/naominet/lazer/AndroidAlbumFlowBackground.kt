@@ -56,13 +56,50 @@ internal fun AndroidAlbumFlowBackground(
     cornerRadius: Dp,
     veil: Color,
 ) {
+    AndroidArtworkFlowBackground(
+        artworkKey = track?.id,
+        coverUrl = track?.coverUrl,
+        modifier = modifier,
+        cornerRadius = cornerRadius,
+        veil = veil,
+        animated = true,
+    )
+}
+
+@Composable
+internal fun AndroidPlaylistFlowBackground(
+    playlist: AndroidPlaylist,
+    modifier: Modifier = Modifier,
+    cornerRadius: Dp,
+    veil: Color,
+) {
+    AndroidArtworkFlowBackground(
+        artworkKey = playlist.id,
+        coverUrl = playlist.coverUrl,
+        modifier = modifier,
+        cornerRadius = cornerRadius,
+        veil = veil,
+        animated = false,
+    )
+}
+
+@Composable
+private fun AndroidArtworkFlowBackground(
+    artworkKey: Long?,
+    coverUrl: String?,
+    modifier: Modifier,
+    cornerRadius: Dp,
+    veil: Color,
+    animated: Boolean,
+) {
     var colors by remember { mutableStateOf(DefaultFlowPalette) }
     var phaseSeconds by remember { mutableFloatStateOf(0f) }
 
-    LaunchedEffect(track?.id, track?.coverUrl) {
-        colors = extractAndroidFlowPalette(track?.coverUrl)
+    LaunchedEffect(artworkKey, coverUrl) {
+        colors = extractAndroidFlowPalette(coverUrl)
     }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(animated) {
+        if (!animated) return@LaunchedEffect
         var lastPublishedNs = 0L
         while (isActive) {
             withFrameNanos { now ->

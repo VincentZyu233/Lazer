@@ -131,6 +131,10 @@ class AndroidGatewayController(context: Context) {
         private set
     var exclusiveAudio by mutableStateOf(settings.exclusiveAudio)
         private set
+    var playbackInterface by mutableStateOf(settings.playbackInterface)
+        private set
+    val independentPlayback: Boolean
+        get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
     var gatewayBaseUrl by mutableStateOf(settings.gatewayBaseUrl)
         private set
     var currentUser by mutableStateOf<UserProfile?>(null)
@@ -338,6 +342,18 @@ class AndroidGatewayController(context: Context) {
         exclusiveAudio = enabled
         settings.exclusiveAudio = enabled
         AndroidPlaybackConnection.updateExclusiveAudio(appContext)
+    }
+
+    fun updateIndependentPlayback(enabled: Boolean) {
+        val value = if (enabled) {
+            AndroidPlaybackInterface.INDEPENDENT
+        } else {
+            AndroidPlaybackInterface.SYSTEM_MEDIA
+        }
+        if (playbackInterface == value) return
+        playbackInterface = value
+        settings.playbackInterface = value
+        AndroidPlaybackConnection.updatePlaybackInterface(appContext)
     }
 
     fun updateGatewayBaseUrl(value: String): Boolean {

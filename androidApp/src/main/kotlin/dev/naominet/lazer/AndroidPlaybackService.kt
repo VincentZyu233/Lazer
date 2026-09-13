@@ -100,7 +100,7 @@ private object AndroidPlaybackQueue {
     }
 }
 
-/** Entry point used by Compose controls. Android's media session calls back into the same service. */
+/** Entry point used by Compose controls. System-media mode calls back into the same service. */
 object AndroidPlaybackConnection {
     val snapshot: StateFlow<AndroidPlaybackSnapshot> = AndroidPlaybackStateStore.snapshot
 
@@ -124,10 +124,15 @@ object AndroidPlaybackConnection {
         AndroidPlaybackService.EXTRA_POSITION to positionMillis.coerceAtLeast(0L),
     )
 
-    fun updateExclusiveAudio(context: Context) = dispatch(
-        context,
-        AndroidPlaybackService.ACTION_EXCLUSIVE_AUDIO_CHANGED,
-    )
+    fun updateExclusiveAudio(context: Context) {
+        if (snapshot.value.track == null) return
+        dispatch(context, AndroidPlaybackService.ACTION_EXCLUSIVE_AUDIO_CHANGED)
+    }
+
+    fun updatePlaybackInterface(context: Context) {
+        if (snapshot.value.track == null) return
+        dispatch(context, AndroidPlaybackService.ACTION_PLAYBACK_INTERFACE_CHANGED)
+    }
 
     fun stopAndClearSession(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_STOP_AND_CLEAR_SESSION)
 
@@ -145,7 +150,7 @@ object AndroidPlaybackConnection {
 class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val handler = Handler(Looper.getMainLooper())
-    private lateinit var mediaSession: MediaSession
+    private var mediaSession: MediaSession? = null
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
     private lateinit var gatewaySettings: AndroidSettingsStore
@@ -190,24 +195,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         gateway = createGateway(gatewaySettings.gatewayBaseUrl)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) createNotificationChannel()
-        mediaSession = MediaSession(this, "Lazer playback").apply {
-            setFlags(
-                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
-                    MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS,
-            )
-            setCallback(
-                object : MediaSession.Callback() {
-                    override fun onPlay() = resumeCurrent()
-                    override fun onPause() = pauseCurrent()
-                    override fun onSkipToNext() = playNext()
-                    override fun onSkipToPrevious() = playPrevious()
-                    override fun onSeekTo(position: Long) = seekTo(position)
-                    override fun onStop() = stopPlayback()
-                },
-            )
-            setSessionActivity(contentIntent())
-            isActive = true
-        }
+        if (gatewaySettings.playbackInterface.usesSystemMediaControls()) ensureMediaSession()
         SuperLyricPublisher.ensureRegistered()
     }
 
@@ -222,6 +210,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             ACTION_PREVIOUS -> playPrevious()
             ACTION_SEEK -> seekTo(intent.getLongExtra(EXTRA_POSITION, 0L))
             ACTION_EXCLUSIVE_AUDIO_CHANGED -> refreshAudioFocusMode()
+            ACTION_PLAYBACK_INTERFACE_CHANGED -> refreshPlaybackInterface()
             ACTION_STOP -> stopPlayback()
             ACTION_STOP_AND_CLEAR_SESSION -> stopPlayback(clearSession = true)
         }
@@ -231,6 +220,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onAudioFocusChange(focusChange: Int) {
+        if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) return
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> if (wasPlayingBeforeFocusLoss) {
                 wasPlayingBeforeFocusLoss = false
@@ -438,7 +428,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         SuperLyricPublisher.stop()
         if (clearSession) gateway.clearSession()
         AndroidPlaybackStateStore.update(AndroidPlaybackSnapshot())
-        mediaSession.setPlaybackState(
+        mediaSession?.setPlaybackState(
             PlaybackState.Builder().setState(PlaybackState.STATE_STOPPED, 0L, 0f).build(),
         )
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -485,6 +475,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         positionMillis: Long,
         isPreparing: Boolean = false,
     ) {
+        if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) return
+        val session = ensureMediaSession()
         val metadata = MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
             .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, track.title)
@@ -497,13 +489,13 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bitmap)
             metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, bitmap)
         }
-        mediaSession.setMetadata(metadata.build())
+        session.setMetadata(metadata.build())
         val state = when {
             isPreparing -> PlaybackState.STATE_BUFFERING
             isPlaying -> PlaybackState.STATE_PLAYING
             else -> PlaybackState.STATE_PAUSED
         }
-        mediaSession.setPlaybackState(
+        session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
                     PlaybackState.ACTION_PLAY or
@@ -588,9 +580,6 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
     private fun notification(track: AndroidTrack, preparing: Boolean): Notification {
         val isPlaying = AndroidPlaybackStateStore.snapshot.value.isPlaying
-        val playAction = if (isPlaying) ACTION_TOGGLE else ACTION_TOGGLE
-        val playIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-        val playLabel = if (isPlaying) tr("player.pause") else tr("player.play")
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -602,17 +591,26 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             .setContentText(if (preparing) tr("notification.preparing") else track.artist)
             .setOnlyAlertOnce(true)
             .setOngoing(isPlaying || preparing)
-            .setCategory(Notification.CATEGORY_TRANSPORT)
             .setContentIntent(contentIntent())
-            .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .addAction(notificationAction(android.R.drawable.ic_media_previous, tr("player.previous"), ACTION_PREVIOUS))
-            .addAction(notificationAction(playIcon, playLabel, playAction))
-            .addAction(notificationAction(android.R.drawable.ic_media_next, tr("player.next"), ACTION_NEXT))
-            .setStyle(
-                Notification.MediaStyle()
-                    .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2),
-            )
+        if (gatewaySettings.playbackInterface.usesSystemMediaControls()) {
+            val playIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            val playLabel = if (isPlaying) tr("player.pause") else tr("player.play")
+            builder
+                .setCategory(Notification.CATEGORY_TRANSPORT)
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .addAction(notificationAction(android.R.drawable.ic_media_previous, tr("player.previous"), ACTION_PREVIOUS))
+                .addAction(notificationAction(playIcon, playLabel, ACTION_TOGGLE))
+                .addAction(notificationAction(android.R.drawable.ic_media_next, tr("player.next"), ACTION_NEXT))
+                .setStyle(
+                    Notification.MediaStyle()
+                        .setMediaSession(ensureMediaSession().sessionToken)
+                        .setShowActionsInCompactView(0, 1, 2),
+                )
+        } else {
+            builder
+                .setCategory(Notification.CATEGORY_SERVICE)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+        }
         artworkBitmap.takeIf { artworkTrackId == track.id }?.let(builder::setLargeIcon)
         return builder.build()
     }
@@ -635,6 +633,10 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     )
 
     private fun requestAudioFocus(): Boolean {
+        if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) {
+            abandonAudioFocus()
+            return true
+        }
         abandonAudioFocus()
         val focusGain = androidAudioFocusGain(gatewaySettings.exclusiveAudio)
         val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -663,9 +665,73 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun refreshAudioFocusMode() {
+        if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) {
+            abandonAudioFocus()
+            return
+        }
         val isPlaying = player?.isPlaying == true
         abandonAudioFocus()
         if (isPlaying && !requestAudioFocus()) publishError(audioFocusFailureMessage())
+    }
+
+    private fun refreshPlaybackInterface() {
+        val snapshot = AndroidPlaybackStateStore.snapshot.value
+        if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) {
+            abandonAudioFocus()
+            wasPlayingBeforeFocusLoss = false
+            releaseMediaSession()
+        } else {
+            ensureMediaSession()
+            snapshot.track?.let { track ->
+                updateSession(
+                    track = track,
+                    isPlaying = snapshot.isPlaying,
+                    positionMillis = snapshot.positionMillis,
+                    isPreparing = snapshot.isPreparing,
+                )
+            }
+            if (player?.isPlaying == true && !requestAudioFocus()) {
+                runCatching { player?.pause() }
+                publishCurrentState(isPreparing = false, isPlaying = false)
+                SuperLyricPublisher.stop()
+                AndroidPlaybackStateStore.update(
+                    AndroidPlaybackStateStore.snapshot.value.copy(message = audioFocusFailureMessage()),
+                )
+            }
+        }
+        AndroidPlaybackStateStore.snapshot.value.let { current ->
+            current.track?.let { ensureForeground(it, preparing = current.isPreparing) }
+        }
+    }
+
+    private fun ensureMediaSession(): MediaSession {
+        mediaSession?.let { return it }
+        return MediaSession(this, "Lazer playback").apply {
+            setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                    MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS,
+            )
+            setCallback(
+                object : MediaSession.Callback() {
+                    override fun onPlay() = resumeCurrent()
+                    override fun onPause() = pauseCurrent()
+                    override fun onSkipToNext() = playNext()
+                    override fun onSkipToPrevious() = playPrevious()
+                    override fun onSeekTo(position: Long) = seekTo(position)
+                    override fun onStop() = stopPlayback()
+                },
+            )
+            setSessionActivity(contentIntent())
+            isActive = true
+        }.also { mediaSession = it }
+    }
+
+    private fun releaseMediaSession() {
+        mediaSession?.let { session ->
+            session.isActive = false
+            session.release()
+        }
+        mediaSession = null
     }
 
     private fun playbackAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
@@ -694,8 +760,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         artworkBitmap = null
         releasePlayer()
         abandonAudioFocus()
-        mediaSession.isActive = false
-        mediaSession.release()
+        releaseMediaSession()
         SuperLyricPublisher.release()
         scope.cancel()
         gateway.close()
@@ -709,6 +774,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val ACTION_PREVIOUS = "dev.naominet.lazer.action.PREVIOUS"
         const val ACTION_SEEK = "dev.naominet.lazer.action.SEEK"
         const val ACTION_EXCLUSIVE_AUDIO_CHANGED = "dev.naominet.lazer.action.EXCLUSIVE_AUDIO_CHANGED"
+        const val ACTION_PLAYBACK_INTERFACE_CHANGED = "dev.naominet.lazer.action.PLAYBACK_INTERFACE_CHANGED"
         const val ACTION_STOP = "dev.naominet.lazer.action.STOP"
         const val ACTION_STOP_AND_CLEAR_SESSION = "dev.naominet.lazer.action.STOP_AND_CLEAR_SESSION"
         const val EXTRA_POSITION = "position_millis"
@@ -738,6 +804,9 @@ internal fun androidAudioFocusGain(exclusiveAudio: Boolean): Int = if (exclusive
 } else {
     AudioManager.AUDIOFOCUS_GAIN
 }
+
+internal fun AndroidPlaybackInterface.usesSystemMediaControls(): Boolean =
+    this == AndroidPlaybackInterface.SYSTEM_MEDIA
 
 internal fun androidAudioQualityAttempts(preferred: AudioQuality): List<Pair<AudioQuality, Boolean>> {
     val preferredIndex = ANDROID_AUDIO_QUALITY_OPTIONS.indexOf(preferred)
