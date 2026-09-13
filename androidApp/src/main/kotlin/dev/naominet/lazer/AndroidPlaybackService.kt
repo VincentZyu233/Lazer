@@ -173,7 +173,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
     private val streamUrlPrefetches = mutableSetOf<AndroidStreamCacheKey>()
     private val mediaRequestHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}) Lazer/1.0",
+        "User-Agent" to "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}) Lazer/1.1",
         "Referer" to "https://music.163.com/",
     )
 

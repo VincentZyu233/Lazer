@@ -91,8 +91,8 @@ android {
         applicationId = "dev.naominet.lazer"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
 
         // CI builds a slimmer APK for a single ABI (e.g. -PlazerAbis=arm64-v8a). Local builds keep
         // every ABI unless the property is supplied.

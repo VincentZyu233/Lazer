@@ -203,7 +203,7 @@ private suspend fun extractAndroidFlowPalette(coverUrl: String?): List<Color> = 
         val connection = URL(coverUrl.toAndroidPaletteArtworkUrl()).openConnection() as HttpURLConnection
         connection.connectTimeout = 8_000
         connection.readTimeout = 8_000
-        connection.setRequestProperty("User-Agent", "Lazer/1.0")
+        connection.setRequestProperty("User-Agent", "Lazer/1.1")
         connection.inputStream.use(BitmapFactory::decodeStream)
             ?.let(::seedFromBitmap)
             ?.let(::flowColorsFromSeed)
