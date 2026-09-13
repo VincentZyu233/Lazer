@@ -25,12 +25,12 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Assemble arm64 debug APK
-        run: ./gradlew :androidApp:assembleDebug -PlazerAbis=arm64-v8a --stacktrace
+      - name: Assemble arm64 release APK
+        run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: lazer-apk-arm64
-          path: androidApp/build/outputs/apk/**/*.apk
+          path: androidApp/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
   # Desktop MSI + runnable fat jar (x64 runner).
