@@ -17,6 +17,22 @@ class AndroidPlaybackUrlTest {
     }
 
     @Test
+    fun independentPlaybackOptsOutOfSystemMediaControls() {
+        assertEquals(false, AndroidPlaybackInterface.INDEPENDENT.usesSystemMediaControls())
+        assertEquals(true, AndroidPlaybackInterface.SYSTEM_MEDIA.usesSystemMediaControls())
+    }
+
+    @Test
+    fun unknownPlaybackInterfaceFallsBackToSystemMedia() {
+        assertEquals(AndroidPlaybackInterface.SYSTEM_MEDIA, parseAndroidPlaybackInterface(null))
+        assertEquals(AndroidPlaybackInterface.SYSTEM_MEDIA, parseAndroidPlaybackInterface("future-interface"))
+        assertEquals(
+            AndroidPlaybackInterface.INDEPENDENT,
+            parseAndroidPlaybackInterface(AndroidPlaybackInterface.INDEPENDENT.name),
+        )
+    }
+
+    @Test
     fun defaultsUnknownStoredAudioQualityToExHigh() {
         assertEquals(AudioQuality.EXHIGH, parseAndroidAudioQuality(null))
         assertEquals(AudioQuality.EXHIGH, parseAndroidAudioQuality("future-quality"))

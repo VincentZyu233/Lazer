@@ -17,6 +17,16 @@ internal val ANDROID_AUDIO_QUALITY_OPTIONS = listOf(
 internal fun parseAndroidAudioQuality(value: String?): AudioQuality =
     ANDROID_AUDIO_QUALITY_OPTIONS.firstOrNull { it.name == value } ?: AudioQuality.EXHIGH
 
+/** Controls whether playback is exposed to Android's system media-control surfaces. */
+enum class AndroidPlaybackInterface {
+    SYSTEM_MEDIA,
+    INDEPENDENT,
+}
+
+internal fun parseAndroidPlaybackInterface(value: String?): AndroidPlaybackInterface =
+    AndroidPlaybackInterface.entries.firstOrNull { it.name == value }
+        ?: AndroidPlaybackInterface.SYSTEM_MEDIA
+
 /** App-scoped preferences for Android appearance, playback, and service settings. */
 internal class AndroidSettingsStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -123,6 +133,10 @@ internal class AndroidSettingsStore(context: Context) {
         get() = preferences.getBoolean(KEY_EXCLUSIVE_AUDIO, false)
         set(value) = preferences.edit().putBoolean(KEY_EXCLUSIVE_AUDIO, value).apply()
 
+    var playbackInterface: AndroidPlaybackInterface
+        get() = parseAndroidPlaybackInterface(preferences.getString(KEY_PLAYBACK_INTERFACE, null))
+        set(value) = preferences.edit().putString(KEY_PLAYBACK_INTERFACE, value.name).apply()
+
     var gatewayBaseUrl: String
         get() = normalizeGatewayBaseUrl(
             preferences.getString(KEY_GATEWAY_BASE_URL, DEFAULT_GATEWAY_BASE_URL).orEmpty(),
@@ -152,6 +166,7 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_SHOW_FULL_LYRICS = "lyrics.show_full_lines"
         const val KEY_AUDIO_QUALITY = "playback.audio_quality"
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
+        const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_GATEWAY_BASE_URL = "gateway.base_url"
     }
 }

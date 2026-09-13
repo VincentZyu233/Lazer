@@ -14,7 +14,7 @@ class LiquidGlassTest {
     @Test
     fun defaultIntensityPreservesTheTunedSurfaceBlur() {
         assertEquals(1f, liquidGlassBlurScale(DEFAULT_LIQUID_GLASS_BLUR_INTENSITY))
-        assertEquals(0.1f, liquidGlassBlurScale(0f))
-        assertEquals(1.9f, liquidGlassBlurScale(1f))
+        assertEquals(0f, liquidGlassBlurScale(0f))
+        assertEquals(2f, liquidGlassBlurScale(1f))
     }
 }

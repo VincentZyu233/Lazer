@@ -5,9 +5,11 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
@@ -15,6 +17,7 @@ import com.kashif_e.backdrop.backdrops.layerBackdrop
 import com.kashif_e.backdrop.backdrops.rememberLayerBackdrop
 import com.kashif_e.backdrop.drawBackdrop
 import com.kashif_e.backdrop.effects.blur
+import com.kashif_e.backdrop.effects.colorControls
 import com.kashif_e.backdrop.effects.lens
 import com.kashif_e.backdrop.effects.vibrancy
 import com.kashif_e.backdrop.highlight.Highlight
@@ -25,7 +28,7 @@ const val DEFAULT_LIQUID_GLASS_BLUR_INTENSITY = 0.5f
 fun normalizeLiquidGlassBlurIntensity(value: Float): Float = value.coerceIn(0f, 1f)
 
 internal fun liquidGlassBlurScale(intensity: Float): Float =
-    0.1f + normalizeLiquidGlassBlurIntensity(intensity) * 1.8f
+    normalizeLiquidGlassBlurIntensity(intensity) * 2f
 
 /**
  * Holder for the optional liquid-glass backdrop. When disabled the surface modifiers below are
@@ -113,5 +116,82 @@ fun Modifier.liquidGlassSurface(
         innerShadow = { InnerShadow(radius = 12.dp, color = Color.Black.copy(alpha = 0.10f)) },
         // Near-colourless: the material is the refraction, not a white fill.
         onDrawSurface = { drawRect(surfaceColor.copy(alpha = 0.08f)) },
+    )
+}
+
+/**
+ * Crisp, responsive glass for buttons and other top-level controls. At rest it stays quiet; while
+ * pressed it gains stronger lensing, a small gel-like expansion, and a prismatic edge.
+ */
+fun Modifier.liquidGlassControlSurface(
+    glass: LazerLiquidGlass,
+    shape: Shape,
+    surfaceColor: Color,
+    tint: Color = Color.Unspecified,
+    blurRadius: Dp = 3.dp,
+    pressProgress: Float = 0f,
+): Modifier {
+    if (!glass.isEnabled) return this
+    val backdrop = glass.backdrop ?: return this
+    val pressed = pressProgress.coerceIn(0f, 1f)
+    val effectiveBlurRadius = glass.scaledBlurRadius(blurRadius)
+    return drawBackdrop(
+        backdrop = backdrop,
+        shape = { shape },
+        effects = {
+            vibrancy()
+            blur(effectiveBlurRadius.toPx())
+            lens(
+                refractionHeight = (12.dp + 6.dp * pressed).toPx(),
+                refractionAmount = (24.dp + 12.dp * pressed).toPx(),
+                depthEffect = pressed > 0f,
+                chromaticAberration = pressed > 0.12f,
+            )
+        },
+        highlight = { Highlight.Ambient.copy(alpha = 0.72f + 0.28f * pressed) },
+        innerShadow = {
+            InnerShadow(
+                radius = 6.dp + 4.dp * pressed,
+                color = Color.Black.copy(alpha = 0.07f + 0.05f * pressed),
+            )
+        },
+        layerBlock = {
+            val scale = 1f + 0.035f * pressed
+            scaleX = scale
+            scaleY = scale
+        },
+        onDrawSurface = {
+            if (tint.isSpecified) {
+                drawRect(tint, blendMode = BlendMode.Hue)
+                drawRect(tint.copy(alpha = 0.56f + 0.10f * pressed))
+            } else {
+                drawRect(surfaceColor.copy(alpha = 0.10f + 0.04f * pressed))
+            }
+        },
+    )
+}
+
+/**
+ * Lean frosted material for a control that moves with scrolling content. It deliberately avoids
+ * lens and vibrancy passes so the control remains smooth while its backdrop is invalidated.
+ */
+fun Modifier.liquidGlassFrostedSurface(
+    glass: LazerLiquidGlass,
+    shape: Shape,
+    surfaceColor: Color,
+    blurRadius: Dp = 6.dp,
+): Modifier {
+    if (!glass.isEnabled) return this
+    val backdrop = glass.backdrop ?: return this
+    val effectiveBlurRadius = glass.scaledBlurRadius(blurRadius)
+    return drawBackdrop(
+        backdrop = backdrop,
+        shape = { shape },
+        effects = {
+            colorControls(brightness = 0.04f, saturation = 1.16f)
+            blur(effectiveBlurRadius.toPx())
+        },
+        highlight = { Highlight.Plain.copy(alpha = 0.58f) },
+        onDrawSurface = { drawRect(surfaceColor.copy(alpha = 0.18f)) },
     )
 }

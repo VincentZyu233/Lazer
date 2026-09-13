@@ -30,6 +30,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -76,6 +78,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.outlined.DarkMode
@@ -98,9 +101,11 @@ import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -128,9 +133,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
@@ -250,6 +257,140 @@ private fun Modifier.capturedPageBackground(backdrop: LayerBackdrop): Modifier =
 @Composable
 private fun isLandscapeLayout(): Boolean =
     LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+@Composable
+private fun LiquidGlassIconButton(
+    onClick: () -> Unit,
+    contentDescription: String,
+    glass: LazerLiquidGlass,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tint: Color = Color.Unspecified,
+    size: Dp = 48.dp,
+    content: @Composable () -> Unit,
+) {
+    if (!glass.isEnabled) {
+        IconButton(
+            onClick = onClick,
+            modifier = modifier.size(size).semantics { this.contentDescription = contentDescription },
+            enabled = enabled,
+            content = content,
+        )
+        return
+    }
+
+    val colors = MaterialTheme.colorScheme
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressProgress by animateFloatAsState(
+        targetValue = if (isPressed && enabled) 1f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium,
+        ),
+        label = "glass-icon-press",
+    )
+    var focused by remember { mutableStateOf(false) }
+    val contentColor = when {
+        !enabled -> colors.onSurface.copy(alpha = 0.38f)
+        tint.isSpecified -> colors.onPrimary
+        else -> colors.onSurface
+    }
+    CompositionLocalProvider(LocalContentColor provides contentColor) {
+        Box(
+            modifier
+                .liquidGlassControlSurface(
+                    glass = glass,
+                    shape = CircleShape,
+                    surfaceColor = colors.surface,
+                    tint = tint,
+                    pressProgress = pressProgress,
+                )
+                .size(size)
+                .then(
+                    if (focused) Modifier.border(2.dp, colors.primary, CircleShape) else Modifier,
+                )
+                .clip(CircleShape)
+                .onFocusChanged { focused = it.isFocused }
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    enabled = enabled,
+                    role = Role.Button,
+                    onClick = onClick,
+                )
+                .semantics { this.contentDescription = contentDescription },
+            contentAlignment = Alignment.Center,
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun LiquidGlassPillButton(
+    onClick: () -> Unit,
+    glass: LazerLiquidGlass,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    tint: Color = MaterialTheme.colorScheme.primary,
+    content: @Composable RowScope.() -> Unit,
+) {
+    if (!glass.isEnabled) {
+        Button(
+            onClick = onClick,
+            modifier = modifier,
+            enabled = enabled,
+            shape = RoundedCornerShape(100.dp),
+            content = content,
+        )
+        return
+    }
+
+    val colors = MaterialTheme.colorScheme
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val pressProgress by animateFloatAsState(
+        targetValue = if (isPressed && enabled) 1f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMedium,
+        ),
+        label = "glass-pill-press",
+    )
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(100.dp)
+    val contentColor = if (enabled) colors.onPrimary else colors.onPrimary.copy(alpha = 0.45f)
+    CompositionLocalProvider(LocalContentColor provides contentColor) {
+        Row(
+            modifier
+                .liquidGlassControlSurface(
+                    glass = glass,
+                    shape = shape,
+                    surfaceColor = colors.surface,
+                    tint = tint,
+                    pressProgress = pressProgress,
+                )
+                .heightIn(min = 50.dp)
+                .then(
+                    if (focused) Modifier.border(2.dp, colors.onPrimary, shape) else Modifier,
+                )
+                .clip(shape)
+                .onFocusChanged { focused = it.isFocused }
+                .clickable(
+                    interactionSource = interactionSource,
+                    indication = null,
+                    enabled = enabled,
+                    role = Role.Button,
+                    onClick = onClick,
+                )
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
+    }
+}
 
 @Composable
 private fun ThemeButton(
@@ -524,6 +665,9 @@ fun AndroidLazerApp() {
             } else {
                 0.dp
             }
+            // The Liquid Glass playlist owns the status-bar backdrop. Do not leave the global
+            // wallpaper exposed above its artwork-derived background.
+            val playlistOwnsStatusBarBackdrop = liquidGlass.isEnabled && mainPage.kind == AndroidMainPageKind.PLAYLIST
             // Android 16 forces edge-to-edge. Keep the visual canvas under the status bar, while
             // placing every interactive root-page element below its dynamic inset.
             CompositionLocalProvider(
@@ -539,7 +683,7 @@ fun AndroidLazerApp() {
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(statusBarTopInset()),
+                        .height(if (playlistOwnsStatusBarBackdrop) 0.dp else statusBarTopInset()),
                 )
                 Box(Modifier.weight(1f)) {
                     if (
@@ -550,6 +694,7 @@ fun AndroidLazerApp() {
                             controller = controller,
                             currentTrackId = playback.track?.id,
                             onPlay = playFromQueue,
+                            showHeaderControls = !liquidGlass.isEnabled,
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -608,14 +753,17 @@ fun AndroidLazerApp() {
                                         tracks = page.tracks,
                                         isLoading = page.isLoading,
                                         currentId = playback.track?.id,
+                                        liquidGlassEnabled = controller.liquidGlassEnabled,
+                                        liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                                         onBack = controller::closePlaylist,
-                                        onPlay = { track -> playFromQueue(page.tracks, track) },
+                                        onPlay = playFromQueue,
                                     )
                                 }
                                 AndroidMainPageKind.ROOT -> AndroidRootContent(
                                     controller = controller,
                                     currentTrackId = playback.track?.id,
                                     onPlay = playFromQueue,
+                                    showHeaderControls = !liquidGlass.isEnabled,
                                     modifier = Modifier.fillMaxSize(),
                                 )
                             }
@@ -634,6 +782,34 @@ fun AndroidLazerApp() {
                     )
                 }
             }
+            }
+
+            if (liquidGlass.isEnabled && mainPage.kind == AndroidMainPageKind.ROOT) {
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .statusBarsPadding()
+                        .padding(top = 12.dp, end = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    LiquidGlassIconButton(
+                        onClick = controller::toggleTheme,
+                        contentDescription = tr("player.toggle_theme"),
+                        glass = liquidGlass,
+                    ) {
+                        Icon(
+                            if (controller.isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
+                            null,
+                        )
+                    }
+                    LiquidGlassIconButton(
+                        onClick = controller::openSettings,
+                        contentDescription = tr("player.open_settings"),
+                        glass = liquidGlass,
+                    ) {
+                        Icon(Icons.Outlined.Settings, null)
+                    }
+                }
             }
 
             if (liquidGlass.isEnabled) {
@@ -800,11 +976,13 @@ private fun AndroidRootContent(
     controller: AndroidGatewayController,
     currentTrackId: Long?,
     onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+    showHeaderControls: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
         MobileHeader(
             controller = controller,
+            showControls = showHeaderControls,
             modifier = Modifier.padding(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 6.dp),
         )
         AnimatedContent(
@@ -886,29 +1064,78 @@ private fun DiscoverPage(controller: AndroidGatewayController, currentId: Long?,
 
 @Composable
 private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
-    ) {
-        item { Text(tr("search.title"), style = MaterialTheme.typography.displaySmall) }
-        item {
-            OutlinedTextField(
-                value = controller.searchQuery,
-                onValueChange = controller::updateSearchQuery,
-                modifier = Modifier.fillMaxWidth(),
-                leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                placeholder = { Text(tr("search.hint")) },
-                singleLine = true,
-                shape = RoundedCornerShape(16.dp),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            )
+    val colors = MaterialTheme.colorScheme
+    val searchGlass = rememberLazerLiquidGlass(
+        enabled = controller.liquidGlassEnabled,
+        backgroundColor = colors.background,
+        blurIntensity = controller.liquidGlassBlurIntensity,
+    )
+    val searchShape = RoundedCornerShape(28.dp)
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().captureLiquidGlass(searchGlass),
+            contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+        ) {
+            item { Text(tr("search.title"), style = MaterialTheme.typography.displaySmall) }
+            if (searchGlass.isEnabled) {
+                // The fixed search control floats above this reserved space and samples the list.
+                item { Spacer(Modifier.height(58.dp)) }
+            } else {
+                item {
+                    OutlinedTextField(
+                        value = controller.searchQuery,
+                        onValueChange = controller::updateSearchQuery,
+                        modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                        placeholder = { Text(tr("search.hint")) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    )
+                }
+            }
+            when {
+                controller.searchQuery.isBlank() -> item { QuietState(tr("search.empty")) }
+                controller.isSearching -> item { QuietState(tr("search.searching")) }
+                controller.searchResults.isEmpty() -> item { QuietState(tr("search.no_results")) }
+                else -> items(controller.searchResults, key = AndroidTrack::id) {
+                    TrackRow(it, it.id == currentId) { onPlay(it) }
+                }
+            }
         }
-        when {
-            controller.searchQuery.isBlank() -> item { QuietState(tr("search.empty")) }
-            controller.isSearching -> item { QuietState(tr("search.searching")) }
-            controller.searchResults.isEmpty() -> item { QuietState(tr("search.no_results")) }
-            else -> items(controller.searchResults, key = AndroidTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
+        if (searchGlass.isEnabled) {
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, top = 62.dp, end = 20.dp),
+            ) {
+                OutlinedTextField(
+                    value = controller.searchQuery,
+                    onValueChange = controller::updateSearchQuery,
+                    modifier = Modifier
+                        .liquidGlassFrostedSurface(
+                            glass = searchGlass,
+                            shape = searchShape,
+                            surfaceColor = colors.surface,
+                            blurRadius = 6.dp,
+                        )
+                        .fillMaxWidth(),
+                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                    placeholder = { Text(tr("search.hint")) },
+                    singleLine = true,
+                    shape = searchShape,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedBorderColor = colors.primary.copy(alpha = 0.62f),
+                        unfocusedBorderColor = Color.Transparent,
+                    ),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                )
+            }
         }
     }
 }
@@ -1228,18 +1455,18 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(role = Role.Switch) {
-                            controller.updateExclusiveAudio(!controller.exclusiveAudio)
+                            controller.updateIndependentPlayback(!controller.independentPlayback)
                         }
                         .padding(horizontal = 18.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(tr("settings.exclusive.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(tr("settings.independent.title"), style = MaterialTheme.typography.titleSmall)
                         Text(
-                            if (controller.exclusiveAudio) {
-                                tr("settings.exclusive.on")
+                            if (controller.independentPlayback) {
+                                tr("settings.independent.on")
                             } else {
-                                tr("settings.exclusive.off")
+                                tr("settings.independent.off")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
@@ -1248,8 +1475,44 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     Spacer(Modifier.width(12.dp))
                     LazerSwitch(
                         engine = controller.themeEngine,
-                        checked = controller.exclusiveAudio,
+                        checked = controller.independentPlayback,
                         onCheckedChange = null,
+                    )
+                }
+            }
+        }
+        item {
+            SettingsCard {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            enabled = !controller.independentPlayback,
+                            role = Role.Switch,
+                        ) { controller.updateExclusiveAudio(!controller.exclusiveAudio) }
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.exclusive.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (controller.independentPlayback) {
+                                tr("settings.exclusive.independent")
+                            } else if (controller.exclusiveAudio) {
+                                tr("settings.exclusive.on")
+                            } else {
+                                tr("settings.exclusive.off.android")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = controller.exclusiveAudio && !controller.independentPlayback,
+                        onCheckedChange = null,
+                        enabled = !controller.independentPlayback,
                     )
                 }
             }
@@ -1783,10 +2046,53 @@ private fun PlaylistDetail(
     tracks: List<AndroidTrack>,
     isLoading: Boolean,
     currentId: Long?,
+    liquidGlassEnabled: Boolean,
+    liquidGlassBlurIntensity: Float,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
-    onPlay: (AndroidTrack) -> Unit,
+    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
 ) {
+    val colors = MaterialTheme.colorScheme
+    val pageGlass = rememberLazerLiquidGlass(
+        enabled = liquidGlassEnabled,
+        backgroundColor = colors.background,
+        blurIntensity = liquidGlassBlurIntensity,
+    )
+    if (pageGlass.isEnabled) {
+        LiquidGlassPlaylistDetail(
+            playlist = playlist,
+            tracks = tracks,
+            isLoading = isLoading,
+            currentId = currentId,
+            glass = pageGlass,
+            modifier = modifier,
+            onBack = onBack,
+            onPlay = onPlay,
+        )
+    } else {
+        StandardPlaylistDetail(
+            playlist = playlist,
+            tracks = tracks,
+            isLoading = isLoading,
+            currentId = currentId,
+            modifier = modifier,
+            onBack = onBack,
+            onPlay = onPlay,
+        )
+    }
+}
+
+@Composable
+private fun StandardPlaylistDetail(
+    playlist: AndroidPlaylist,
+    tracks: List<AndroidTrack>,
+    isLoading: Boolean,
+    currentId: Long?,
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
+    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val currentTrackIndex = tracks.indexOfFirst { it.id == currentId }
@@ -1797,35 +2103,40 @@ private fun PlaylistDetail(
             contentPadding = PaddingValues(20.dp, 10.dp, 20.dp, (if (currentTrackIndex >= 0) 96.dp else 20.dp) + LocalAndroidContentBottomInset.current),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("playlist.back")) }
-                Text(tr("playlist.title"), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                MobileArtwork(playlist.coverUrl, playlist.title, Modifier.size(96.dp), 20.dp)
-                Spacer(Modifier.width(18.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(playlist.title, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(5.dp))
-                    Text(playlist.subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(tr("playlist.tracks", tracks.size.takeIf { it > 0 } ?: playlist.trackCount), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("playlist.back")) }
+                    Text(tr("playlist.title"), style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
                 }
             }
-        }
-        if (isLoading && tracks.isEmpty()) item { QuietState(tr("playlist.opening")) }
-        if (!isLoading && tracks.isEmpty()) item { QuietState(tr("playlist.empty")) }
-            items(tracks, key = AndroidTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    MobileArtwork(playlist.coverUrl, playlist.title, Modifier.size(96.dp), 20.dp)
+                    Spacer(Modifier.width(18.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(playlist.title, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(5.dp))
+                        Text(playlist.subtitle, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(tr("playlist.tracks", tracks.size.takeIf { it > 0 } ?: playlist.trackCount), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    }
+                }
+            }
+            if (isLoading && tracks.isEmpty()) item { QuietState(tr("playlist.opening")) }
+            if (!isLoading && tracks.isEmpty()) item { QuietState(tr("playlist.empty")) }
+            items(tracks, key = AndroidTrack::id) { track ->
+                TrackRow(track, track.id == currentId) { onPlay(tracks, track) }
+            }
         }
         if (currentTrackIndex >= 0) {
+            val locateCurrent: () -> Unit = {
+                scope.launch { listState.animateScrollToItem(currentTrackIndex + 2) }
+            }
             ExtendedFloatingActionButton(
-                onClick = { scope.launch { listState.animateScrollToItem(currentTrackIndex + 2) } },
+                onClick = locateCurrent,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 20.dp),
                 shape = RoundedCornerShape(16.dp),
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                contentColor = MaterialTheme.colorScheme.primary,
+                containerColor = colors.surfaceContainerHigh,
+                contentColor = colors.primary,
                 elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 4.dp, pressedElevation = 2.dp),
                 icon = { Icon(Icons.Outlined.MyLocation, null, Modifier.size(18.dp)) },
                 text = { Text(tr("playlist.locate"), style = MaterialTheme.typography.labelLarge) },
@@ -1835,14 +2146,289 @@ private fun PlaylistDetail(
 }
 
 @Composable
-private fun MobileHeader(controller: AndroidGatewayController, modifier: Modifier = Modifier) {
+private fun LiquidGlassPlaylistDetail(
+    playlist: AndroidPlaylist,
+    tracks: List<AndroidTrack>,
+    isLoading: Boolean,
+    currentId: Long?,
+    glass: LazerLiquidGlass,
+    modifier: Modifier = Modifier,
+    onBack: () -> Unit,
+    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val currentTrackIndex = tracks.indexOfFirst { it.id == currentId }
+    // Keep the cover as the visual anchor without making it dominate the song list.
+    val artworkSize = (LocalConfiguration.current.screenWidthDp.dp * 0.48f).coerceIn(150.dp, 220.dp)
+    val primaryText = Color(0xFFF4FAFD)
+    val secondaryText = primaryText.copy(alpha = 0.78f)
+    val prominentInk = Color(0xFF183246)
+    val artworkShape = RoundedCornerShape(28.dp)
+    val hasTracks = tracks.isNotEmpty()
+
+    Box(modifier.fillMaxSize()) {
+        AndroidPlaylistFlowBackground(
+            playlist = playlist,
+            modifier = Modifier
+                .fillMaxSize()
+                .captureLiquidGlass(glass),
+            cornerRadius = 0.dp,
+            veil = Color(0xFF0B2637).copy(alpha = 0.82f),
+        )
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize().statusBarsPadding(),
+            contentPadding = PaddingValues(
+                top = 39.dp,
+                bottom = 28.dp + LocalAndroidContentBottomInset.current,
+            ),
+        ) {
+            item(key = "playlist-hero") {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    MobileArtwork(
+                        url = playlist.coverUrl,
+                        label = playlist.title,
+                        modifier = Modifier
+                            .size(artworkSize)
+                            .border(1.dp, Color.White.copy(alpha = 0.20f), artworkShape),
+                        cornerRadius = 28.dp,
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Text(
+                        text = playlist.title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = primaryText,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (playlist.subtitle.isNotBlank()) {
+                        Spacer(Modifier.height(7.dp))
+                        Text(
+                            text = playlist.subtitle,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = primaryText.copy(alpha = 0.88f),
+                            textAlign = TextAlign.Center,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        text = tr("playlist.tracks", tracks.size.takeIf { it > 0 } ?: playlist.trackCount),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = secondaryText,
+                    )
+                    Spacer(Modifier.height(22.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        LiquidGlassIconButton(
+                            onClick = {
+                                val shuffled = tracks.shuffled()
+                                shuffled.firstOrNull()?.let { onPlay(shuffled, it) }
+                            },
+                            contentDescription = tr("player.shuffle"),
+                            glass = glass,
+                            enabled = hasTracks,
+                            size = 56.dp,
+                        ) {
+                            Icon(
+                                Icons.Filled.Shuffle,
+                                null,
+                                Modifier.size(24.dp),
+                                tint = primaryText.copy(alpha = if (hasTracks) 1f else 0.38f),
+                            )
+                        }
+                        LiquidGlassPillButton(
+                            onClick = { tracks.firstOrNull()?.let { onPlay(tracks, it) } },
+                            glass = glass,
+                            modifier = Modifier.widthIn(min = 152.dp, max = 210.dp),
+                            enabled = hasTracks,
+                            tint = Color.White.copy(alpha = if (hasTracks) 1f else 0.42f),
+                        ) {
+                            Icon(
+                                Icons.Filled.PlayArrow,
+                                null,
+                                Modifier.size(22.dp),
+                                tint = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
+                            )
+                            Text(
+                                tr("playlist.play_all"),
+                                style = MaterialTheme.typography.titleMedium,
+                                color = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        if (currentTrackIndex >= 0) {
+                            LiquidGlassIconButton(
+                                onClick = {
+                                    scope.launch { listState.animateScrollToItem(currentTrackIndex + 1) }
+                                },
+                                contentDescription = tr("playlist.locate"),
+                                glass = glass,
+                                size = 56.dp,
+                            ) {
+                                Icon(Icons.Outlined.MyLocation, null, Modifier.size(23.dp), tint = primaryText)
+                            }
+                        } else {
+                            Spacer(Modifier.size(56.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(28.dp))
+                }
+            }
+
+            if (tracks.isEmpty()) {
+                item(key = "playlist-state") {
+                    Text(
+                        text = if (isLoading) tr("playlist.opening") else tr("playlist.empty"),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 34.dp),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = secondaryText,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else {
+                itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+                    LiquidGlassPlaylistTrackRow(
+                        index = index,
+                        track = track,
+                        current = track.id == currentId,
+                        primaryText = primaryText,
+                        secondaryText = secondaryText,
+                        onClick = { onPlay(tracks, track) },
+                    )
+                }
+            }
+        }
+
+        LiquidGlassIconButton(
+            onClick = onBack,
+            contentDescription = tr("playlist.back"),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .statusBarsPadding()
+                .padding(start = 18.dp, top = 6.dp),
+            glass = glass,
+            size = 56.dp,
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, Modifier.size(27.dp), tint = primaryText)
+        }
+    }
+}
+
+@Composable
+private fun LiquidGlassPlaylistTrackRow(
+    index: Int,
+    track: AndroidTrack,
+    current: Boolean,
+    primaryText: Color,
+    secondaryText: Color,
+    onClick: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(if (current) Color.White.copy(alpha = 0.09f) else Color.Transparent)
+                .clickable(role = Role.Button, onClick = onClick)
+                .padding(start = 20.dp, end = 22.dp, top = 13.dp, bottom = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.width(36.dp), contentAlignment = Alignment.CenterStart) {
+                if (current) {
+                    NowPlayingBars(color = primaryText)
+                } else {
+                    Text(
+                        text = (index + 1).toString(),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = secondaryText,
+                    )
+                }
+            }
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = track.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = primaryText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (track.artist.isNotBlank()) {
+                    Text(
+                        text = track.artist,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = secondaryText,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Text(
+                text = track.durationLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = secondaryText,
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 56.dp, end = 20.dp)
+                .height(1.dp)
+                .background(Color.White.copy(alpha = 0.12f)),
+        )
+    }
+}
+
+@Composable
+private fun NowPlayingBars(color: Color) {
+    Canvas(Modifier.size(width = 18.dp, height = 16.dp)) {
+        val barWidth = 2.5.dp.toPx()
+        val gap = (size.width - barWidth * 4f) / 3f
+        val heights = listOf(0.48f, 0.86f, 0.64f, 1f)
+        heights.forEachIndexed { index, heightFraction ->
+            val left = index * (barWidth + gap)
+            val barHeight = size.height * heightFraction
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(left, size.height - barHeight),
+                size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 2f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun MobileHeader(
+    controller: AndroidGatewayController,
+    showControls: Boolean,
+    modifier: Modifier = Modifier,
+) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text("Lazer", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
-        IconButton(onClick = controller::toggleTheme) { Icon(if (controller.isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode, tr("player.toggle_theme")) }
-        IconButton(onClick = controller::openSettings) {
-            Icon(Icons.Outlined.Settings, tr("player.open_settings"))
+        if (showControls) {
+            IconButton(onClick = controller::toggleTheme) {
+                Icon(
+                    if (controller.isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
+                    tr("player.toggle_theme"),
+                )
+            }
+            IconButton(onClick = controller::openSettings) {
+                Icon(Icons.Outlined.Settings, tr("player.open_settings"))
+            }
         }
     }
 }
@@ -1996,25 +2582,25 @@ private fun MiniPlayer(
                 onClick = onToggle,
                 modifier = Modifier.size(42.dp),
                 colors = IconButtonDefaults.iconButtonColors(
-                    containerColor = colors.primaryContainer.copy(alpha = if (glass.isEnabled) 0.78f else 1f),
+                    containerColor = if (glass.isEnabled) Color.Transparent else colors.primaryContainer,
+                    contentColor = if (glass.isEnabled) colors.onSurface else colors.onPrimaryContainer,
                 ),
             ) {
                 Icon(
                     if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                     if (isPlaying) tr("player.pause") else tr("player.play"),
-                    tint = colors.onPrimaryContainer,
                 )
             }
         }
     }
 
     if (glass.isEnabled) {
-        val shape = RoundedCornerShape(24.dp)
+        val shape = RoundedCornerShape(36.dp)
         Box(
             Modifier
                 .fillMaxWidth()
                 .padding(start = 16.dp, end = 16.dp, bottom = 2.dp)
-                .height(70.dp)
+                .height(72.dp)
                 .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 10.dp)
                 .clip(shape)
                 .clickable(role = Role.Button, onClick = onOpen)
@@ -2101,9 +2687,10 @@ private fun LiquidGlassBottomDock(
     val colors = MaterialTheme.colorScheme
     val pageBackdrop = glass.backdrop ?: return
     val isDark = colors.background.luminance() < 0.5f
-    val destinations = AndroidRootDestination.entries
-    val barShape = RoundedCornerShape(26.dp)
-    val selectorShape = RoundedCornerShape(20.dp)
+    val searchDestination = AndroidRootDestination.SEARCH
+    val destinations = AndroidRootDestination.entries.filterNot { it == searchDestination }
+    val barShape = RoundedCornerShape(36.dp)
+    val selectorShape = RoundedCornerShape(28.dp)
     val density = androidx.compose.ui.platform.LocalDensity.current
     // While a long press is active the droplet follows the finger; otherwise `pressCenter` is null
     // and the droplet rests under the selected tab.
@@ -2113,7 +2700,13 @@ private fun LiquidGlassBottomDock(
     // except the target drops behind the droplet, so only the target stays on top.
     var switchingTo by remember { mutableStateOf<AndroidRootDestination?>(null) }
     var keyboardFocusedDestination by remember { mutableStateOf<AndroidRootDestination?>(null) }
-    val activeDestination = pressedDestination ?: selected
+    var lastMainDestination by remember {
+        mutableStateOf(selected.takeUnless { it == searchDestination } ?: destinations.first())
+    }
+    LaunchedEffect(selected) {
+        if (selected != searchDestination) lastMainDestination = selected
+    }
+    val activeDestination = pressedDestination ?: lastMainDestination
     val activeIndex = destinations.indexOf(activeDestination).coerceAtLeast(0)
     // Captures the bar glass only, so the droplet can refract it as a second nested lens. The
     // droplet is a sibling of this layer, so there is no cycle.
@@ -2122,11 +2715,12 @@ private fun LiquidGlassBottomDock(
 
     // Manual bottom gesture-bar inset instead of navigationBarsPadding, so the floating glass dock
     // and a custom wallpaper do not fight over the system nav-bar region.
-    BoxWithConstraints(
+    Box(
         Modifier
             .fillMaxWidth()
             .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 10.dp + navigationBarBottomInset()),
     ) {
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(end = 82.dp)) {
         val slotWidth = maxWidth / destinations.size
         val slotWidthPx = with(density) { slotWidth.toPx() }
         val selectorWidth = slotWidth - 14.dp
@@ -2181,7 +2775,8 @@ private fun LiquidGlassBottomDock(
                         contentAlignment = Alignment.Center,
                     ) {
                         if (visible(destination)) {
-                            val active = destination == activeDestination
+                            val active = destination == activeDestination &&
+                                (isDragging || selected != searchDestination)
                             val isPressedTarget = isDragging && active
                             val activeColor = if (isPressedTarget) colors.primary else colors.onSurface
                             Column(
@@ -2289,6 +2884,9 @@ private fun LiquidGlassBottomDock(
             // is nothing to fly in when it returns to its slot.
             Box(
                 Modifier
+                    .graphicsLayer {
+                        alpha = if (selected == searchDestination && !isDragging) 0f else 1f
+                    }
                     .offset {
                         IntOffset(
                             x = (selectorCenterX.toPx() - renderedSelectorWidth.toPx() / 2f).roundToInt(),
@@ -2335,7 +2933,8 @@ private fun LiquidGlassBottomDock(
             renderIcons(priorityZero)
 
             // A separate, visually transparent interaction layer keeps the custom drag gesture
-            // intact while exposing five real tab actions to accessibility services and keyboards.
+            // intact while exposing four real main-tab actions to accessibility services and
+            // keyboards. Search is the independent circular action beside this pill.
             Row(Modifier.fillMaxSize()) {
                 destinations.forEach { destination ->
                     val focused = keyboardFocusedDestination == destination
@@ -2382,6 +2981,17 @@ private fun LiquidGlassBottomDock(
                     )
                 }
             }
+        }
+        }
+        LiquidGlassIconButton(
+            onClick = { onSelect(searchDestination) },
+            contentDescription = searchDestination.label,
+            modifier = Modifier.align(Alignment.TopEnd),
+            glass = glass,
+            tint = if (selected == searchDestination) colors.primary else Color.Unspecified,
+            size = 72.dp,
+        ) {
+            Icon(searchDestination.icon(), null, Modifier.size(26.dp))
         }
     }
 }
@@ -2452,7 +3062,7 @@ private fun NowPlayingPage(
                             .widthIn(min = 230.dp, max = 320.dp)
                             .fillMaxSize()
                             .padding(10.dp)
-                            .liquidGlassSurface(glass, RoundedCornerShape(24.dp), colors.surface)
+                            .liquidGlassSurface(glass, RoundedCornerShape(32.dp), colors.surface)
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                     ) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2531,13 +3141,12 @@ private fun NowPlayingPage(
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
+                        LiquidGlassIconButton(
                             onClick = onDismiss,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .liquidGlassSurface(glass, CircleShape, colors.surface, blurRadius = 7.dp),
+                            contentDescription = tr("player.collapse"),
+                            glass = glass,
                         ) {
-                            Icon(Icons.Filled.Close, tr("player.collapse"), tint = colors.onSurface)
+                            Icon(Icons.Filled.Close, null, tint = colors.onSurface)
                         }
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
@@ -2564,7 +3173,7 @@ private fun NowPlayingPage(
                         onClick = onLyrics,
                     )
                     Spacer(Modifier.height(20.dp))
-                    val panelShape = RoundedCornerShape(28.dp)
+                    val panelShape = RoundedCornerShape(36.dp)
                     Column(
                         Modifier
                             .fillMaxWidth()
