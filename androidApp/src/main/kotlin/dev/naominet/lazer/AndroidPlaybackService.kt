@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.RequiresApi
 import dev.naominet.lazer.gateway.AudioQuality
@@ -158,6 +159,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private lateinit var gateway: NeteaseMusicGateway
     private var player: MediaPlayer? = null
     private var loadingGeneration = 0L
+    private var preparingGeneration: Long? = null
+    private var preparationWakeLock: PowerManager.WakeLock? = null
     private var artworkGeneration = 0L
     private var artworkTrackId: Long? = null
     private var artworkBitmap: Bitmap? = null
@@ -237,6 +240,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
     private fun resolveAndPlay(track: AndroidTrack) {
         val generation = ++loadingGeneration
+        acquirePreparationWakeLock(generation)
         releasePlayer()
         abandonAudioFocus()
         requestArtwork(track)
@@ -277,6 +281,9 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                     publishError(audioFocusFailureMessage())
                     return@setOnPreparedListener
                 }
+                // prepareAsync has now completed: MediaPlayer has enough stream data buffered
+                // to own playback, so the hand-off wake lock is no longer needed.
+                releasePreparationWakeLock(generation)
                 readyPlayer.start()
                 publishCurrentState(isPreparing = false, isPlaying = true)
                 ensureForeground(track, preparing = false)
@@ -418,6 +425,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
     private fun stopPlayback(clearSession: Boolean = false) {
         ++loadingGeneration
+        releasePreparationWakeLock()
         ++artworkGeneration
         releasePlayer()
         artworkTrackId = null
@@ -459,6 +467,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
     private fun publishError(message: String) {
         ++loadingGeneration
+        releasePreparationWakeLock()
         releasePlayer()
         abandonAudioFocus()
         val previous = AndroidPlaybackStateStore.snapshot.value
@@ -754,8 +763,33 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         player = null
     }
 
+    /**
+     * A foreground service alone does not keep the CPU awake while a new stream is being resolved
+     * and prepared. Keep a short, bounded wake lock across that hand-off so background next/skip
+     * cannot suspend the process before MediaPlayer has buffered enough to begin playback.
+     */
+    private fun acquirePreparationWakeLock(generation: Long) {
+        preparingGeneration = generation
+        val wakeLock = preparationWakeLock ?: (getSystemService(POWER_SERVICE) as PowerManager)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:track-preparation")
+            .also { preparationWakeLock = it }
+        // A fresh song switch gets its own bounded window even when the prior switch was still
+        // preparing. This avoids an old timeout ending a newer switch early.
+        if (wakeLock.isHeld) wakeLock.release()
+        wakeLock.acquire(PREPARATION_WAKE_LOCK_TIMEOUT_MILLIS)
+    }
+
+    private fun releasePreparationWakeLock(generation: Long? = null) {
+        if (generation != null && preparingGeneration != generation) return
+        preparingGeneration = null
+        preparationWakeLock?.let { wakeLock ->
+            if (wakeLock.isHeld) runCatching { wakeLock.release() }
+        }
+    }
+
     override fun onDestroy() {
         ++artworkGeneration
+        releasePreparationWakeLock()
         artworkTrackId = null
         artworkBitmap = null
         releasePlayer()
@@ -783,6 +817,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         private const val NOTIFICATION_ID = 2036
         private const val PROGRESS_UPDATE_MILLIS = 100L
         private const val NETWORK_TIMEOUT_MILLIS = 10_000
+        private const val PREPARATION_WAKE_LOCK_TIMEOUT_MILLIS = 45_000L
         private const val STREAM_URL_CACHE_SIZE = 6
         private const val STREAM_URL_CACHE_TTL_MILLIS = 4 * 60_000L
         private const val TAG = "LazerPlayback"
