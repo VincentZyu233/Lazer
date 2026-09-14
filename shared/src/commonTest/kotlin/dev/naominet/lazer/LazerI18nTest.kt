@@ -16,6 +16,8 @@ class LazerI18nTest {
                 LazerI18n.switchLanguage(language)
                 assertTrue(language.displayName != "language.${language.code}")
                 assertTrue(tr("settings.title") != "settings.title")
+                assertTrue(tr("settings.cookie.title") != "settings.cookie.title")
+                assertTrue(tr("login.method.cookie") != "login.method.cookie")
                 assertTrue(tr("player.play") != "player.play")
             }
         } finally {

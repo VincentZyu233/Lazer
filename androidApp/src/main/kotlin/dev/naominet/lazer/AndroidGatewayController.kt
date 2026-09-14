@@ -40,7 +40,8 @@ enum class AndroidRootDestination(private val labelKey: String, val motionIndex:
 enum class AndroidLoginMethod(private val labelKey: String) {
     CAPTCHA("login.method.captcha"),
     PASSWORD("login.method.password"),
-    QR_CODE("login.method.qr");
+    QR_CODE("login.method.qr"),
+    COOKIE("login.method.cookie");
 
     val label: String get() = tr(labelKey)
 }
@@ -182,6 +183,8 @@ class AndroidGatewayController(context: Context) {
         private set
     var loginPassword by mutableStateOf("")
         private set
+    var loginCookie by mutableStateOf("")
+        private set
     var loginMessage by mutableStateOf<String?>(null)
         private set
     var isSendingCaptcha by mutableStateOf(false)
@@ -194,6 +197,9 @@ class AndroidGatewayController(context: Context) {
         private set
     var qrState by mutableStateOf(AndroidQrLoginState.IDLE)
         private set
+
+    val currentSessionCookie: String?
+        get() = gateway.sessionCookie?.takeIf(String::isNotBlank)
 
     init {
         LazerI18n.switchLanguage(language)
@@ -521,6 +527,7 @@ class AndroidGatewayController(context: Context) {
         qrLoginJob?.cancel()
         qrState = AndroidQrLoginState.IDLE
         qrImageData = null
+        loginCookie = ""
         loginMessage = null
     }
 
@@ -548,6 +555,11 @@ class AndroidGatewayController(context: Context) {
 
     fun updateLoginPassword(value: String) {
         loginPassword = value
+        loginMessage = null
+    }
+
+    fun updateLoginCookie(value: String) {
+        loginCookie = value
         loginMessage = null
     }
 
@@ -615,6 +627,30 @@ class AndroidGatewayController(context: Context) {
                 finishLogin(result.profile)
             } catch (_: Throwable) {
                 loginMessage = tr("login.password_fail")
+            } finally {
+                isSubmittingLogin = false
+            }
+        }
+    }
+
+    fun submitCookieLogin() {
+        val cookie = loginCookie.trim()
+        if (cookie.isBlank()) {
+            loginMessage = tr("login.cookie.required")
+            return
+        }
+        scope.launch {
+            isSubmittingLogin = true
+            loginMessage = null
+            try {
+                val response = gateway.loginWithCookie(cookie)
+                val profile = response.data?.profile
+                val hasAccount = (profile?.userId ?: 0L) > 0L ||
+                    (response.data?.account?.id ?: 0L) > 0L
+                check(hasAccount) { tr("login.cookie.fail") }
+                finishLogin(profile)
+            } catch (_: Throwable) {
+                loginMessage = tr("login.cookie.fail")
             } finally {
                 isSubmittingLogin = false
             }
@@ -943,6 +979,7 @@ class AndroidGatewayController(context: Context) {
         restoreCachedSignedInContent(profile)
         loginPassword = ""
         loginCaptcha = ""
+        loginCookie = ""
         isLoginVisible = false
         qrLoginJob = null
         qrState = AndroidQrLoginState.IDLE

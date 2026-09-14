@@ -23,6 +23,46 @@ fun normalizeGatewayBaseUrl(value: String): String? {
     return candidate.takeIf(GatewayBaseUrlPattern::matches)
 }
 
+private val GatewayCookieNamePattern = Regex("^[!#$%&'*+\\-.^_`|~0-9A-Za-z]+$")
+private val GatewaySetCookieAttributeNames = setOf(
+    "domain",
+    "expires",
+    "httponly",
+    "max-age",
+    "partitioned",
+    "path",
+    "priority",
+    "sameparty",
+    "samesite",
+    "secure",
+)
+
+/**
+ * Converts a Cookie header or the Gateway's flattened Set-Cookie response into a compact Cookie
+ * header. Set-Cookie attributes are discarded and the last value wins when a name is repeated.
+ */
+fun normalizeGatewaySessionCookie(value: String?): String? {
+    if (value.isNullOrBlank()) return null
+    val cookies = linkedMapOf<String, String>()
+    value.split(';').forEach { rawSegment ->
+        val segment = rawSegment.trim()
+            .removePrefix("Set-Cookie:")
+            .removePrefix("set-cookie:")
+            .trim()
+        val separator = segment.indexOf('=')
+        if (separator <= 0) return@forEach
+        val name = segment.substring(0, separator).trim()
+        val cookieValue = segment.substring(separator + 1).trim()
+        if (!GatewayCookieNamePattern.matches(name)) return@forEach
+        if (name.lowercase() in GatewaySetCookieAttributeNames) return@forEach
+        if ('\r' in cookieValue || '\n' in cookieValue) return@forEach
+        cookies[name] = cookieValue
+    }
+    return cookies.entries
+        .joinToString(separator = "; ") { (name, cookieValue) -> "$name=$cookieValue" }
+        .takeIf(String::isNotEmpty)
+}
+
 /**
  * Connection settings for an API Enhanced Gateway instance.
  *
