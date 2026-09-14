@@ -61,7 +61,13 @@ internal fun visiblePlaylistTracks(
     refreshedHomeTracks: List<TrackItem>,
 ): List<TrackItem> = if (activePlaylist == null) refreshedHomeTracks else activePlaylistTracks
 
-enum class LoginMethod { QR_CODE, PASSWORD }
+enum class LoginMethod(private val labelKey: String) {
+    QR_CODE("login.method.qr"),
+    PASSWORD("login.method.password"),
+    COOKIE("login.method.cookie");
+
+    val label: String get() = tr(labelKey)
+}
 
 enum class QrLoginState {
     IDLE,
@@ -295,6 +301,8 @@ class DesktopPlayerController(
         private set
     val isSignedIn: Boolean
         get() = currentUser != null
+    val currentSessionCookie: String?
+        get() = gateway.sessionCookie?.takeIf(String::isNotBlank)
 
     var isLoginVisible by mutableStateOf(false)
         private set
@@ -309,6 +317,8 @@ class DesktopPlayerController(
     var loginIdentifier by mutableStateOf("")
         private set
     var loginPassword by mutableStateOf("")
+        private set
+    var loginCookie by mutableStateOf("")
         private set
     var loginError by mutableStateOf<String?>(null)
         private set
@@ -1019,12 +1029,13 @@ class DesktopPlayerController(
         isLoginVisible = false
         qrLoginJob?.cancel()
         qrLoginState = QrLoginState.IDLE
+        loginCookie = ""
     }
 
     fun selectLoginMethod(method: LoginMethod) {
         loginMethod = method
         loginError = null
-        if (method == LoginMethod.PASSWORD) {
+        if (method != LoginMethod.QR_CODE) {
             qrLoginJob?.cancel()
             qrLoginState = QrLoginState.IDLE
         }
@@ -1045,6 +1056,11 @@ class DesktopPlayerController(
 
     fun updateLoginPassword(value: String) {
         loginPassword = value
+        loginError = null
+    }
+
+    fun updateLoginCookie(value: String) {
+        loginCookie = value
         loginError = null
     }
 
@@ -1129,6 +1145,30 @@ class DesktopPlayerController(
         }
     }
 
+    fun submitCookieLogin() {
+        val cookie = loginCookie.trim()
+        if (cookie.isBlank()) {
+            loginError = tr("login.cookie.required")
+            return
+        }
+        scope.launch {
+            isSubmittingLogin = true
+            loginError = null
+            try {
+                val response = gateway.loginWithCookie(cookie)
+                val profile = response.data?.profile
+                val hasAccount = (profile?.userId ?: 0L) > 0L ||
+                    (response.data?.account?.id ?: 0L) > 0L
+                check(hasAccount) { tr("login.cookie.fail") }
+                finishSignInAndClose(profile)
+            } catch (error: Throwable) {
+                loginError = error.toFriendlyMessage(tr("login.cookie.fail"))
+            } finally {
+                isSubmittingLogin = false
+            }
+        }
+    }
+
     fun logout() {
         playlistJob?.cancel()
         playlistRequestGeneration += 1
@@ -1164,6 +1204,7 @@ class DesktopPlayerController(
         playlistCache.saveCurrentUser(profile)
         restoreCachedUserLibrary(profile)
         loginPassword = ""
+        loginCookie = ""
         loginError = null
         isLoginVisible = false
         qrLoginState = QrLoginState.IDLE

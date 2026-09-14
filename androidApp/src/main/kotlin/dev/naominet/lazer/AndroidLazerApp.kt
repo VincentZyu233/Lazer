@@ -1,6 +1,7 @@
 package dev.naominet.lazer
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -147,6 +148,8 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -1226,6 +1229,10 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
     ) { uri -> uri?.let(controller::setBackgroundImage) }
     var isAudioQualitySheetVisible by remember { mutableStateOf(false) }
     var isCacheSheetVisible by remember { mutableStateOf(false) }
+    var isCookieSheetVisible by remember { mutableStateOf(false) }
+    var cookieCopied by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
     var followDelaySliderValue by remember(controller.lyricFollowDelayMillis) {
         mutableFloatStateOf(controller.lyricFollowDelayMillis.toFloat())
     }
@@ -1834,6 +1841,33 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
             }
         }
         item { SectionTitle(tr("settings.account")) }
+        item {
+            SettingsCard(
+                modifier = Modifier.clickable(role = Role.Button) {
+                    cookieCopied = false
+                    isCookieSheetVisible = true
+                },
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.cookie.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("settings.cookie.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        tr("settings.cookie.read"),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = colors.primary,
+                    )
+                }
+            }
+        }
         if (controller.isSignedIn) {
             val user = controller.currentUser!!
             item {
@@ -1876,6 +1910,21 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 isCacheSheetVisible = false
             },
             onDismiss = { isCacheSheetVisible = false },
+        )
+    }
+    if (isCookieSheetVisible) {
+        CurrentCookieSheet(
+            cookie = controller.currentSessionCookie,
+            copied = cookieCopied,
+            onCopy = { cookie ->
+                coroutineScope.launch {
+                    clipboard.setClipEntry(
+                        ClipEntry(ClipData.newPlainText(tr("login.cookie.label"), cookie)),
+                    )
+                    cookieCopied = true
+                }
+            },
+            onDismiss = { isCookieSheetVisible = false },
         )
     }
 }
@@ -1966,6 +2015,64 @@ private fun CacheChoiceSheet(
             }
             ThemeTextButton(onClick = onClearPlaylists, modifier = Modifier.fillMaxWidth()) {
                 Text(tr("settings.cache.clear.playlists"), color = colors.error)
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+private fun CurrentCookieSheet(
+    cookie: String?,
+    copied: Boolean,
+    onCopy: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = colors.surface,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 24.dp, end = 24.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(tr("settings.cookie.title"), style = MaterialTheme.typography.headlineSmall)
+            Text(
+                tr("settings.cookie.warning"),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = cookie ?: tr("settings.cookie.empty"),
+                onValueChange = {},
+                modifier = Modifier.fillMaxWidth(),
+                readOnly = true,
+                minLines = 3,
+                maxLines = 6,
+                textStyle = MaterialTheme.typography.bodySmall,
+                shape = RoundedCornerShape(14.dp),
+            )
+            if (copied) {
+                Text(
+                    tr("settings.cookie.copied"),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.primary,
+                )
+            }
+            if (cookie != null) {
+                ThemeButton(
+                    onClick = { onCopy(cookie) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(tr("settings.cookie.copy"))
+                }
+            }
+            ThemeTextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+                Text(tr("login.close"))
             }
         }
     }
@@ -3399,10 +3506,18 @@ private fun LoginSheet(
         ) {
             Text(tr("login.continue"), style = MaterialTheme.typography.headlineSmall)
             Text(tr("login.sub.mobile"), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 AndroidLoginMethod.entries.forEach { method ->
-                    ThemeTextButton(onClick = { controller.selectLoginMethod(method) }) {
-                        Text(method.label, color = if (method == controller.loginMethod) colors.primary else colors.onSurfaceVariant, fontWeight = if (method == controller.loginMethod) FontWeight.SemiBold else FontWeight.Normal)
+                    ThemeTextButton(
+                        onClick = { controller.selectLoginMethod(method) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            method.label,
+                            color = if (method == controller.loginMethod) colors.primary else colors.onSurfaceVariant,
+                            fontWeight = if (method == controller.loginMethod) FontWeight.SemiBold else FontWeight.Normal,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
@@ -3410,6 +3525,7 @@ private fun LoginSheet(
                 AndroidLoginMethod.CAPTCHA -> CaptchaLogin(controller)
                 AndroidLoginMethod.PASSWORD -> PasswordLogin(controller)
                 AndroidLoginMethod.QR_CODE -> QrLogin(controller)
+                AndroidLoginMethod.COOKIE -> CookieLogin(controller)
             }
             controller.loginMessage?.let {
                 Text(
@@ -3459,6 +3575,35 @@ private fun PasswordLogin(controller: AndroidGatewayController) {
             modifier = Modifier.fillMaxWidth(),
             enabled = !controller.isSubmittingLogin,
         ) { Text(if (controller.isSubmittingLogin) tr("login.submitting") else tr("login.pw.submit")) }
+    }
+}
+
+@Composable
+private fun CookieLogin(controller: AndroidGatewayController) {
+    val colors = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(tr("login.cookie.title"), style = MaterialTheme.typography.titleMedium)
+        Text(
+            tr("login.cookie.hint"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = controller.loginCookie,
+            onValueChange = controller::updateLoginCookie,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(tr("login.cookie.label")) },
+            singleLine = true,
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+        )
+        ThemeButton(
+            onClick = controller::submitCookieLogin,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !controller.isSubmittingLogin,
+        ) {
+            Text(if (controller.isSubmittingLogin) tr("login.submitting") else tr("login.cookie.submit"))
+        }
     }
 }
 

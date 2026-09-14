@@ -46,6 +46,8 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -64,6 +66,7 @@ import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
 import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.awt.datatransfer.StringSelection
 import java.util.*
 import kotlin.math.absoluteValue
 import kotlin.math.pow
@@ -667,11 +670,16 @@ private fun MainContent(
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 private fun DesktopSettingsPage(
     controller: DesktopPlayerController,
     modifier: Modifier = Modifier,
 ) {
     var cacheDialogVisible by remember { mutableStateOf(false) }
+    var cookieDialogVisible by remember { mutableStateOf(false) }
+    var cookieCopied by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboard.current
+    val coroutineScope = rememberCoroutineScope()
     var followDelaySliderValue by remember(controller.lyricFollowDelayMillis) {
         mutableFloatStateOf(controller.lyricFollowDelayMillis.toFloat())
     }
@@ -1078,6 +1086,29 @@ private fun DesktopSettingsPage(
                     }
                 }
                 HorizontalDivider()
+                Text(tr("settings.account"), style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.cookie.title"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            tr("settings.cookie.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(
+                        onClick = {
+                            cookieCopied = false
+                            cookieDialogVisible = true
+                        },
+                    ) {
+                        Text(tr("settings.cookie.read"))
+                    }
+                }
+                HorizontalDivider()
                 Text(tr("settings.service"), style = MaterialTheme.typography.titleSmall)
                 Text(
                     tr("settings.service.hint"),
@@ -1147,6 +1178,53 @@ private fun DesktopSettingsPage(
             },
             confirmButton = {
                 TextButton(onClick = { cacheDialogVisible = false }) { Text(tr("settings.cancel")) }
+            },
+        )
+    }
+    if (cookieDialogVisible) {
+        val cookie = controller.currentSessionCookie
+        AlertDialog(
+            onDismissRequest = { cookieDialogVisible = false },
+            title = { Text(tr("settings.cookie.title")) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        tr("settings.cookie.warning"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        value = cookie ?: tr("settings.cookie.empty"),
+                        onValueChange = {},
+                        modifier = Modifier.fillMaxWidth(),
+                        readOnly = true,
+                        minLines = 3,
+                        maxLines = 6,
+                        textStyle = MaterialTheme.typography.bodySmall,
+                    )
+                    if (cookieCopied) {
+                        Text(
+                            tr("settings.cookie.copied"),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                if (cookie != null) {
+                    TextButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                clipboard.setClipEntry(ClipEntry(StringSelection(cookie)))
+                                cookieCopied = true
+                            }
+                        },
+                    ) { Text(tr("settings.cookie.copy")) }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { cookieDialogVisible = false }) { Text(tr("login.close")) }
             },
         )
     }
@@ -2963,10 +3041,10 @@ private fun LoginOverlay(controller: DesktopPlayerController) {
                     Spacer(Modifier.height(14.dp))
                     LoginMethodSwitch(controller)
                     Spacer(Modifier.height(22.dp))
-                    if (controller.loginMethod == LoginMethod.QR_CODE) {
-                        QrLoginContent(controller)
-                    } else {
-                        PasswordLoginContent(controller)
+                    when (controller.loginMethod) {
+                        LoginMethod.QR_CODE -> QrLoginContent(controller)
+                        LoginMethod.PASSWORD -> PasswordLoginContent(controller)
+                        LoginMethod.COOKIE -> CookieLoginContent(controller)
                     }
                 }
             }
@@ -2988,7 +3066,11 @@ private fun LoginMethodSwitch(controller: DesktopPlayerController) {
                     .clickable { controller.selectLoginMethod(method) },
                 contentAlignment = Alignment.Center,
             ) {
-                Text(if (method == LoginMethod.QR_CODE) tr("login.qr") else tr("login.password"), style = MaterialTheme.typography.labelMedium, color = if (selected) colors.onSurface else colors.onSurfaceVariant)
+                Text(
+                    method.label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (selected) colors.onSurface else colors.onSurfaceVariant,
+                )
             }
         }
     }
@@ -3085,6 +3167,48 @@ private fun PasswordLoginContent(controller: DesktopPlayerController) {
                 Spacer(Modifier.width(8.dp))
             }
             Text(if (controller.isSubmittingLogin) tr("login.submitting") else tr("login.submit"))
+        }
+    }
+}
+
+@Composable
+private fun CookieLoginContent(controller: DesktopPlayerController) {
+    val colors = MaterialTheme.colorScheme
+    Column(Modifier.fillMaxWidth()) {
+        Text(tr("login.cookie.title"), style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(5.dp))
+        Text(
+            tr("login.cookie.hint"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(20.dp))
+        OutlinedTextField(
+            value = controller.loginCookie,
+            onValueChange = controller::updateLoginCookie,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(tr("login.cookie.label")) },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            shape = RoundedCornerShape(13.dp),
+            colors = quietTextFieldColors(),
+        )
+        controller.loginError?.let {
+            Spacer(Modifier.height(9.dp))
+            Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error)
+        }
+        Spacer(Modifier.height(20.dp))
+        Button(
+            onClick = controller::submitCookieLogin,
+            enabled = !controller.isSubmittingLogin,
+            modifier = Modifier.fillMaxWidth().height(46.dp),
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            if (controller.isSubmittingLogin) {
+                CircularProgressIndicator(Modifier.size(17.dp), strokeWidth = 2.dp, color = colors.onPrimary)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(if (controller.isSubmittingLogin) tr("login.submitting") else tr("login.cookie.submit"))
         }
     }
 }

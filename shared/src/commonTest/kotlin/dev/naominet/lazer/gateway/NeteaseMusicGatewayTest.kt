@@ -23,6 +23,32 @@ import kotlin.test.assertTrue
 class NeteaseMusicGatewayTest {
 
     @Test
+    fun `flattened Set-Cookie values are compacted and deduplicated`() {
+        val rawCookie = buildString {
+            append("MUSIC_U=old-session; Path=/; Max-Age=100; HttpOnly; ")
+            append("MUSIC_A_T=access-token; Path=/; SameSite=None; Secure; ")
+            append("MUSIC_U=current-session; Expires=Wed, 21 Oct 2030 07:28:00 GMT")
+        }
+
+        assertEquals(
+            "MUSIC_U=current-session; MUSIC_A_T=access-token",
+            normalizeGatewaySessionCookie(rawCookie),
+        )
+    }
+
+    @Test
+    fun `reading a saved session migrates a verbose cookie in place`() {
+        val session = InMemoryGatewaySessionStore(
+            "MUSIC_U=current-session; Path=/; Path=/; Max-Age=100; HttpOnly",
+        )
+        val client = HttpClient(MockEngine { error("No request expected") })
+        val gateway = gateway(client, session)
+
+        assertEquals("MUSIC_U=current-session", gateway.sessionCookie)
+        assertEquals("MUSIC_U=current-session", session.cookie)
+    }
+
+    @Test
     fun `random Chinese IP is enabled by default for every gateway request`() = runTest {
         val client = HttpClient(MockEngine { request ->
             assertEquals("true", request.url.parameters["randomCNIP"])
@@ -232,6 +258,43 @@ class NeteaseMusicGatewayTest {
 
         assertEquals(7, response.data?.account?.id)
         assertEquals("Lazer", response.data?.profile?.nickname)
+    }
+
+    @Test
+    fun `cookie login verifies and persists the supplied browser cookie`() = runTest {
+        val session = InMemoryGatewaySessionStore("MUSIC_U=previous-session")
+        val client = HttpClient(MockEngine { request ->
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("/api/login/status", request.url.encodedPath)
+            assertEquals("MUSIC_U=browser-session", request.headers[HttpHeaders.Cookie])
+            val body = request.body as TextContent
+            val payload = Json.parseToJsonElement(body.text).jsonObject
+            assertEquals("MUSIC_U=browser-session", payload["cookie"]?.toString()?.trim('"'))
+            respond(
+                content = """{"data":{"code":200,"account":{"id":7},"profile":{"userId":7,"nickname":"Lazer"}}}""",
+                headers = jsonHeaders(),
+            )
+        })
+        val gateway = gateway(client, session)
+
+        val response = gateway.loginWithCookie("  MUSIC_U=browser-session  ")
+
+        assertEquals(7, response.data?.profile?.userId)
+        assertEquals("MUSIC_U=browser-session", session.cookie)
+    }
+
+    @Test
+    fun `invalid cookie login restores the previous session`() = runTest {
+        val session = InMemoryGatewaySessionStore("MUSIC_U=previous-session")
+        val client = HttpClient(MockEngine {
+            respond(content = """{"data":{"code":301,"account":null,"profile":null}}""", headers = jsonHeaders())
+        })
+        val gateway = gateway(client, session)
+
+        val response = gateway.loginWithCookie("MUSIC_U=expired-session")
+
+        assertNull(response.data?.profile)
+        assertEquals("MUSIC_U=previous-session", session.cookie)
     }
 
     @Test

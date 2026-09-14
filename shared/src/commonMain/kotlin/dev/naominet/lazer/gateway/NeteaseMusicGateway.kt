@@ -104,11 +104,41 @@ class NeteaseMusicGateway(
 ) {
     /** The current raw Gateway session cookie, if the user has logged in. */
     val sessionCookie: String?
-        get() = sessionStore.cookie
+        get() {
+            val stored = sessionStore.cookie
+            val normalized = normalizeGatewaySessionCookie(stored)
+            if (stored != normalized) sessionStore.cookie = normalized
+            return normalized
+        }
 
     /** Removes the locally held session cookie without making a network request. */
     fun clearSession() {
         sessionStore.cookie = null
+    }
+
+    /**
+     * Installs a user-supplied Gateway cookie and verifies it against the documented login-status
+     * route. An invalid cookie never replaces the session that was active before this call.
+     */
+    suspend fun loginWithCookie(cookie: String): LoginStatusResponse {
+        val candidate = requireNotNull(normalizeGatewaySessionCookie(cookie)) {
+            "cookie does not contain any valid cookie fields."
+        }
+
+        val previousCookie = sessionCookie
+        sessionStore.cookie = candidate
+        return try {
+            loginStatus().also { response ->
+                val profileId = response.data?.profile?.userId ?: 0L
+                val accountId = response.data?.account?.id ?: 0L
+                if (profileId <= 0L && accountId <= 0L) {
+                    sessionStore.cookie = previousCookie
+                }
+            }
+        } catch (error: Throwable) {
+            sessionStore.cookie = previousCookie
+            throw error
+        }
     }
 
     /** Closes the owned HTTP client. Injected clients can opt out via `closeHttpClient = false`. */
@@ -429,7 +459,7 @@ class NeteaseMusicGateway(
         val response = httpClient.request(endpoint) {
             this.method = method
             accept(ContentType.Application.Json)
-            sessionStore.cookie?.takeIf(String::isNotBlank)?.let {
+            sessionCookie?.let {
                 header(HttpHeaders.Cookie, it)
             }
 
@@ -472,7 +502,7 @@ class NeteaseMusicGateway(
             // Non-browser clients must pass the login response cookie explicitly. Keep the Cookie
             // header as well for compatible deployments, while this parameter follows the
             // Gateway's documented contract for authenticated routes.
-            sessionStore.cookie?.takeIf(String::isNotBlank)?.let { putIfAbsent("cookie", it) }
+            sessionCookie?.let { putIfAbsent("cookie", it) }
             config.realIp?.takeIf(String::isNotBlank)?.let { putIfAbsent("realIP", it) }
             // A caller must not accidentally turn this off for one route. Deployments that use a
             // stable mainland `realIP` can explicitly disable it in GatewayConfig; otherwise
@@ -489,11 +519,11 @@ class NeteaseMusicGateway(
     }
 
     private fun rememberCookie(response: LoginResponse): LoginResponse = response.also {
-        it.cookie?.takeIf(String::isNotBlank)?.let { cookie -> sessionStore.cookie = cookie }
+        normalizeGatewaySessionCookie(it.cookie)?.let { cookie -> sessionStore.cookie = cookie }
     }
 
     private fun rememberCookie(response: QrCheckResponse): QrCheckResponse = response.also {
-        it.cookie?.takeIf(String::isNotBlank)?.let { cookie -> sessionStore.cookie = cookie }
+        normalizeGatewaySessionCookie(it.cookie)?.let { cookie -> sessionStore.cookie = cookie }
     }
 }
 
