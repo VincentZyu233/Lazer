@@ -32,6 +32,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -981,7 +982,6 @@ fun AndroidLazerApp() {
             if (controller.isLoginVisible) LoginSheet(controller, liquidGlass)
             ArtistChoiceSheet(
                 artists = artistChoices,
-                glass = liquidGlass,
                 onDismiss = { artistChoices = emptyList() },
                 onChoose = { artist ->
                     artistChoices = emptyList()
@@ -992,7 +992,6 @@ fun AndroidLazerApp() {
             )
             CoverSaveSheet(
                 request = coverSaveRequest,
-                glass = liquidGlass,
                 onDismiss = { coverSaveRequest = null },
                 onConfirm = { request ->
                     coverSaveRequest = null
@@ -2772,28 +2771,17 @@ private fun MobileArtwork(
 ) {
     val colors = MaterialTheme.colorScheme
     val requestSave = LocalAndroidRequestCoverSave.current
-    val longPressModifier = if (saveOnLongPress && !url.isNullOrBlank()) {
-        Modifier.pointerInput(url, label) {
-            awaitEachGesture {
-                val down = awaitFirstDown(requireUnconsumed = false)
-                awaitLongPressOrCancellation(down.id)?.let { change ->
-                    change.consume()
-                    requestSave(AndroidCoverSaveRequest(url, label))
-                }
-            }
-        }
+    val onLongPress: (() -> Unit)? = if (saveOnLongPress && !url.isNullOrBlank()) {
+        { requestSave(AndroidCoverSaveRequest(url, label)) }
     } else {
-        Modifier
+        null
     }
     Box(
         modifier
-            .then(longPressModifier)
             .clip(RoundedCornerShape(cornerRadius))
             .background(Brush.linearGradient(listOf(colors.primaryContainer, colors.secondaryContainer)))
-            // Clickable inside the clip so the ripple is confined to the rounded artwork.
-            .then(
-                if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier,
-            ),
+            // Gestures sit inside the clip so the ripple is confined to the rounded artwork.
+            .then(artworkGestures(url, label, onClick, onLongPress)),
         contentAlignment = Alignment.Center,
     ) {
         Text(label.firstOrNull()?.toString().orEmpty(), style = MaterialTheme.typography.titleMedium, color = colors.onPrimaryContainer)
@@ -2806,6 +2794,41 @@ private fun MobileArtwork(
             )
         }
     }
+}
+
+/**
+ * Gestures for artwork that can be saved with a long press. A tap belongs to [onClick] or, when the
+ * artwork has no click action of its own, to the clickable around it (the track row); the long press
+ * only fires [onLongPress] and swallows the rest of the gesture so the release is never read as a
+ * tap by either.
+ */
+private fun artworkGestures(
+    url: String?,
+    label: String,
+    onClick: (() -> Unit)?,
+    onLongPress: (() -> Unit)?,
+): Modifier = when {
+    onClick != null -> Modifier.combinedClickable(
+        role = Role.Button,
+        onLongClick = onLongPress,
+        onClick = onClick,
+    )
+    onLongPress != null -> Modifier.pointerInput(url, label) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            if (awaitLongPressOrCancellation(down.id) == null) return@awaitEachGesture
+            onLongPress()
+            // Consume through the release: the clickable around the artwork would otherwise start
+            // playing the track as the finger leaves the screen.
+            var pressed = true
+            while (pressed) {
+                val event = awaitPointerEvent()
+                pressed = event.changes.any { it.pressed }
+                event.changes.forEach { it.consume() }
+            }
+        }
+    }
+    else -> Modifier
 }
 
 @Composable
@@ -3673,19 +3696,20 @@ private fun ThinSeekBar(
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun ArtistChoiceSheet(
     artists: List<Artist>,
-    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
     onDismiss: () -> Unit,
     onChoose: (Artist) -> Unit,
 ) {
     if (artists.isEmpty()) return
     val colors = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    // Kept off the glass material on purpose: a bottom sheet is hosted in its own window, where the
+    // page backdrop it would sample holds the page *under* the now-playing overlay rather than what
+    // the sheet actually covers. Plain surface, like every other sheet in the app.
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        modifier = if (glass.isEnabled) Modifier.liquidGlassSurface(glass, shape, colors.surface, blurRadius = 14.dp) else Modifier,
         shape = shape,
-        containerColor = if (glass.isEnabled) Color.Transparent else colors.surface,
+        containerColor = colors.surface,
         contentColor = colors.onSurface,
     ) {
         Column(
@@ -3716,19 +3740,19 @@ private fun ArtistChoiceSheet(
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun CoverSaveSheet(
     request: AndroidCoverSaveRequest?,
-    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
     onDismiss: () -> Unit,
     onConfirm: (AndroidCoverSaveRequest) -> Unit,
 ) {
     request ?: return
     val colors = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    // Same reason as the artist picker: a sheet window cannot sample the backdrop the sheet's own
+    // content is drawn over, so the glass material is skipped here.
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        modifier = if (glass.isEnabled) Modifier.liquidGlassSurface(glass, shape, colors.surface, blurRadius = 14.dp) else Modifier,
         shape = shape,
-        containerColor = if (glass.isEnabled) Color.Transparent else colors.surface,
+        containerColor = colors.surface,
         contentColor = colors.onSurface,
     ) {
         Column(

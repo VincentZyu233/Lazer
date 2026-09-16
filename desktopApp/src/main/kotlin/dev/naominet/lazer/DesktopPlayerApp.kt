@@ -2129,13 +2129,19 @@ private fun Artwork(
     val shape = RoundedCornerShape(cornerRadius)
     val sizedUrl = remember(coverUrl) { coverUrl?.toArtworkUrl() }
     val requestSave = LocalRequestCoverSave.current
+    // The long press owns the whole gesture: the release has to be consumed, or the clickable
+    // around the artwork (the track row, the player bar) reads it as a tap.
     val saveModifier = if (saveOnLongPress && !coverUrl.isNullOrBlank()) {
         Modifier.pointerInput(coverUrl, title) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
-                awaitLongPressOrCancellation(down.id)?.let { change ->
-                    change.consume()
-                    requestSave(CoverSaveRequest(coverUrl, title))
+                if (awaitLongPressOrCancellation(down.id) == null) return@awaitEachGesture
+                requestSave(CoverSaveRequest(coverUrl, title))
+                var pressed = true
+                while (pressed) {
+                    val event = awaitPointerEvent()
+                    pressed = event.changes.any { it.pressed }
+                    event.changes.forEach { it.consume() }
                 }
             }
         }
