@@ -2,6 +2,7 @@ package dev.naominet.lazer
 
 import dev.nucleusframework.media.control.MediaControlEvent
 import dev.naominet.lazer.gateway.model.UserProfile
+import dev.naominet.lazer.gateway.model.Artist
 import fr.delthas.javamp3.Sound
 import java.awt.Insets
 import java.awt.Rectangle
@@ -146,7 +147,15 @@ class DesktopMediaAndCacheTest {
                 18,
                 creatorName = "初雪",
             )
-            val track = TrackItem(7, "晴天", "周杰伦", "叶惠美", 269_000, "https://img.example/song.jpg")
+            val track = TrackItem(
+                7,
+                "晴天",
+                "周杰伦",
+                "叶惠美",
+                269_000,
+                "https://img.example/song.jpg",
+                artists = listOf(Artist(id = 6452, name = "周杰伦")),
+            )
 
             cache.savePlaylists("user-9", listOf(playlist))
             cache.saveTracks(playlist.id, listOf(track), complete = true)

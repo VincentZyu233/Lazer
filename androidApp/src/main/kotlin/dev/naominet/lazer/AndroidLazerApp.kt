@@ -7,7 +7,9 @@ import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Base64
 import androidx.activity.BackEventCompat
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -190,6 +192,7 @@ import com.kashif_e.backdrop.shadow.InnerShadow
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
 import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
+import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
 import top.yukonga.miuix.kmp.basic.ButtonColors as MiuixButtonColors
@@ -208,23 +211,35 @@ private val LazerMotionEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 // floating liquid-glass bottom controls.
 private val LocalAndroidContentBottomInset = compositionLocalOf { 0.dp }
 
+private data class AndroidCoverSaveRequest(val url: String, val title: String)
+
+private val LocalAndroidOpenArtists = androidx.compose.runtime.staticCompositionLocalOf<(List<Artist>) -> Unit> { {} }
+private val LocalAndroidRequestCoverSave = androidx.compose.runtime.staticCompositionLocalOf<(AndroidCoverSaveRequest) -> Unit> { {} }
+
 private enum class AndroidMainPageKind(val depth: Int) {
     ROOT(0),
     PLAYLIST(1),
     SETTINGS(1),
+    ARTIST(2),
 }
 
 private data class AndroidMainPage(
     val kind: AndroidMainPageKind,
     val playlist: AndroidPlaylist? = null,
+    val artist: Artist? = null,
     val tracks: List<AndroidTrack> = emptyList(),
     val isLoading: Boolean = false,
 ) {
     val contentKey: Any
-        get() = if (kind == AndroidMainPageKind.PLAYLIST) kind to playlist?.id else kind
+        get() = when (kind) {
+            AndroidMainPageKind.PLAYLIST -> kind to playlist?.id
+            AndroidMainPageKind.ARTIST -> kind to artist?.id
+            else -> kind
+        }
 }
 
 private enum class AndroidBackLayer {
+    ARTIST,
     PLAYLIST,
     SETTINGS,
     PLAYER,
@@ -513,6 +528,14 @@ fun AndroidLazerApp() {
     val playback by AndroidPlaybackConnection.snapshot.collectAsState()
     var playerVisible by remember { mutableStateOf(false) }
     var lyricsVisible by remember { mutableStateOf(false) }
+    var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
+    var coverSaveRequest by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
+    var coverSaveTarget by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
+    val coverDocumentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
+        val request = coverSaveTarget
+        coverSaveTarget = null
+        if (uri != null && request != null) controller.saveArtwork(request.url, uri, request.title)
+    }
     var requestedBackProgress by remember { mutableFloatStateOf(0f) }
     var isPredictiveBackRunning by remember { mutableStateOf(false) }
     var backSwipeEdge by remember { mutableStateOf(BackEventCompat.EDGE_LEFT) }
@@ -521,6 +544,7 @@ fun AndroidLazerApp() {
     val activeBackLayer = when {
         lyricsVisible -> AndroidBackLayer.LYRICS
         playerVisible -> AndroidBackLayer.PLAYER
+        controller.activeArtist != null -> AndroidBackLayer.ARTIST
         controller.isSettingsVisible -> AndroidBackLayer.SETTINGS
         controller.activePlaylist != null -> AndroidBackLayer.PLAYLIST
         else -> null
@@ -557,6 +581,7 @@ fun AndroidLazerApp() {
             when (layer) {
                 AndroidBackLayer.LYRICS -> lyricsVisible = false
                 AndroidBackLayer.PLAYER -> playerVisible = false
+                AndroidBackLayer.ARTIST -> controller.closeArtist()
                 AndroidBackLayer.SETTINGS -> controller.closeSettings()
                 AndroidBackLayer.PLAYLIST -> controller.closePlaylist()
             }
@@ -568,6 +593,12 @@ fun AndroidLazerApp() {
 
     val mainPage = when {
         controller.isSettingsVisible -> AndroidMainPage(AndroidMainPageKind.SETTINGS)
+        controller.activeArtist != null -> AndroidMainPage(
+            kind = AndroidMainPageKind.ARTIST,
+            artist = controller.activeArtist,
+            tracks = controller.activeArtistTracks,
+            isLoading = controller.isArtistLoading,
+        )
         controller.activePlaylist != null -> AndroidMainPage(
             kind = AndroidMainPageKind.PLAYLIST,
             playlist = controller.activePlaylist,
@@ -598,6 +629,21 @@ fun AndroidLazerApp() {
         colorScheme = paletteColorScheme,
         engine = controller.themeEngine,
     ) {
+        CompositionLocalProvider(
+            LocalAndroidOpenArtists provides { artists ->
+                val available = artists.filter { it.id > 0L && it.name.isNotBlank() }.distinctBy(Artist::id)
+                when (available.size) {
+                    0 -> Unit
+                    1 -> {
+                        playerVisible = false
+                        lyricsVisible = false
+                        controller.openArtist(available.single())
+                    }
+                    else -> artistChoices = available
+                }
+            },
+            LocalAndroidRequestCoverSave provides { coverSaveRequest = it },
+        ) {
         val colors = MaterialTheme.colorScheme
         val view = LocalView.current
         val playFromQueue: (List<AndroidTrack>, AndroidTrack) -> Unit = { queue, track ->
@@ -729,6 +775,7 @@ fun AndroidLazerApp() {
                                 .fillMaxSize()
                                 .predictiveBackTransform(
                                     enabled = when (page.kind) {
+                                        AndroidMainPageKind.ARTIST -> transformedBackLayer == AndroidBackLayer.ARTIST
                                         AndroidMainPageKind.PLAYLIST -> transformedBackLayer == AndroidBackLayer.PLAYLIST
                                         AndroidMainPageKind.SETTINGS -> transformedBackLayer == AndroidBackLayer.SETTINGS
                                         AndroidMainPageKind.ROOT -> false
@@ -750,6 +797,16 @@ fun AndroidLazerApp() {
                         ) {
                             when (page.kind) {
                                 AndroidMainPageKind.SETTINGS -> SettingsPage(controller)
+                                AndroidMainPageKind.ARTIST -> page.artist?.let { artist ->
+                                    ArtistPage(
+                                        artist = artist,
+                                        tracks = page.tracks,
+                                        isLoading = page.isLoading,
+                                        currentId = playback.track?.id,
+                                        onBack = controller::closeArtist,
+                                        onPlay = playFromQueue,
+                                    )
+                                }
                                 AndroidMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
                                     PlaylistDetail(
                                         playlist = playlist,
@@ -922,11 +979,33 @@ fun AndroidLazerApp() {
                 )
             }
             if (controller.isLoginVisible) LoginSheet(controller, liquidGlass)
+            ArtistChoiceSheet(
+                artists = artistChoices,
+                glass = liquidGlass,
+                onDismiss = { artistChoices = emptyList() },
+                onChoose = { artist ->
+                    artistChoices = emptyList()
+                    playerVisible = false
+                    lyricsVisible = false
+                    controller.openArtist(artist)
+                },
+            )
+            CoverSaveSheet(
+                request = coverSaveRequest,
+                glass = liquidGlass,
+                onDismiss = { coverSaveRequest = null },
+                onConfirm = { request ->
+                    coverSaveRequest = null
+                    coverSaveTarget = request
+                    coverDocumentLauncher.launch(androidCoverFileName(request.title))
+                },
+            )
             if ((context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
                 AndroidDebugWatermark(Modifier.fillMaxSize())
             }
         }
     }
+}
 }
 
 @Composable
@@ -2148,6 +2227,75 @@ private fun AudioQualitySheet(
 }
 
 @Composable
+private fun ArtistPage(
+    artist: Artist,
+    tracks: List<AndroidTrack>,
+    isLoading: Boolean,
+    currentId: Long?,
+    onBack: () -> Unit,
+    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(20.dp, 10.dp, 20.dp, 24.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back")) }
+                Text(tr("artist.title"), style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
+            }
+        }
+        item {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                MobileArtwork(
+                    url = sequenceOf(artist.cover, artist.picUrl, artist.avatar)
+                        .mapNotNull(::normalizedArtworkUrl)
+                        .firstOrNull(),
+                    label = artist.name,
+                    modifier = Modifier.size(184.dp),
+                    cornerRadius = 32.dp,
+                )
+                Spacer(Modifier.height(20.dp))
+                Text(artist.name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
+                if (artist.alias.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(artist.alias.joinToString(" / "), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, textAlign = TextAlign.Center)
+                }
+                artist.briefDesc?.takeIf(String::isNotBlank)?.let { description ->
+                    Spacer(Modifier.height(12.dp))
+                    Text(description, modifier = Modifier.widthIn(max = 560.dp), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, maxLines = 5, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    artist.musicSize?.let { Text(tr("artist.music_count", it), style = MaterialTheme.typography.labelMedium, color = colors.primary) }
+                    artist.albumSize?.let { Text(tr("artist.album_count", it), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant) }
+                }
+                if (tracks.isNotEmpty()) {
+                    Spacer(Modifier.height(18.dp))
+                    ThemeButton(onClick = { onPlay(tracks, tracks.first()) }, cornerRadius = 14.dp) {
+                        Icon(Icons.Filled.PlayArrow, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text(tr("artist.play_all"))
+                    }
+                }
+            }
+        }
+        item {
+            Text(tr("artist.popular"), style = MaterialTheme.typography.titleLarge)
+        }
+        when {
+            isLoading && tracks.isEmpty() -> item { QuietState(tr("artist.loading")) }
+            tracks.isEmpty() -> item { QuietState(tr("artist.empty")) }
+            else -> items(tracks, key = AndroidTrack::id) { track ->
+                TrackRow(track, track.id == currentId) { onPlay(tracks, track) }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PlaylistDetail(
     playlist: AndroidPlaylist,
     tracks: List<AndroidTrack>,
@@ -2471,12 +2619,11 @@ private fun LiquidGlassPlaylistTrackRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (track.artist.isNotBlank()) {
-                    Text(
-                        text = track.artist,
+                    AndroidArtistNames(
+                        artists = track.artists,
+                        fallback = track.artist,
                         style = MaterialTheme.typography.bodySmall,
                         color = secondaryText,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -2593,11 +2740,22 @@ private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit)
             .clickable(role = Role.Button, onClick = onClick).padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        MobileArtwork(track.coverUrl, track.title, Modifier.size(48.dp), 12.dp)
+        MobileArtwork(track.coverUrl, track.title, Modifier.size(48.dp), 12.dp, saveOnLongPress = true)
         Spacer(Modifier.width(13.dp))
         Column(Modifier.weight(1f)) {
             Text(track.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(listOf(track.artist, track.album).filter(String::isNotBlank).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AndroidArtistNames(
+                    artists = track.artists,
+                    fallback = track.artist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (track.album.isNotBlank()) {
+                    Text(" · ${track.album}", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
         Text(track.durationLabel, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
     }
@@ -2610,10 +2768,26 @@ private fun MobileArtwork(
     modifier: Modifier,
     cornerRadius: androidx.compose.ui.unit.Dp,
     onClick: (() -> Unit)? = null,
+    saveOnLongPress: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
+    val requestSave = LocalAndroidRequestCoverSave.current
+    val longPressModifier = if (saveOnLongPress && !url.isNullOrBlank()) {
+        Modifier.pointerInput(url, label) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                awaitLongPressOrCancellation(down.id)?.let { change ->
+                    change.consume()
+                    requestSave(AndroidCoverSaveRequest(url, label))
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
     Box(
         modifier
+            .then(longPressModifier)
             .clip(RoundedCornerShape(cornerRadius))
             .background(Brush.linearGradient(listOf(colors.primaryContainer, colors.secondaryContainer)))
             // Clickable inside the clip so the ripple is confined to the rounded artwork.
@@ -2673,17 +2847,16 @@ private fun MiniPlayer(
                 track.title,
                 Modifier.size(if (glass.isEnabled) 44.dp else 48.dp),
                 12.dp,
+                saveOnLongPress = true,
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(track.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    if (isPreparing) tr("player.preparing") else track.artist,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = colors.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (isPreparing) {
+                    Text(tr("player.preparing"), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                } else {
+                    AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.labelSmall, colors.onSurfaceVariant)
+                }
             }
             IconButton(
                 onClick = onToggle,
@@ -3104,6 +3277,26 @@ private fun LiquidGlassBottomDock(
 }
 
 @Composable
+private fun AndroidArtistNames(
+    artists: List<Artist>,
+    fallback: String,
+    style: TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val available = artists.filter { it.id > 0L && it.name.isNotBlank() }
+    val openArtists = LocalAndroidOpenArtists.current
+    Text(
+        text = available.joinToString(" / ") { it.name }.ifBlank { fallback },
+        modifier = modifier.then(if (available.isNotEmpty()) Modifier.clickable { openArtists(available) } else Modifier),
+        style = style,
+        color = color,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
 private fun NowPlayingPage(
     snapshot: AndroidPlaybackSnapshot,
     lyricLines: List<AndroidTimedLyricLine>,
@@ -3182,10 +3375,11 @@ private fun NowPlayingPage(
                             Modifier.size(132.dp).align(Alignment.CenterHorizontally),
                             20.dp,
                             onClick = onLyrics,
+                            saveOnLongPress = true,
                         )
                         Spacer(Modifier.height(10.dp))
                         Text(track.title, color = colors.onBackground, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        Text(track.artist, color = colors.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant)
                         Spacer(Modifier.weight(1f))
                         ThinSeekBar(
                             progress = seekProgress,
@@ -3262,12 +3456,11 @@ private fun NowPlayingPage(
                                 style = MaterialTheme.typography.labelLarge,
                                 color = colors.onSurface,
                             )
-                            Text(
-                                track.artist,
+                            AndroidArtistNames(
+                                artists = track.artists,
+                                fallback = track.artist,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
@@ -3278,6 +3471,7 @@ private fun NowPlayingPage(
                         Modifier.size(artworkSize),
                         28.dp,
                         onClick = onLyrics,
+                        saveOnLongPress = true,
                     )
                     Spacer(Modifier.height(20.dp))
                     val panelShape = RoundedCornerShape(36.dp)
@@ -3297,12 +3491,11 @@ private fun NowPlayingPage(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                                Text(
-                                    track.artist,
+                                AndroidArtistNames(
+                                    artists = track.artists,
+                                    fallback = track.artist,
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = colors.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                             IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
@@ -3399,12 +3592,13 @@ private fun NowPlayingPage(
                 Modifier.fillMaxWidth().heightIn(max = 390.dp).height(320.dp),
                 30.dp,
                 onClick = onLyrics,
+                saveOnLongPress = true,
             )
             Spacer(Modifier.height(32.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(track.title, style = MaterialTheme.typography.headlineMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(track.artist, style = MaterialTheme.typography.bodyLarge, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.bodyLarge, colors.onSurfaceVariant)
                 }
                 IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
                     Icon(if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, if (isLiked) tr("player.like.remove") else tr("player.like.add"), tint = if (isLiked) colors.primary else colors.onSurfaceVariant)
@@ -3473,6 +3667,90 @@ private fun ThinSeekBar(
         Box(Modifier.fillMaxWidth(fraction).height(3.dp).clip(CircleShape).background(colors.primary))
         Box(Modifier.padding(start = travel * fraction).size(10.dp).clip(CircleShape).background(colors.primary))
     }
+}
+
+@Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+private fun ArtistChoiceSheet(
+    artists: List<Artist>,
+    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
+    onDismiss: () -> Unit,
+    onChoose: (Artist) -> Unit,
+) {
+    if (artists.isEmpty()) return
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = if (glass.isEnabled) Modifier.liquidGlassSurface(glass, shape, colors.surface, blurRadius = 14.dp) else Modifier,
+        shape = shape,
+        containerColor = if (glass.isEnabled) Color.Transparent else colors.surface,
+        contentColor = colors.onSurface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(tr("artist.choose.title"), style = MaterialTheme.typography.headlineSmall)
+            Text(tr("artist.choose.hint"), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+            Spacer(Modifier.height(4.dp))
+            artists.forEach { artist ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable { onChoose(artist) },
+                    shape = RoundedCornerShape(14.dp),
+                    color = colors.surfaceVariant.copy(alpha = 0.48f),
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Person, null, tint = colors.primary)
+                        Spacer(Modifier.width(12.dp))
+                        Text(artist.name, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+private fun CoverSaveSheet(
+    request: AndroidCoverSaveRequest?,
+    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
+    onDismiss: () -> Unit,
+    onConfirm: (AndroidCoverSaveRequest) -> Unit,
+) {
+    request ?: return
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = if (glass.isEnabled) Modifier.liquidGlassSurface(glass, shape, colors.surface, blurRadius = 14.dp) else Modifier,
+        shape = shape,
+        containerColor = if (glass.isEnabled) Color.Transparent else colors.surface,
+        contentColor = colors.onSurface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(tr("cover.save.title"), style = MaterialTheme.typography.headlineSmall)
+            Text(tr("cover.save.hint", request.title), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                ThemeTextButton(onClick = onDismiss) { Text(tr("cover.save.cancel")) }
+                ThemeButton(onClick = { onConfirm(request) }, cornerRadius = 12.dp) {
+                    Text(tr("cover.save.confirm"))
+                }
+            }
+        }
+    }
+}
+
+private fun androidCoverFileName(title: String): String {
+    val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Lazer cover" }
+    return "$safeTitle.jpg"
 }
 
 @Composable

@@ -7,6 +7,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import dev.naominet.lazer.gateway.GatewaySessionStore
 import dev.naominet.lazer.gateway.model.UserProfile
+import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -48,6 +49,7 @@ data class AndroidTrack(
     val album: String,
     val durationMillis: Long,
     val coverUrl: String? = null,
+    val artists: List<Artist> = emptyList(),
 ) {
     val durationLabel: String get() = formatPlaybackTime(durationMillis)
 }
@@ -305,6 +307,14 @@ class AndroidPlaylistCache(context: Context) {
                     put("album", track.album)
                     put("durationMillis", track.durationMillis)
                     put("coverUrl", track.coverUrl)
+                    put("artists", JSONArray().apply {
+                        track.artists.forEach { artist ->
+                            put(JSONObject().apply {
+                                put("id", artist.id)
+                                put("name", artist.name)
+                            })
+                        }
+                    })
                 },
             )
         }
@@ -314,6 +324,7 @@ class AndroidPlaylistCache(context: Context) {
         val array = JSONArray(serialized ?: return emptyList())
         List(array.length()) { index ->
             array.getJSONObject(index).let { item ->
+                val artistArray = item.optJSONArray("artists") ?: JSONArray()
                 AndroidTrack(
                     id = item.optLong("id"),
                     title = item.optString("title"),
@@ -321,6 +332,11 @@ class AndroidPlaylistCache(context: Context) {
                     album = item.optString("album"),
                     durationMillis = item.optLong("durationMillis"),
                     coverUrl = normalizedArtworkUrl(item.optString("coverUrl")),
+                    artists = List(artistArray.length()) { artistIndex ->
+                        artistArray.getJSONObject(artistIndex).let { artist ->
+                            Artist(id = artist.optLong("id"), name = artist.optString("name"))
+                        }
+                    }.filter { it.id > 0L && it.name.isNotBlank() },
                 )
             }
         }.filter { it.id > 0 && it.title.isNotBlank() }

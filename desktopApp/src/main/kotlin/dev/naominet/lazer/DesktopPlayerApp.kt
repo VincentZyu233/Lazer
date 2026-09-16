@@ -18,6 +18,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.Orientation
@@ -64,6 +65,7 @@ import coil3.compose.AsyncImage
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
 import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
+import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.datatransfer.StringSelection
@@ -93,6 +95,11 @@ private enum class DesktopDestination(
     val label: String get() = tr(labelKey)
 }
 
+private data class CoverSaveRequest(val url: String, val title: String)
+
+private val LocalOpenArtists = staticCompositionLocalOf<(List<Artist>) -> Unit> { {} }
+private val LocalRequestCoverSave = staticCompositionLocalOf<(CoverSaveRequest) -> Unit> { {} }
+
 private val calmArtwork = listOf(
     listOf(Color(0xFF9FC6D8), Color(0xFF527D91)),
     listOf(Color(0xFFC5D5CE), Color(0xFF718D83)),
@@ -102,6 +109,7 @@ private val calmArtwork = listOf(
 )
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun WindowScope.DesktopPlayerApp(
     controller: DesktopPlayerController = remember {
         DesktopPlayerController().also { it.start() }
@@ -117,6 +125,8 @@ fun WindowScope.DesktopPlayerApp(
     }
     var destination by remember { mutableStateOf(DesktopDestination.HOME) }
     var settingsVisible by remember { mutableStateOf(false) }
+    var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
+    var coverSaveRequest by remember { mutableStateOf<CoverSaveRequest?>(null) }
     val scrollInertia = rememberScrollInertiaController()
     val windowTitle = controller.nowPlaying
         ?.takeIf { controller.isPlaying }
@@ -152,6 +162,18 @@ fun WindowScope.DesktopPlayerApp(
             LocalScrollInertia provides scrollInertia,
             LocalOsGlassActive provides osGlassActive,
             LocalLazerUiAlpha provides uiAlpha,
+            LocalOpenArtists provides { artists ->
+                val available = artists.filter { it.id > 0L && it.name.isNotBlank() }.distinctBy(Artist::id)
+                when (available.size) {
+                    0 -> Unit
+                    1 -> {
+                        controller.closeLyrics()
+                        controller.openArtist(available.single())
+                    }
+                    else -> artistChoices = available
+                }
+            },
+            LocalRequestCoverSave provides { coverSaveRequest = it },
         ) {
         Surface(
             modifier = Modifier.fillMaxSize(),
@@ -236,14 +258,19 @@ fun WindowScope.DesktopPlayerApp(
                                             compact = compactNavigation,
                                             onDestinationSelected = {
                                                 settingsVisible = false
+                                                controller.closeArtist()
                                                 destination = it
                                             },
                                             onPlaylistSelected = {
                                                 settingsVisible = false
+                                                controller.closeArtist()
                                                 destination = DesktopDestination.LIBRARY
                                                 controller.openPlaylist(it)
                                             },
-                                            onOpenSettings = { settingsVisible = true },
+                                            onOpenSettings = {
+                                                controller.closeArtist()
+                                                settingsVisible = true
+                                            },
                                         )
                                         MainContent(
                                             controller = controller,
@@ -262,6 +289,25 @@ fun WindowScope.DesktopPlayerApp(
                 if (controller.isLoginVisible) {
                     LoginOverlay(controller)
                 }
+                ArtistChoiceSheet(
+                    artists = artistChoices,
+                    onDismiss = { artistChoices = emptyList() },
+                    onChoose = { artist ->
+                        artistChoices = emptyList()
+                        controller.closeLyrics()
+                        controller.openArtist(artist)
+                    },
+                )
+                CoverSaveSheet(
+                    request = coverSaveRequest,
+                    onDismiss = { coverSaveRequest = null },
+                    onConfirm = { request ->
+                        coverSaveRequest = null
+                        chooseCoverDestination(request.title)?.let { file ->
+                            controller.saveArtwork(request.url, request.title, file)
+                        }
+                    },
+                )
                 if (debugBuild) {
                     // Top-end, below the window title bar, clear of the window controls.
                     DebugWatermark(
@@ -659,6 +705,7 @@ private fun MainContent(
         } else {
             TopBar(controller)
             when {
+                controller.activeArtist != null -> ArtistPage(controller, Modifier.weight(1f))
                 controller.searchQuery.isNotBlank() -> SearchPage(controller, Modifier.weight(1f))
                 destination == DesktopDestination.HOME -> HomePage(controller, Modifier.weight(1f))
                 destination == DesktopDestination.DISCOVER -> DiscoverPage(controller, Modifier.weight(1f))
@@ -1502,6 +1549,75 @@ private fun DiscoverPage(controller: DesktopPlayerController, modifier: Modifier
 }
 
 @Composable
+private fun ArtistPage(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
+    val artist = controller.activeArtist ?: return
+    val tracks = controller.activeArtistTracks
+    val colors = MaterialTheme.colorScheme
+    val listState = rememberLazyListState()
+    val inertia = LocalScrollInertia.current
+    LazyColumn(
+        state = listState,
+        modifier = modifier.fillMaxWidth().scrollInertia(listState, inertia),
+        contentPadding = PaddingValues(top = 18.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
+    ) {
+        item {
+            TextButton(onClick = controller::closeArtist, shape = RoundedCornerShape(10.dp)) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, tr("common.back"), Modifier.size(17.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(tr("common.back"))
+            }
+        }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Artwork(
+                    id = artist.id,
+                    title = artist.name,
+                    coverUrl = sequenceOf(artist.cover, artist.picUrl, artist.avatar)
+                        .mapNotNull { it?.trim()?.takeIf(String::isNotBlank) }
+                        .firstOrNull(),
+                    modifier = Modifier.size(156.dp),
+                    cornerRadius = 28.dp,
+                )
+                Spacer(Modifier.width(28.dp))
+                Column(Modifier.weight(1f).widthIn(max = 620.dp)) {
+                    Text(artist.name, style = MaterialTheme.typography.displaySmall)
+                    if (artist.alias.isNotEmpty()) {
+                        Spacer(Modifier.height(5.dp))
+                        Text(artist.alias.joinToString(" / "), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                    }
+                    artist.briefDesc?.takeIf(String::isNotBlank)?.let { description ->
+                        Spacer(Modifier.height(12.dp))
+                        Text(description, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                        artist.musicSize?.let { Text(tr("artist.music_count", it), style = MaterialTheme.typography.labelMedium, color = colors.primary) }
+                        artist.albumSize?.let { Text(tr("artist.album_count", it), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant) }
+                    }
+                    if (tracks.isNotEmpty()) {
+                        Spacer(Modifier.height(16.dp))
+                        Button(onClick = { controller.playTrack(tracks.first()) }, shape = RoundedCornerShape(12.dp)) {
+                            Icon(Icons.Filled.PlayArrow, null, Modifier.size(19.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(tr("artist.play_all"))
+                        }
+                    }
+                }
+            }
+        }
+        item { SectionHeading(tr("artist.popular"), tr("tracks.count", tracks.size)) }
+        when {
+            controller.isArtistLoading && tracks.isEmpty() -> item { QuietEmptyState(tr("artist.loading"), tr("artist.loading_hint")) }
+            tracks.isEmpty() -> item { QuietEmptyState(tr("artist.empty"), tr("artist.empty_hint")) }
+            else -> itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+                TrackRow(track, controller.nowPlaying?.id == track.id, { controller.playTrack(track) }, index + 1)
+            }
+        }
+    }
+}
+
+@Composable
 private fun LibraryPage(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
     val active = controller.activePlaylist
     val browsing = controller.browsePlaylists()
@@ -2007,12 +2123,27 @@ private fun Artwork(
     coverUrl: String?,
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 18.dp,
+    saveOnLongPress: Boolean = false,
 ) {
     val gradient = calmArtwork[(id.hashCode().absoluteValue) % calmArtwork.size]
     val shape = RoundedCornerShape(cornerRadius)
     val sizedUrl = remember(coverUrl) { coverUrl?.toArtworkUrl() }
+    val requestSave = LocalRequestCoverSave.current
+    val saveModifier = if (saveOnLongPress && !coverUrl.isNullOrBlank()) {
+        Modifier.pointerInput(coverUrl, title) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                awaitLongPressOrCancellation(down.id)?.let { change ->
+                    change.consume()
+                    requestSave(CoverSaveRequest(coverUrl, title))
+                }
+            }
+        }
+    } else {
+        Modifier
+    }
     Box(
-        modifier.clip(shape).background(Brush.linearGradient(gradient)),
+        modifier.then(saveModifier).clip(shape).background(Brush.linearGradient(gradient)),
         contentAlignment = Alignment.Center,
     ) {
         ArtworkFallback(title, gradient)
@@ -2132,11 +2263,17 @@ private fun TrackRow(
             track.coverUrl,
             Modifier.size(44.dp),
             cornerRadius = 10.dp,
+            saveOnLongPress = true,
         )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1.2f)) {
             Text(track.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(track.artist, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            ArtistNames(
+                artists = track.artists,
+                fallback = track.artist,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
         }
         Text(
             track.album,
@@ -2236,6 +2373,7 @@ private fun PlayerBar(controller: DesktopPlayerController) {
                         controller.nowPlaying?.coverUrl,
                         Modifier.size(50.dp).clip(RoundedCornerShape(12.dp)),
                         cornerRadius = 12.dp,
+                        saveOnLongPress = controller.nowPlaying != null,
                     )
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
@@ -2245,12 +2383,11 @@ private fun PlayerBar(controller: DesktopPlayerController) {
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Text(
-                            controller.nowPlaying?.artist ?: "Lazer",
+                        ArtistNames(
+                            artists = controller.nowPlaying?.artists.orEmpty(),
+                            fallback = controller.nowPlaying?.artist ?: "Lazer",
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -2743,12 +2880,11 @@ private fun LyricsOverlay(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Text(
-                            controller.nowPlaying?.artist.orEmpty(),
+                        ArtistNames(
+                            artists = controller.nowPlaying?.artists.orEmpty(),
+                            fallback = controller.nowPlaying?.artist.orEmpty(),
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
                     }
 
@@ -2768,6 +2904,7 @@ private fun LyricsOverlay(
                                     coverUrl = controller.nowPlaying?.coverUrl,
                                     modifier = Modifier.size(36.dp),
                                     cornerRadius = 9.dp,
+                                    saveOnLongPress = true,
                                 )
                             }
                         }
@@ -2991,6 +3128,97 @@ private fun lerpColor(from: Color, to: Color, t: Float): Color {
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun ArtistChoiceSheet(
+    artists: List<Artist>,
+    onDismiss: () -> Unit,
+    onChoose: (Artist) -> Unit,
+) {
+    if (artists.isEmpty()) return
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.widthIn(max = 520.dp),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(tr("artist.choose.title"), style = MaterialTheme.typography.headlineSmall)
+            Text(tr("artist.choose.hint"), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(4.dp))
+            artists.forEach { artist ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable { onChoose(artist) },
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.48f),
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Person, null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(12.dp))
+                        Text(artist.name, style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun CoverSaveSheet(
+    request: CoverSaveRequest?,
+    onDismiss: () -> Unit,
+    onConfirm: (CoverSaveRequest) -> Unit,
+) {
+    request ?: return
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.widthIn(max = 520.dp),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(tr("cover.save.title"), style = MaterialTheme.typography.headlineSmall)
+            Text(tr("cover.save.hint", request.title), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                TextButton(onClick = onDismiss) { Text(tr("cover.save.cancel")) }
+                Button(onClick = { onConfirm(request) }, shape = RoundedCornerShape(12.dp)) {
+                    Icon(Icons.Outlined.Download, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text(tr("cover.save.confirm"))
+                }
+            }
+        }
+    }
+}
+
+private fun chooseCoverDestination(title: String): java.io.File? {
+    val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Lazer cover" }
+    val chooser = javax.swing.JFileChooser().apply {
+        dialogTitle = tr("cover.save.title")
+        selectedFile = java.io.File("$safeTitle.jpg")
+        fileFilter = javax.swing.filechooser.FileNameExtensionFilter("JPEG image", "jpg", "jpeg")
+    }
+    if (chooser.showSaveDialog(null) != javax.swing.JFileChooser.APPROVE_OPTION) return null
+    val selected = chooser.selectedFile
+    val requested = if (selected.extension.isBlank()) java.io.File(selected.parentFile, "${selected.name}.jpg") else selected
+    if (!requested.exists()) return requested
+    val baseName = requested.nameWithoutExtension
+    val extension = requested.extension.takeIf(String::isNotBlank)?.let { ".$it" }.orEmpty()
+    return generateSequence(1) { it + 1 }
+        .map { index -> java.io.File(requested.parentFile, "$baseName ($index)$extension") }
+        .first { !it.exists() }
+}
+
+@Composable
 private fun LoginOverlay(controller: DesktopPlayerController) {
     val colors = MaterialTheme.colorScheme
     Box(
@@ -3169,6 +3397,28 @@ private fun PasswordLoginContent(controller: DesktopPlayerController) {
             Text(if (controller.isSubmittingLogin) tr("login.submitting") else tr("login.submit"))
         }
     }
+}
+
+@Composable
+private fun ArtistNames(
+    artists: List<Artist>,
+    fallback: String,
+    style: androidx.compose.ui.text.TextStyle,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val available = artists.filter { it.id > 0L && it.name.isNotBlank() }
+    val openArtists = LocalOpenArtists.current
+    Text(
+        text = available.joinToString(" / ") { it.name }.ifBlank { fallback },
+        modifier = modifier.then(
+            if (available.isNotEmpty()) Modifier.clickable { openArtists(available) } else Modifier,
+        ),
+        style = style,
+        color = color,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 @Composable

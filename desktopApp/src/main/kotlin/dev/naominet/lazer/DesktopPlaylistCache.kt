@@ -196,10 +196,21 @@ internal class DesktopPlaylistCache(
         setProperty("$prefix.album", encode(item.album))
         setProperty("$prefix.duration", item.durationMillis.toString())
         setProperty("$prefix.cover", encode(item.coverUrl.orEmpty()))
+        setProperty("$prefix.artistCount", item.artists.size.toString())
+        item.artists.forEachIndexed { index, artist ->
+            setProperty("$prefix.artist.$index.id", artist.id.toString())
+            setProperty("$prefix.artist.$index.name", encode(artist.name))
+        }
     }
 
     private fun Properties.readTrack(prefix: String): TrackItem? {
         val id = getProperty("$prefix.id")?.toLongOrNull() ?: return null
+        val artists = List(getProperty("$prefix.artistCount")?.toIntOrNull() ?: 0) { index ->
+            dev.naominet.lazer.gateway.model.Artist(
+                id = getProperty("$prefix.artist.$index.id")?.toLongOrNull() ?: 0L,
+                name = decode(getProperty("$prefix.artist.$index.name")).orEmpty(),
+            )
+        }.filter { it.id > 0L && it.name.isNotBlank() }
         return TrackItem(
             id = id,
             title = decode(getProperty("$prefix.title")) ?: return null,
@@ -207,6 +218,7 @@ internal class DesktopPlaylistCache(
             album = decode(getProperty("$prefix.album")) ?: "",
             durationMillis = getProperty("$prefix.duration")?.toLongOrNull() ?: 0L,
             coverUrl = decode(getProperty("$prefix.cover"))?.takeIf(String::isNotBlank),
+            artists = artists,
         )
     }
 
