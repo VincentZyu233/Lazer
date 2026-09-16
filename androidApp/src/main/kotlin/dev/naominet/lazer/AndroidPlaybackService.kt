@@ -1,5 +1,6 @@
 package dev.naominet.lazer
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
@@ -14,6 +16,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.MediaPlayer
+import android.media.audiofx.Visualizer
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
@@ -135,6 +138,12 @@ object AndroidPlaybackConnection {
         dispatch(context, AndroidPlaybackService.ACTION_PLAYBACK_INTERFACE_CHANGED)
     }
 
+    /** Re-attaches or drops the spectrum capture after the audio-reactive setting changed. */
+    fun updateAudioLevels(context: Context) {
+        if (snapshot.value.track == null) return
+        dispatch(context, AndroidPlaybackService.ACTION_AUDIO_LEVELS_CHANGED)
+    }
+
     fun stopAndClearSession(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_STOP_AND_CLEAR_SESSION)
 
     private fun dispatch(context: Context, action: String, extra: Pair<String, Long>? = null) {
@@ -166,6 +175,28 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private var artworkBitmap: Bitmap? = null
     private var wasPlayingBeforeFocusLoss = false
     private var foregroundStarted = false
+    private var audioVisualizer: Visualizer? = null
+    private var audioLevelAnalyzer: AudioLevelAnalyzer? = null
+    private var audioLevelSessionId = 0
+    private var latestWaveform: ByteArray? = null
+    private var audioLevelCaptureUnavailable = false
+
+    /**
+     * The two halves of a capture arrive as separate callbacks; the spectrum is analysed against
+     * the waveform that came with it, which is one capture old at most.
+     */
+    private val audioLevelListener = object : Visualizer.OnDataCaptureListener {
+        override fun onWaveFormDataCapture(visualizer: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
+            if (waveform != null) latestWaveform = waveform
+        }
+
+        override fun onFftDataCapture(visualizer: Visualizer?, fft: ByteArray?, samplingRate: Int) {
+            val analyzer = audioLevelAnalyzer ?: return
+            val waveform = latestWaveform ?: return
+            AndroidAudioLevels.publish(analyzer.analyze(waveform, fft ?: return))
+        }
+    }
+
     private val streamUrls = object : LinkedHashMap<AndroidStreamCacheKey, AndroidCachedStreamUrl>(
         STREAM_URL_CACHE_SIZE,
         0.75f,
@@ -214,6 +245,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             ACTION_SEEK -> seekTo(intent.getLongExtra(EXTRA_POSITION, 0L))
             ACTION_EXCLUSIVE_AUDIO_CHANGED -> refreshAudioFocusMode()
             ACTION_PLAYBACK_INTERFACE_CHANGED -> refreshPlaybackInterface()
+            ACTION_AUDIO_LEVELS_CHANGED -> refreshAudioLevelCapture()
             ACTION_STOP -> stopPlayback()
             ACTION_STOP_AND_CLEAR_SESSION -> stopPlayback(clearSession = true)
         }
@@ -284,6 +316,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 // prepareAsync has now completed: MediaPlayer has enough stream data buffered
                 // to own playback, so the hand-off wake lock is no longer needed.
                 releasePreparationWakeLock(generation)
+                retargetAudioLevelCapture(readyPlayer.audioSessionId)
                 readyPlayer.start()
                 publishCurrentState(isPreparing = false, isPlaying = true)
                 ensureForeground(track, preparing = false)
@@ -304,6 +337,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             }
         }
         player = newPlayer
+        refreshAudioLevelCapture()
         runCatching {
             newPlayer.setDataSource(
                 this@AndroidPlaybackService,
@@ -756,12 +790,66 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
     private fun releasePlayer() {
         handler.removeCallbacks(progressReporter)
+        releaseAudioLevelCapture()
         player?.let { currentPlayer ->
             runCatching { currentPlayer.reset() }
             runCatching { currentPlayer.release() }
         }
         player = null
     }
+
+    /**
+     * Captures the spectrum of our own playback for the playlist indicator. Optional, and gated on
+     * the setting plus the microphone permission the platform demands for [Visualizer] even though
+     * it only reads back this app's session.
+     */
+    private fun refreshAudioLevelCapture() {
+        releaseAudioLevelCapture()
+        if (!gatewaySettings.audioReactiveLevels) return
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+        val currentPlayer = player ?: return
+        // Session 0 is the global output mix rather than this player, and the platform refuses it
+        // without MODIFY_AUDIO_SETTINGS anyway.
+        val sessionId = currentPlayer.audioSessionId
+        if (sessionId <= 0) return
+        val captureSize = Visualizer.getCaptureSizeRange()[1].coerceAtMost(AUDIO_LEVEL_CAPTURE_SIZE)
+        audioLevelAnalyzer = AudioLevelAnalyzer(outputSampleRateHz(), captureSize)
+        audioVisualizer = runCatching {
+            Visualizer(sessionId).apply {
+                setCaptureSize(captureSize)
+                setDataCaptureListener(audioLevelListener, AUDIO_LEVEL_CAPTURE_RATE_MILLIHERTZ, true, true)
+                enabled = true
+            }
+        }.onFailure { error ->
+            if (!audioLevelCaptureUnavailable) {
+                audioLevelCaptureUnavailable = true
+                Log.w(TAG, "Audio level capture is unavailable on this device", error)
+            }
+        }.getOrNull()
+        audioLevelSessionId = sessionId
+    }
+
+    /** Re-points the capture if the session turns out to differ once playback is actually ready. */
+    private fun retargetAudioLevelCapture(sessionId: Int) {
+        if (audioVisualizer != null && audioLevelSessionId == sessionId) return
+        refreshAudioLevelCapture()
+    }
+
+    private fun releaseAudioLevelCapture() {
+        audioVisualizer?.let { visualizer ->
+            runCatching { visualizer.enabled = false }
+            runCatching { visualizer.release() }
+        }
+        audioVisualizer = null
+        audioLevelAnalyzer = null
+        audioLevelSessionId = 0
+        latestWaveform = null
+        AndroidAudioLevels.clear()
+    }
+
+    private fun outputSampleRateHz(): Int =
+        audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull()
+            ?: FALLBACK_OUTPUT_SAMPLE_RATE_HZ
 
     /**
      * A foreground service alone does not keep the CPU awake while a new stream is being resolved
@@ -809,6 +897,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val ACTION_SEEK = "dev.naominet.lazer.action.SEEK"
         const val ACTION_EXCLUSIVE_AUDIO_CHANGED = "dev.naominet.lazer.action.EXCLUSIVE_AUDIO_CHANGED"
         const val ACTION_PLAYBACK_INTERFACE_CHANGED = "dev.naominet.lazer.action.PLAYBACK_INTERFACE_CHANGED"
+        const val ACTION_AUDIO_LEVELS_CHANGED = "dev.naominet.lazer.action.AUDIO_LEVELS_CHANGED"
         const val ACTION_STOP = "dev.naominet.lazer.action.STOP"
         const val ACTION_STOP_AND_CLEAR_SESSION = "dev.naominet.lazer.action.STOP_AND_CLEAR_SESSION"
         const val EXTRA_POSITION = "position_millis"
@@ -820,6 +909,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         private const val PREPARATION_WAKE_LOCK_TIMEOUT_MILLIS = 45_000L
         private const val STREAM_URL_CACHE_SIZE = 6
         private const val STREAM_URL_CACHE_TTL_MILLIS = 4 * 60_000L
+        private const val FALLBACK_OUTPUT_SAMPLE_RATE_HZ = 44_100
         private const val TAG = "LazerPlayback"
     }
 }

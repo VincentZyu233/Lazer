@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Keep the processor awake only while a background track change resolves and buffers. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Optional: only requested when the user turns on the audio-reactive playlist indicator. The
+         platform gates AudioEffect.Visualizer behind it even though it reads back this app's own
+         playback session. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="true"

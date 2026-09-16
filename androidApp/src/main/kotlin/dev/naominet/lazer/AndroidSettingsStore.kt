@@ -137,6 +137,11 @@ internal class AndroidSettingsStore(context: Context) {
         get() = parseAndroidPlaybackInterface(preferences.getString(KEY_PLAYBACK_INTERFACE, null))
         set(value) = preferences.edit().putString(KEY_PLAYBACK_INTERFACE, value.name).apply()
 
+    /** Whether the playlist indicator follows the captured spectrum of the playing track. */
+    var audioReactiveLevels: Boolean
+        get() = preferences.getBoolean(KEY_AUDIO_REACTIVE_LEVELS, false)
+        set(value) = preferences.edit().putBoolean(KEY_AUDIO_REACTIVE_LEVELS, value).apply()
+
     var gatewayBaseUrl: String
         get() = normalizeGatewayBaseUrl(
             preferences.getString(KEY_GATEWAY_BASE_URL, DEFAULT_GATEWAY_BASE_URL).orEmpty(),
@@ -167,6 +172,7 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_AUDIO_QUALITY = "playback.audio_quality"
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
+        const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"
         const val KEY_GATEWAY_BASE_URL = "gateway.base_url"
     }
 }
