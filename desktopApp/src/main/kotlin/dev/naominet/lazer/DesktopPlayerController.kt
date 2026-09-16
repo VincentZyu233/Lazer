@@ -12,6 +12,7 @@ import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.GatewayConfig
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
+import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.QrCheckResponse
 import dev.naominet.lazer.gateway.model.Song
@@ -39,6 +40,7 @@ data class TrackItem(
     val album: String,
     val durationMillis: Long,
     val coverUrl: String?,
+    val artists: List<Artist> = emptyList(),
 ) {
     val durationLabel: String
         get() = formatDuration(durationMillis)
@@ -106,6 +108,7 @@ class DesktopPlayerController(
     private var searchJob: Job? = null
     private var playJob: Job? = null
     private var playlistJob: Job? = null
+    private var artistJob: Job? = null
     private var lyricsJob: Job? = null
     private var paletteJob: Job? = null
     private var qrLoginJob: Job? = null
@@ -244,6 +247,12 @@ class DesktopPlayerController(
         private set
     val activePlaylistTitle: String?
         get() = activePlaylist?.title
+    var activeArtist by mutableStateOf<Artist?>(null)
+        private set
+    var activeArtistTracks by mutableStateOf<List<TrackItem>>(emptyList())
+        private set
+    var isArtistLoading by mutableStateOf(false)
+        private set
     var nowPlaying by mutableStateOf<TrackItem?>(null)
         private set
     var isPlaying by mutableStateOf(false)
@@ -465,6 +474,7 @@ class DesktopPlayerController(
         searchJob?.cancel()
         playJob?.cancel()
         playlistJob?.cancel()
+        artistJob?.cancel()
         lyricsJob?.cancel()
         paletteJob?.cancel()
         qrLoginJob?.cancel()
@@ -536,6 +546,7 @@ class DesktopPlayerController(
         bootstrapJob?.cancel()
         searchJob?.cancel()
         playlistJob?.cancel()
+        artistJob?.cancel()
         playlistRequestGeneration += 1
         lyricsJob?.cancel()
         qrLoginJob?.cancel()
@@ -547,6 +558,9 @@ class DesktopPlayerController(
         gatewayBaseUrl = normalized
         gateway = createDesktopGateway(normalized)
         searchResults = emptyList()
+        activeArtist = null
+        activeArtistTracks = emptyList()
+        isArtistLoading = false
         isLoginVisible = false
         qrLoginState = QrLoginState.IDLE
         qrImageData = null
@@ -1030,6 +1044,72 @@ class DesktopPlayerController(
         qrLoginJob?.cancel()
         qrLoginState = QrLoginState.IDLE
         loginCookie = ""
+    }
+
+    fun openArtist(artist: Artist) {
+        if (artist.id <= 0L) return
+        artistJob?.cancel()
+        activeArtist = artist
+        activeArtistTracks = emptyList()
+        isArtistLoading = true
+        artistJob = scope.launch {
+            try {
+                val detail = runCatching { gateway.artistDetail(artist.id).data?.artist }.getOrNull()
+                if (activeArtist?.id != artist.id) return@launch
+                if (detail != null) activeArtist = detail
+                val tracks = gateway.artistTopSongs(artist.id).songs.map { it.toTrackItem() }
+                if (activeArtist?.id == artist.id) activeArtistTracks = tracks
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (activeArtist?.id == artist.id) {
+                    statusMessage = error.toFriendlyMessage(tr("artist.load_fail"))
+                }
+            } finally {
+                if (activeArtist?.id == artist.id) isArtistLoading = false
+            }
+        }
+    }
+
+    fun closeArtist() {
+        artistJob?.cancel()
+        activeArtist = null
+        activeArtistTracks = emptyList()
+        isArtistLoading = false
+    }
+
+    fun saveArtwork(url: String, title: String, target: java.io.File) {
+        scope.launch {
+            beginRequest(tr("cover.save.saving"))
+            try {
+                withContext(Dispatchers.IO) {
+                    val connection = java.net.URI(url).toURL().openConnection().apply {
+                        connectTimeout = 12_000
+                        readTimeout = 20_000
+                        setRequestProperty("User-Agent", "Lazer/1.1")
+                    }
+                    target.parentFile?.mkdirs()
+                    val temporary = java.io.File(target.parentFile, ".${target.name}.${System.nanoTime()}.part")
+                    try {
+                        connection.getInputStream().buffered().use { input ->
+                            temporary.outputStream().buffered().use(input::copyTo)
+                        }
+                        java.nio.file.Files.move(
+                            temporary.toPath(),
+                            target.toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        )
+                    } finally {
+                        temporary.delete()
+                    }
+                }
+                statusMessage = tr("cover.save.success", title)
+            } catch (error: Throwable) {
+                statusMessage = error.toFriendlyMessage(tr("cover.save.fail"))
+            } finally {
+                endRequest()
+            }
+        }
     }
 
     fun selectLoginMethod(method: LoginMethod) {
@@ -1578,6 +1658,7 @@ class DesktopPlayerController(
 
     private fun effectiveQueue(): List<TrackItem> {
         val base = when {
+            activeArtist != null && activeArtistTracks.isNotEmpty() -> activeArtistTracks
             activePlaylist != null && activePlaylistTracks.isNotEmpty() -> activePlaylistTracks
             searchResults.isNotEmpty() -> searchResults
             recentTracks.isNotEmpty() -> recentTracks
@@ -1659,6 +1740,7 @@ private fun Song.toTrackItem(): TrackItem = TrackItem(
     album = album?.name.orEmpty().ifBlank { tr("track.unknown_album") },
     durationMillis = durationMillis ?: 0L,
     coverUrl = album?.picUrl ?: album?.blurPictureUrl,
+    artists = artists.filter { it.id > 0L && it.name.isNotBlank() },
 )
 
 private fun Playlist.toPlaylistItem(): PlaylistItem {

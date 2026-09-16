@@ -10,6 +10,7 @@ import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.GatewayConfig
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
+import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.Song
 import dev.naominet.lazer.gateway.model.UserProfile
@@ -86,6 +87,7 @@ class AndroidGatewayController(context: Context) {
     private var bootstrapJob: Job? = null
     private var searchJob: Job? = null
     private var playlistJob: Job? = null
+    private var artistJob: Job? = null
     private var lyricJob: Job? = null
     private var qrLoginJob: Job? = null
     private var postLoginSyncJob: Job? = null
@@ -151,6 +153,12 @@ class AndroidGatewayController(context: Context) {
     var activePlaylist by mutableStateOf<AndroidPlaylist?>(null)
         private set
     var activePlaylistTracks by mutableStateOf<List<AndroidTrack>>(emptyList())
+        private set
+    var activeArtist by mutableStateOf<Artist?>(null)
+        private set
+    var activeArtistTracks by mutableStateOf<List<AndroidTrack>>(emptyList())
+        private set
+    var isArtistLoading by mutableStateOf(false)
         private set
     var isLoading by mutableStateOf(false)
         private set
@@ -271,6 +279,7 @@ class AndroidGatewayController(context: Context) {
     fun selectDestination(value: AndroidRootDestination) {
         destination = value
         isSettingsVisible = false
+        closeArtist()
         closePlaylist()
         message = null
     }
@@ -369,6 +378,7 @@ class AndroidGatewayController(context: Context) {
         bootstrapJob?.cancel()
         searchJob?.cancel()
         playlistJob?.cancel()
+        artistJob?.cancel()
         lyricJob?.cancel()
         qrLoginJob?.cancel()
         postLoginSyncJob?.cancel()
@@ -385,6 +395,9 @@ class AndroidGatewayController(context: Context) {
         activePlaylist = null
         activePlaylistTracks = emptyList()
         isPlaylistLoading = false
+        activeArtist = null
+        activeArtistTracks = emptyList()
+        isArtistLoading = false
         searchResults = emptyList()
         lyrics = emptyList()
         lyricsMessage = null
@@ -452,6 +465,58 @@ class AndroidGatewayController(context: Context) {
         activePlaylist = null
         activePlaylistTracks = emptyList()
         isPlaylistLoading = false
+    }
+
+    fun openArtist(artist: Artist) {
+        if (artist.id <= 0L) return
+        artistJob?.cancel()
+        activeArtist = artist
+        activeArtistTracks = emptyList()
+        isArtistLoading = true
+        artistJob = scope.launch {
+            try {
+                val detail = runCatching { gateway.artistDetail(artist.id).data?.artist }.getOrNull()
+                if (activeArtist?.id != artist.id) return@launch
+                if (detail != null) activeArtist = detail
+                val tracks = gateway.artistTopSongs(artist.id).songs.map(::toAndroidTrack)
+                if (activeArtist?.id == artist.id) activeArtistTracks = tracks
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                if (activeArtist?.id == artist.id) message = tr("artist.load_fail")
+            } finally {
+                if (activeArtist?.id == artist.id) isArtistLoading = false
+            }
+        }
+    }
+
+    fun closeArtist() {
+        artistJob?.cancel()
+        activeArtist = null
+        activeArtistTracks = emptyList()
+        isArtistLoading = false
+    }
+
+    fun saveArtwork(url: String, destination: android.net.Uri, title: String) {
+        scope.launch {
+            message = tr("cover.save.saving")
+            val saved = withContext(Dispatchers.IO) {
+                runCatching {
+                    val connection = java.net.URL(url).openConnection().apply {
+                        connectTimeout = 12_000
+                        readTimeout = 20_000
+                        setRequestProperty("User-Agent", "Lazer/1.1")
+                    }
+                    connection.getInputStream().buffered().use { input ->
+                        checkNotNull(appContext.contentResolver.openOutputStream(destination, "w"))
+                            .buffered().use(input::copyTo)
+                    }
+                }.isSuccess.also { success ->
+                    if (!success) runCatching { appContext.contentResolver.delete(destination, null, null) }
+                }
+            }
+            message = if (saved) tr("cover.save.success", title) else tr("cover.save.fail")
+        }
     }
 
     fun updateSearchQuery(value: String) {
@@ -1035,6 +1100,7 @@ private fun toAndroidTrack(song: Song): AndroidTrack = AndroidTrack(
     album = song.album?.name.orEmpty(),
     durationMillis = song.durationMillis ?: 0L,
     coverUrl = normalizedArtworkUrl(song.album?.picUrl),
+    artists = song.artists.filter { it.id > 0L && it.name.isNotBlank() },
 )
 
 private fun toAndroidPlaylist(playlist: Playlist): AndroidPlaylist = AndroidPlaylist(

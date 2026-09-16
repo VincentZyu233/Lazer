@@ -86,4 +86,24 @@ class AndroidPlaybackUrlTest {
     fun rejectsNonNetworkPlaybackSource() {
         assertNull(normalizedPlaybackUrl("file:///storage/emulated/0/song.mp3"))
     }
+
+    @Test
+    fun upgradesClearTextArtistArtworkUrl() {
+        assertEquals(
+            "https://p4.music.126.net/109951169164936450.jpg",
+            sequenceOf("http://p4.music.126.net/109951169164936450.jpg", null, null)
+                .mapNotNull(::normalizedArtworkUrl)
+                .firstOrNull(),
+        )
+    }
+
+    @Test
+    fun blankArtistCoverDoesNotHideAvatar() {
+        assertEquals(
+            "https://p4.music.126.net/avatar.jpg",
+            sequenceOf("", null, "http://p4.music.126.net/avatar.jpg")
+                .mapNotNull(::normalizedArtworkUrl)
+                .firstOrNull(),
+        )
+    }
 }
