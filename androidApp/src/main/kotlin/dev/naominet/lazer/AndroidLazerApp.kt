@@ -1,7 +1,10 @@
 package dev.naominet.lazer
 
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
+import android.content.Context
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.os.Build
@@ -19,6 +22,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -129,7 +133,9 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -194,6 +200,7 @@ import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
 import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 import dev.naominet.lazer.gateway.model.Artist
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
 import top.yukonga.miuix.kmp.basic.ButtonColors as MiuixButtonColors
@@ -204,6 +211,7 @@ import top.yukonga.miuix.kmp.basic.NavigationBarDisplayMode as MiuixNavigationBa
 import top.yukonga.miuix.kmp.basic.NavigationBarItem as MiuixNavigationBarItem
 import kotlin.math.roundToLong
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 private const val PAGE_TRANSITION_MILLIS = LazerTokens.Motion.pageMillis
 private val LazerMotionEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
@@ -814,6 +822,7 @@ fun AndroidLazerApp() {
                                         tracks = page.tracks,
                                         isLoading = page.isLoading,
                                         currentId = playback.track?.id,
+                                        isPlaying = playback.isPlaying,
                                         liquidGlassEnabled = controller.liquidGlassEnabled,
                                         liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                                         onBack = controller::closePlaylist,
@@ -1302,9 +1311,24 @@ private fun MePage(controller: AndroidGatewayController) {
 private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val systemMonetAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val context = LocalContext.current
     val backgroundPicker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent(),
     ) { uri -> uri?.let(controller::setBackgroundImage) }
+    // The platform asks for the microphone even though the capture only reads back our own session,
+    // so the switch stays off until the user grants it.
+    var microphoneGranted by remember { mutableStateOf(context.hasRecordAudioPermission()) }
+    val microphoneRequest = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        microphoneGranted = granted
+        if (granted) {
+            controller.updateAudioReactiveLevels(true)
+        } else {
+            controller.reportAudioLevelsPermissionDenied()
+        }
+    }
+    val audioLevelsEnabled = controller.audioReactiveLevels && microphoneGranted
     var isAudioQualitySheetVisible by remember { mutableStateOf(false) }
     var isCacheSheetVisible by remember { mutableStateOf(false) }
     var isCookieSheetVisible by remember { mutableStateOf(false) }
@@ -1598,6 +1622,38 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                         checked = controller.exclusiveAudio && !controller.independentPlayback,
                         onCheckedChange = null,
                         enabled = !controller.independentPlayback,
+                    )
+                }
+            }
+        }
+        item {
+            SettingsCard {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(role = Role.Switch) {
+                            when {
+                                audioLevelsEnabled -> controller.updateAudioReactiveLevels(false)
+                                microphoneGranted -> controller.updateAudioReactiveLevels(true)
+                                else -> microphoneRequest.launch(Manifest.permission.RECORD_AUDIO)
+                            }
+                        }
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.audio_levels.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("settings.audio_levels.subtitle"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = audioLevelsEnabled,
+                        onCheckedChange = null,
                     )
                 }
             }
@@ -2300,6 +2356,7 @@ private fun PlaylistDetail(
     tracks: List<AndroidTrack>,
     isLoading: Boolean,
     currentId: Long?,
+    isPlaying: Boolean,
     liquidGlassEnabled: Boolean,
     liquidGlassBlurIntensity: Float,
     modifier: Modifier = Modifier,
@@ -2318,6 +2375,7 @@ private fun PlaylistDetail(
             tracks = tracks,
             isLoading = isLoading,
             currentId = currentId,
+            isPlaying = isPlaying,
             glass = pageGlass,
             modifier = modifier,
             onBack = onBack,
@@ -2405,6 +2463,7 @@ private fun LiquidGlassPlaylistDetail(
     tracks: List<AndroidTrack>,
     isLoading: Boolean,
     currentId: Long?,
+    isPlaying: Boolean,
     glass: LazerLiquidGlass,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
@@ -2412,6 +2471,7 @@ private fun LiquidGlassPlaylistDetail(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val colors = MaterialTheme.colorScheme
     val currentTrackIndex = tracks.indexOfFirst { it.id == currentId }
     // Keep the cover as the visual anchor without making it dominate the song list.
     val artworkSize = (LocalConfiguration.current.screenWidthDp.dp * 0.48f).coerceIn(150.dp, 220.dp)
@@ -2420,146 +2480,157 @@ private fun LiquidGlassPlaylistDetail(
     val prominentInk = Color(0xFF183246)
     val artworkShape = RoundedCornerShape(28.dp)
     val hasTracks = tracks.isNotEmpty()
+    // Two backdrops, kept apart on purpose. The hero controls sit inside the list and sample the
+    // flow background; the back button sits outside the list and samples the pair. Neither samples
+    // a layer that contains it, which is what keeps the capture acyclic.
+    val backGlass = rememberLazerLiquidGlass(
+        enabled = glass.isEnabled,
+        backgroundColor = colors.background,
+        blurIntensity = glass.blurIntensity,
+    )
 
     Box(modifier.fillMaxSize()) {
-        AndroidPlaylistFlowBackground(
-            playlist = playlist,
-            modifier = Modifier
-                .fillMaxSize()
-                .captureLiquidGlass(glass),
-            cornerRadius = 0.dp,
-            veil = Color(0xFF0B2637).copy(alpha = 0.82f),
-        )
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize().statusBarsPadding(),
-            contentPadding = PaddingValues(
-                top = 39.dp,
-                bottom = 28.dp + LocalAndroidContentBottomInset.current,
-            ),
-        ) {
-            item(key = "playlist-hero") {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    MobileArtwork(
-                        url = playlist.coverUrl,
-                        label = playlist.title,
-                        modifier = Modifier
-                            .size(artworkSize)
-                            .border(1.dp, Color.White.copy(alpha = 0.20f), artworkShape),
-                        cornerRadius = 28.dp,
-                    )
-                    Spacer(Modifier.height(24.dp))
-                    Text(
-                        text = playlist.title,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = primaryText,
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (playlist.subtitle.isNotBlank()) {
-                        Spacer(Modifier.height(7.dp))
+        // Everything the back button samples: the flow background plus the list that scrolls under
+        // it.
+        Box(Modifier.fillMaxSize().captureLiquidGlass(backGlass)) {
+            AndroidPlaylistFlowBackground(
+                playlist = playlist,
+                modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
+                cornerRadius = 0.dp,
+                veil = Color(0xFF0B2637).copy(alpha = 0.82f),
+            )
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().statusBarsPadding(),
+                contentPadding = PaddingValues(
+                    top = 39.dp,
+                    bottom = 28.dp + LocalAndroidContentBottomInset.current,
+                ),
+            ) {
+                item(key = "playlist-hero") {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        MobileArtwork(
+                            url = playlist.coverUrl,
+                            label = playlist.title,
+                            modifier = Modifier
+                                .size(artworkSize)
+                                .border(1.dp, Color.White.copy(alpha = 0.20f), artworkShape),
+                            cornerRadius = 28.dp,
+                        )
+                        Spacer(Modifier.height(24.dp))
                         Text(
-                            text = playlist.subtitle,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = primaryText.copy(alpha = 0.88f),
+                            text = playlist.title,
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = primaryText,
                             textAlign = TextAlign.Center,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
-                    }
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        text = tr("playlist.tracks", tracks.size.takeIf { it > 0 } ?: playlist.trackCount),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = secondaryText,
-                    )
-                    Spacer(Modifier.height(22.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        LiquidGlassIconButton(
-                            onClick = {
-                                val shuffled = tracks.shuffled()
-                                shuffled.firstOrNull()?.let { onPlay(shuffled, it) }
-                            },
-                            contentDescription = tr("player.shuffle"),
-                            glass = glass,
-                            enabled = hasTracks,
-                            size = 56.dp,
-                        ) {
-                            Icon(
-                                Icons.Filled.Shuffle,
-                                null,
-                                Modifier.size(24.dp),
-                                tint = primaryText.copy(alpha = if (hasTracks) 1f else 0.38f),
-                            )
-                        }
-                        LiquidGlassPillButton(
-                            onClick = { tracks.firstOrNull()?.let { onPlay(tracks, it) } },
-                            glass = glass,
-                            modifier = Modifier.widthIn(min = 152.dp, max = 210.dp),
-                            enabled = hasTracks,
-                            tint = Color.White.copy(alpha = if (hasTracks) 1f else 0.42f),
-                        ) {
-                            Icon(
-                                Icons.Filled.PlayArrow,
-                                null,
-                                Modifier.size(22.dp),
-                                tint = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
-                            )
+                        if (playlist.subtitle.isNotBlank()) {
+                            Spacer(Modifier.height(7.dp))
                             Text(
-                                tr("playlist.play_all"),
+                                text = playlist.subtitle,
                                 style = MaterialTheme.typography.titleMedium,
-                                color = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
-                                fontWeight = FontWeight.SemiBold,
+                                color = primaryText.copy(alpha = 0.88f),
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        if (currentTrackIndex >= 0) {
+                        Spacer(Modifier.height(5.dp))
+                        Text(
+                            text = tr("playlist.tracks", tracks.size.takeIf { it > 0 } ?: playlist.trackCount),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = secondaryText,
+                        )
+                        Spacer(Modifier.height(22.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             LiquidGlassIconButton(
                                 onClick = {
-                                    scope.launch { listState.animateScrollToItem(currentTrackIndex + 1) }
+                                    val shuffled = tracks.shuffled()
+                                    shuffled.firstOrNull()?.let { onPlay(shuffled, it) }
                                 },
-                                contentDescription = tr("playlist.locate"),
+                                contentDescription = tr("player.shuffle"),
                                 glass = glass,
+                                enabled = hasTracks,
                                 size = 56.dp,
                             ) {
-                                Icon(Icons.Outlined.MyLocation, null, Modifier.size(23.dp), tint = primaryText)
+                                Icon(
+                                    Icons.Filled.Shuffle,
+                                    null,
+                                    Modifier.size(24.dp),
+                                    tint = primaryText.copy(alpha = if (hasTracks) 1f else 0.38f),
+                                )
                             }
-                        } else {
-                            Spacer(Modifier.size(56.dp))
+                            LiquidGlassPillButton(
+                                onClick = { tracks.firstOrNull()?.let { onPlay(tracks, it) } },
+                                glass = glass,
+                                modifier = Modifier.widthIn(min = 152.dp, max = 210.dp),
+                                enabled = hasTracks,
+                                tint = Color.White.copy(alpha = if (hasTracks) 1f else 0.42f),
+                            ) {
+                                Icon(
+                                    Icons.Filled.PlayArrow,
+                                    null,
+                                    Modifier.size(22.dp),
+                                    tint = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
+                                )
+                                Text(
+                                    tr("playlist.play_all"),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                            if (currentTrackIndex >= 0) {
+                                LiquidGlassIconButton(
+                                    onClick = {
+                                        scope.launch { listState.animateScrollToItem(currentTrackIndex + 1) }
+                                    },
+                                    contentDescription = tr("playlist.locate"),
+                                    glass = glass,
+                                    size = 56.dp,
+                                ) {
+                                    Icon(Icons.Outlined.MyLocation, null, Modifier.size(23.dp), tint = primaryText)
+                                }
+                            } else {
+                                Spacer(Modifier.size(56.dp))
+                            }
                         }
+                        Spacer(Modifier.height(28.dp))
                     }
-                    Spacer(Modifier.height(28.dp))
                 }
-            }
 
-            if (tracks.isEmpty()) {
-                item(key = "playlist-state") {
-                    Text(
-                        text = if (isLoading) tr("playlist.opening") else tr("playlist.empty"),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 34.dp),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = secondaryText,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            } else {
-                itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
-                    LiquidGlassPlaylistTrackRow(
-                        index = index,
-                        track = track,
-                        current = track.id == currentId,
-                        primaryText = primaryText,
-                        secondaryText = secondaryText,
-                        onClick = { onPlay(tracks, track) },
-                    )
+                if (tracks.isEmpty()) {
+                    item(key = "playlist-state") {
+                        Text(
+                            text = if (isLoading) tr("playlist.opening") else tr("playlist.empty"),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 34.dp),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = secondaryText,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                } else {
+                    itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+                        LiquidGlassPlaylistTrackRow(
+                            index = index,
+                            track = track,
+                            current = track.id == currentId,
+                            isPlaying = isPlaying,
+                            primaryText = primaryText,
+                            secondaryText = secondaryText,
+                            onClick = { onPlay(tracks, track) },
+                        )
+                    }
                 }
             }
         }
@@ -2571,7 +2642,7 @@ private fun LiquidGlassPlaylistDetail(
                 .align(Alignment.TopStart)
                 .statusBarsPadding()
                 .padding(start = 18.dp, top = 6.dp),
-            glass = glass,
+            glass = backGlass,
             size = 56.dp,
         ) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, null, Modifier.size(27.dp), tint = primaryText)
@@ -2584,6 +2655,7 @@ private fun LiquidGlassPlaylistTrackRow(
     index: Int,
     track: AndroidTrack,
     current: Boolean,
+    isPlaying: Boolean,
     primaryText: Color,
     secondaryText: Color,
     onClick: () -> Unit,
@@ -2600,7 +2672,7 @@ private fun LiquidGlassPlaylistTrackRow(
         ) {
             Box(Modifier.width(36.dp), contentAlignment = Alignment.CenterStart) {
                 if (current) {
-                    NowPlayingBars(color = primaryText)
+                    NowPlayingBars(color = primaryText, isPlaying = isPlaying)
                 } else {
                     Text(
                         text = (index + 1).toString(),
@@ -2643,23 +2715,102 @@ private fun LiquidGlassPlaylistTrackRow(
     }
 }
 
+// One speed and one head start per bar so the four of them never move in lockstep.
+private val NowPlayingBarSpeeds = listOf(3.1f, 4.4f, 2.7f, 3.8f)
+private val NowPlayingBarOffsets = listOf(0f, 1.1f, 2.2f, 3.3f)
+
+/** How long the bars take to ease down into dots once playback stops. */
+private const val NOW_PLAYING_BAR_DESCENT_MILLIS = 420
+
+/**
+ * Playback indicator for the row holding the current track. It draws the captured spectrum of what
+ * is actually playing when the audio-reactive setting is on and a synthesized equalizer when it is
+ * not. Stopping playback eases the bars down into four dots; starting again interrupts that descent
+ * from wherever it reached instead of snapping.
+ */
 @Composable
-private fun NowPlayingBars(color: Color) {
+private fun NowPlayingBars(color: Color, isPlaying: Boolean) {
+    val liveLevels by AndroidAudioLevels.levels.collectAsState()
+    val spectrum = liveLevels?.takeIf { it.size == AUDIO_LEVEL_BAND_COUNT }
+    var phaseSeconds by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(isPlaying, spectrum != null) {
+        if (!isPlaying || spectrum != null) return@LaunchedEffect
+        var lastFrameNanos = 0L
+        while (isActive) {
+            withFrameNanos { now ->
+                if (lastFrameNanos != 0L) {
+                    val elapsed = ((now - lastFrameNanos) / 1_000_000_000.0).toFloat().coerceAtMost(0.1f)
+                    phaseSeconds = (phaseSeconds + elapsed) % 10_000f
+                }
+                lastFrameNanos = now
+            }
+        }
+    }
+    // Read here rather than inside the draw lambda: recomposing on each frame is what keeps the
+    // canvas redrawing as playback advances.
+    val seconds = phaseSeconds
+    val heights = List(AUDIO_LEVEL_BAND_COUNT) { index ->
+        spectrum?.get(index)?.let { 0.12f + 0.88f * it } ?: synthesizedLevel(index, seconds)
+    }
+    // The heights a pause starts from. The descent follows the easing rather than the silence the
+    // capture keeps reporting while the track is stopped, and a resume eases out of them again
+    // instead of jumping to whatever the live levels are by then.
+    val restingHeights = remember { mutableStateOf(heights) }
+    val resting = restingHeights.value
+    val currentHeights by rememberUpdatedState(heights)
+    // 1 while playing, 0 once the bars have settled into dots.
+    val descent = remember { Animatable(if (isPlaying) 1f else 0f) }
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            descent.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMediumLow,
+                ),
+            )
+        } else {
+            restingHeights.value = currentHeights
+            descent.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(
+                    durationMillis = NOW_PLAYING_BAR_DESCENT_MILLIS,
+                    easing = LazerMotionEasing,
+                ),
+            )
+        }
+    }
+    val settled = descent.value
     Canvas(Modifier.size(width = 18.dp, height = 16.dp)) {
         val barWidth = 2.5.dp.toPx()
         val gap = (size.width - barWidth * 4f) / 3f
-        val heights = listOf(0.48f, 0.86f, 0.64f, 1f)
-        heights.forEachIndexed { index, heightFraction ->
-            val left = index * (barWidth + gap)
-            val barHeight = size.height * heightFraction
+        // A bar drawn at its own width is a dot, which is where a stopped track comes to rest.
+        val dotFraction = barWidth / size.height
+        repeat(AUDIO_LEVEL_BAND_COUNT) { index ->
+            val restingHeight = resting.getOrElse(index) { heights[index] }
+            val playingHeight = if (isPlaying) heights[index] else restingHeight
+            val target = restingHeight + (playingHeight - restingHeight) * settled
+            val barHeight = size.height * (dotFraction + (target - dotFraction) * settled)
+                .coerceIn(dotFraction, 1f)
             drawRoundRect(
                 color = color,
-                topLeft = Offset(left, size.height - barHeight),
+                topLeft = Offset(index * (barWidth + gap), size.height - barHeight),
                 size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
                 cornerRadius = androidx.compose.ui.geometry.CornerRadius(barWidth / 2f),
             )
         }
     }
+}
+
+/** Height of bar [index] as a fraction of the canvas when no spectrum is being captured. */
+private fun synthesizedLevel(index: Int, seconds: Float): Float {
+    val speed = NowPlayingBarSpeeds[index]
+    val offset = NowPlayingBarOffsets[index]
+    // A slow wave carrying a faster ripple, so the bars breathe instead of pumping evenly.
+    val wave = 0.5f +
+        0.34f * sin(seconds * speed + offset) +
+        0.16f * sin(seconds * speed * 2.37f + offset * 1.9f)
+    return (0.26f + 0.74f * wave).coerceIn(0.12f, 1f)
 }
 
 @Composable
@@ -3776,6 +3927,9 @@ private fun androidCoverFileName(title: String): String {
     val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Lazer cover" }
     return "$safeTitle.jpg"
 }
+
+private fun Context.hasRecordAudioPermission(): Boolean =
+    checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)

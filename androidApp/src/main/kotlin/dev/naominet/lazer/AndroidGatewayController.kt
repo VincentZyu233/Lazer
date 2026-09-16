@@ -136,6 +136,8 @@ class AndroidGatewayController(context: Context) {
         private set
     var playbackInterface by mutableStateOf(settings.playbackInterface)
         private set
+    var audioReactiveLevels by mutableStateOf(settings.audioReactiveLevels)
+        private set
     val independentPlayback: Boolean
         get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
     var gatewayBaseUrl by mutableStateOf(settings.gatewayBaseUrl)
@@ -357,6 +359,18 @@ class AndroidGatewayController(context: Context) {
         exclusiveAudio = enabled
         settings.exclusiveAudio = enabled
         AndroidPlaybackConnection.updateExclusiveAudio(appContext)
+    }
+
+    fun updateAudioReactiveLevels(enabled: Boolean) {
+        if (audioReactiveLevels == enabled) return
+        audioReactiveLevels = enabled
+        settings.audioReactiveLevels = enabled
+        AndroidPlaybackConnection.updateAudioLevels(appContext)
+    }
+
+    /** Shown when the user asks for the audio-reactive indicator but withholds the permission. */
+    fun reportAudioLevelsPermissionDenied() {
+        message = tr("settings.audio_levels.denied")
     }
 
     fun updateIndependentPlayback(enabled: Boolean) {
