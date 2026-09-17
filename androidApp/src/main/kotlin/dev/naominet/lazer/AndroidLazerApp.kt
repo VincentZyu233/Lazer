@@ -54,6 +54,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.absoluteOffset
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -78,6 +79,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -95,7 +97,6 @@ import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.LightMode
-import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
@@ -129,6 +130,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -141,10 +143,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
@@ -158,8 +162,12 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -182,6 +190,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
@@ -251,7 +260,6 @@ private enum class AndroidBackLayer {
     PLAYLIST,
     SETTINGS,
     PLAYER,
-    LYRICS,
 }
 
 private fun Modifier.predictiveBackTransform(
@@ -264,11 +272,11 @@ private fun Modifier.predictiveBackTransform(
     graphicsLayer {
         val fraction = progress.coerceIn(0f, 1f)
         val direction = if (swipeEdge == BackEventCompat.EDGE_RIGHT) -1f else 1f
-        translationX = size.width * 0.08f * fraction * direction
-        val scale = 1f - 0.035f * fraction
+        translationX = size.width * 0.16f * fraction * direction
+        val scale = 1f - 0.09f * fraction
         scaleX = scale
         scaleY = scale
-        alpha = 1f - 0.08f * fraction
+        alpha = 1f - 0.22f * fraction
     }
 }
 
@@ -535,7 +543,6 @@ fun AndroidLazerApp() {
     val controller = remember(context.applicationContext) { AndroidGatewayController(context.applicationContext) }
     val playback by AndroidPlaybackConnection.snapshot.collectAsState()
     var playerVisible by remember { mutableStateOf(false) }
-    var lyricsVisible by remember { mutableStateOf(false) }
     var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
     var coverSaveRequest by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
     var coverSaveTarget by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
@@ -550,7 +557,6 @@ fun AndroidLazerApp() {
     var transformedBackLayer by remember { mutableStateOf<AndroidBackLayer?>(null) }
 
     val activeBackLayer = when {
-        lyricsVisible -> AndroidBackLayer.LYRICS
         playerVisible -> AndroidBackLayer.PLAYER
         controller.activeArtist != null -> AndroidBackLayer.ARTIST
         controller.isSettingsVisible -> AndroidBackLayer.SETTINGS
@@ -587,7 +593,6 @@ fun AndroidLazerApp() {
                 backSwipeEdge = event.swipeEdge
             }
             when (layer) {
-                AndroidBackLayer.LYRICS -> lyricsVisible = false
                 AndroidBackLayer.PLAYER -> playerVisible = false
                 AndroidBackLayer.ARTIST -> controller.closeArtist()
                 AndroidBackLayer.SETTINGS -> controller.closeSettings()
@@ -644,7 +649,6 @@ fun AndroidLazerApp() {
                     0 -> Unit
                     1 -> {
                         playerVisible = false
-                        lyricsVisible = false
                         controller.openArtist(available.single())
                     }
                     else -> artistChoices = available
@@ -941,47 +945,10 @@ fun AndroidLazerApp() {
                     onPrevious = { AndroidPlaybackConnection.previous(context) },
                     onNext = { AndroidPlaybackConnection.next(context) },
                     onSeek = { AndroidPlaybackConnection.seekTo(context, it) },
-                    onLyrics = { lyricsVisible = true },
                     modifier = Modifier
                         .fillMaxSize()
                         .predictiveBackTransform(
                             enabled = transformedBackLayer == AndroidBackLayer.PLAYER,
-                            progress = renderedBackProgress,
-                            swipeEdge = backSwipeEdge,
-                        ),
-                )
-            }
-            AnimatedVisibility(
-                visible = lyricsVisible && playback.track != null,
-                modifier = Modifier.fillMaxSize(),
-                enter = slideInHorizontally(
-                    animationSpec = tween(PAGE_TRANSITION_MILLIS, easing = LazerMotionEasing),
-                    initialOffsetX = { width -> width / 5 },
-                ) + fadeIn(tween(PAGE_TRANSITION_MILLIS, easing = LazerMotionEasing)),
-                exit = slideOutHorizontally(
-                    animationSpec = tween(PAGE_TRANSITION_MILLIS, easing = LazerMotionEasing),
-                    targetOffsetX = { width -> width / 5 },
-                ) + fadeOut(tween(PAGE_TRANSITION_MILLIS, easing = LazerMotionEasing)),
-                label = "lyrics-page",
-            ) {
-                AndroidLyricsPage(
-                    track = playback.track,
-                    lines = controller.lyrics,
-                    isLoading = controller.lyricsLoading,
-                    message = controller.lyricsMessage,
-                    positionMillis = playback.positionMillis,
-                    followDelayMillis = controller.lyricFollowDelayMillis,
-                    animationSpeed = controller.lyricAnimationSpeed,
-                    wordLyricsEnabled = controller.wordLyricsEnabled,
-                    lyricGlowEnabled = controller.lyricGlowEnabled,
-                    lyricFontSizeSp = controller.lyricFontSizeSp,
-                    showFullLyrics = controller.showFullLyrics,
-                    onBack = { lyricsVisible = false },
-                    onSeek = { AndroidPlaybackConnection.seekTo(context, it) },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .predictiveBackTransform(
-                            enabled = transformedBackLayer == AndroidBackLayer.LYRICS,
                             progress = renderedBackProgress,
                             swipeEdge = backSwipeEdge,
                         ),
@@ -994,7 +961,6 @@ fun AndroidLazerApp() {
                 onChoose = { artist ->
                     artistChoices = emptyList()
                     playerVisible = false
-                    lyricsVisible = false
                     controller.openArtist(artist)
                 },
             )
@@ -2842,8 +2808,16 @@ private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlay
 
 @Composable
 private fun PlaylistListRow(playlist: AndroidPlaylist, onOpen: (AndroidPlaylist) -> Unit) {
+    // The stock bounded ripple dies at the row's half diagonal; the oversized radius lets a tap
+    // anywhere light the full row width, matching the playlist strip tiles.
+    val rowRipple = ripple(bounded = true, radius = 260.dp)
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable(role = Role.Button) { onOpen(playlist) }.padding(vertical = 6.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable(
+            interactionSource = null,
+            indication = rowRipple,
+            role = Role.Button,
+            onClick = { onOpen(playlist) },
+        ).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         MobileArtwork(playlist.coverUrl, playlist.title, Modifier.size(56.dp), 14.dp)
@@ -2896,7 +2870,15 @@ private fun MobileArtwork(
     cornerRadius: androidx.compose.ui.unit.Dp,
     onClick: (() -> Unit)? = null,
     saveOnLongPress: Boolean = false,
+    decodeSizePx: Int? = null,
 ) {
+    val imageContext = LocalContext.current
+    val imageModel = remember(url, decodeSizePx, imageContext) {
+        if (decodeSizePx == null) url else coil3.request.ImageRequest.Builder(imageContext)
+            .data(url)
+            .size(decodeSizePx, decodeSizePx)
+            .build()
+    }
     val colors = MaterialTheme.colorScheme
     val requestSave = LocalAndroidRequestCoverSave.current
     val onLongPress: (() -> Unit)? = if (saveOnLongPress && !url.isNullOrBlank()) {
@@ -2915,7 +2897,7 @@ private fun MobileArtwork(
         Text(label.firstOrNull()?.toString().orEmpty(), style = MaterialTheme.typography.titleMedium, color = colors.onPrimaryContainer)
         if (!url.isNullOrBlank()) {
             AsyncImage(
-                model = url,
+                model = imageModel,
                 contentDescription = tr("artwork.cover", label),
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
@@ -3468,7 +3450,6 @@ private fun NowPlayingPage(
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
-    onLyrics: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val track = snapshot.track ?: return
@@ -3525,7 +3506,6 @@ private fun NowPlayingPage(
                             track.title,
                             Modifier.size(132.dp).align(Alignment.CenterHorizontally),
                             20.dp,
-                            onClick = onLyrics,
                             saveOnLongPress = true,
                         )
                         Spacer(Modifier.height(10.dp))
@@ -3572,25 +3552,37 @@ private fun NowPlayingPage(
                     )
                 }
             }
-        } else if (glass.isEnabled) {
-            BoxWithConstraints(Modifier.fillMaxSize()) {
+        } else {
+            // The portrait cover is one flying node shared by the compact (top-left, next to the
+            // close button) and expanded (below the header) layouts. The slots report their root
+            // bounds; toggling animates one overlay between them with the page's easing.
+            var coverCompactRect by remember { mutableStateOf<Rect?>(null) }
+            var coverExpandedRect by remember { mutableStateOf<Rect?>(null) }
+            var coverCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+            var coverExpanded by remember { mutableStateOf(false) }
+            val coverProgress = remember { Animatable(0f) }
+            LaunchedEffect(coverExpanded) {
+                coverProgress.animateTo(
+                    if (coverExpanded) 1f else 0f,
+                    spring(
+                        dampingRatio = Spring.DampingRatioNoBouncy,
+                        stiffness = Spring.StiffnessMedium,
+                    ),
+                )
+            }
+            val coverDensity = LocalDensity.current
+            Box(Modifier.fillMaxSize().onGloballyPositioned { coverCoordinates = it }) {
                 AndroidAlbumFlowBackground(
                     track = track,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .captureLiquidGlass(glass),
+                    modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
                     cornerRadius = 0.dp,
-                    veil = colors.background.copy(alpha = 0.34f),
+                    veil = colors.background.copy(alpha = 0.38f),
                 )
-                val artworkSize = minOf(maxWidth - 48.dp, maxHeight * 0.32f)
-                    .coerceIn(168.dp, 328.dp)
                 Column(
                     Modifier
                         .fillMaxSize()
-                        .statusBarsPadding()
-                        .navigationBarsPadding()
+                        .safeDrawingPadding()
                         .padding(horizontal = 20.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         LiquidGlassIconButton(
@@ -3600,64 +3592,82 @@ private fun NowPlayingPage(
                         ) {
                             Icon(Icons.Filled.Close, null, tint = colors.onSurface)
                         }
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
+                        Spacer(Modifier.width(12.dp))
+                        Box(
+                            Modifier
+                                .size(52.dp)
+                                .onGloballyPositioned { coordinates ->
+                                    coverCoordinates?.takeIf { it.isAttached }?.let { parent ->
+                                        coverCompactRect = parent.localBoundingBoxOf(coordinates, clipBounds = false)
+                                    }
+                                },
+                        )
+                        // The slot keeps its layout size; the info column slides left over the
+                        // empty slot as the cover departs. Reading progress inside the layer block
+                        // moves only the text per frame, without recomposing the header.
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .padding(start = 12.dp)
+                                .graphicsLayer { translationX = -52.dp.toPx() * coverProgress.value },
+                        ) {
                             Text(
                                 tr("player.now_playing"),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = colors.onSurface,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            Text(
+                                track.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                             AndroidArtistNames(
-                                artists = track.artists,
-                                fallback = track.artist,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
+                                track.artists, track.artist,
+                                MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
                             )
                         }
                     }
-                    Spacer(Modifier.weight(1f))
-                    MobileArtwork(
-                        track.coverUrl,
-                        track.title,
-                        Modifier.size(artworkSize),
-                        28.dp,
-                        onClick = onLyrics,
-                        saveOnLongPress = true,
-                    )
-                    Spacer(Modifier.height(20.dp))
-                    val panelShape = RoundedCornerShape(36.dp)
+                    // Both modes share this entire content area; no invisible cover spacer steals
+                    // lyric height. The target slot is measured independently of animation progress.
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                        val artworkSide = minOf(320.dp, maxWidth, maxHeight).coerceAtLeast(0.dp)
+                        Box(
+                            Modifier.align(Alignment.Center).size(artworkSide)
+                                .onGloballyPositioned { coordinates ->
+                                    coverCoordinates?.takeIf { it.isAttached }?.let { parent ->
+                                        coverExpandedRect = parent.localBoundingBoxOf(coordinates, clipBounds = false)
+                                    }
+                                },
+                        )
+                        if (!coverExpanded || coverProgress.value < 1f) {
+                            AndroidLyricsViewport(
+                                track = track,
+                                lines = lyricLines,
+                                isLoading = lyricsLoading,
+                                message = lyricsMessage,
+                                positionMillis = snapshot.positionMillis,
+                                followDelayMillis = lyricFollowDelayMillis,
+                                animationSpeed = lyricAnimationSpeed,
+                                wordLyricsEnabled = wordLyricsEnabled,
+                                lyricGlowEnabled = lyricGlowEnabled,
+                                lyricFontSizeSp = lyricFontSizeSp,
+                                showFullLyrics = showFullLyrics,
+                                onSeek = { if (!coverExpanded) onSeek(it) },
+                                modifier = Modifier.fillMaxSize()
+                                    .padding(top = 15.dp, bottom = 15.dp)
+                                    .graphicsLayer {
+                                        alpha = 1f - coverProgress.value
+                                },
+                            )
+                        }
+                    }
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .liquidGlassSurface(glass, panelShape, colors.surface, blurRadius = 12.dp)
-                            .clip(panelShape)
-                            .padding(horizontal = 20.dp, vertical = 18.dp),
+                            .liquidGlassSurface(glass, RoundedCornerShape(28.dp), colors.surface, blurRadius = 12.dp)
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    track.title,
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    color = colors.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                AndroidArtistNames(
-                                    artists = track.artists,
-                                    fallback = track.artist,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                                    if (isLiked) tr("player.like.remove") else tr("player.like.add"),
-                                    tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        Spacer(Modifier.height(12.dp))
                         ThinSeekBar(
                             progress = seekProgress,
                             bufferedProgress = snapshot.bufferedFraction,
@@ -3683,8 +3693,8 @@ private fun NowPlayingPage(
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            IconButton(onClick = onPrevious, modifier = Modifier.size(50.dp)) {
-                                Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(31.dp))
+                            IconButton(onClick = onPrevious, modifier = Modifier.size(48.dp)) {
+                                Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(30.dp))
                             }
                             IconButton(
                                 onClick = onToggle,
@@ -3700,17 +3710,16 @@ private fun NowPlayingPage(
                                     Modifier.size(34.dp),
                                 )
                             }
-                            IconButton(onClick = onNext, modifier = Modifier.size(50.dp)) {
-                                Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(31.dp))
+                            IconButton(onClick = onNext, modifier = Modifier.size(48.dp)) {
+                                Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(30.dp))
                             }
-                        }
-                        ThemeTextButton(
-                            onClick = onLyrics,
-                            modifier = Modifier.align(Alignment.CenterHorizontally),
-                        ) {
-                            Icon(Icons.Outlined.Lyrics, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(7.dp))
-                            Text(tr("player.lyrics"))
+                            IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
+                                Icon(
+                                    if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                    if (isLiked) tr("player.like.remove") else tr("player.like.add"),
+                                    tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
+                                )
+                            }
                         }
                         snapshot.message?.let { message ->
                             Text(
@@ -3719,67 +3728,70 @@ private fun NowPlayingPage(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.error,
                                 textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
                 }
-            }
-        } else {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
-            ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, tr("player.collapse"), tint = colors.onSurfaceVariant) }
-                Text(tr("player.now_playing"), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
-            }
-            Spacer(Modifier.weight(0.4f))
-            MobileArtwork(
-                track.coverUrl,
-                track.title,
-                Modifier.fillMaxWidth().heightIn(max = 390.dp).height(320.dp),
-                30.dp,
-                onClick = onLyrics,
-                saveOnLongPress = true,
-            )
-            Spacer(Modifier.height(32.dp))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(track.title, style = MaterialTheme.typography.headlineMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.bodyLarge, colors.onSurfaceVariant)
+
+                // The cover is a single overlay placed by measured slot bounds, whether resting or
+                // in flight: progress 0 sits in the compact slot, progress 1 in the expanded one,
+                // and everything between is the animated flight between them.
+                val compactRect = coverCompactRect
+                val expandedRect = coverExpandedRect
+                if (compactRect != null && expandedRect != null) {
+                    // All interpolation parameters are computed once per frame inside graphicsLayer,
+                    // avoiding layout pass entirely — only the GPU transform updates.
+                    val startLeft = compactRect.left
+                    val startTop = compactRect.top
+                    val startSize = with(coverDensity) { 52.dp.toPx() }
+                    val endLeft = expandedRect.left
+                    val endTop = expandedRect.top
+                    val endSize = minOf(expandedRect.width, expandedRect.height)
+                    val requestSave = LocalAndroidRequestCoverSave.current
+
+                    Box(
+                        Modifier
+                            .offset { IntOffset(startLeft.roundToInt(), startTop.roundToInt()) }
+                            .size(with(coverDensity) { startSize.toDp() })
+                            .graphicsLayer {
+                                val progress = coverProgress.value
+                                // Scale to reach target size
+                                val scale = androidx.compose.ui.util.lerp(1f, endSize / startSize, progress)
+                                scaleX = scale
+                                scaleY = scale
+                                // Translate to reach target position (accounting for scale origin)
+                                translationX = androidx.compose.ui.util.lerp(0f, endLeft - startLeft, progress)
+                                translationY = androidx.compose.ui.util.lerp(0f, endTop - startTop, progress)
+                                transformOrigin = TransformOrigin(0f, 0f)
+                                // Corner radius: 36dp (compact) → 144dp (expanded), adjusted for scale
+                                val cornerPx = androidx.compose.ui.util.lerp(36f, 144f, progress)
+                                clip = true
+                                shape = RoundedCornerShape(cornerPx / scale)
+                            }
+                            .combinedClickable(
+                                interactionSource = null,
+                                indication = null,
+                                role = Role.Button,
+                                onClick = { coverExpanded = !coverExpanded },
+                                onLongClick = {
+                                    val url = track.coverUrl
+                                    if (!url.isNullOrBlank()) {
+                                        requestSave(AndroidCoverSaveRequest(url, track.title))
+                                    }
+                                },
+                            ),
+                    ) {
+                        MobileArtwork(
+                            enlargedArtworkUrl(track.coverUrl, sizePx = 1024),
+                            track.title,
+                            Modifier.fillMaxSize(),
+                            0.dp,
+                            decodeSizePx = 1024,
+                        )
+                    }
                 }
-                IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
-                    Icon(if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, if (isLiked) tr("player.like.remove") else tr("player.like.add"), tint = if (isLiked) colors.primary else colors.onSurfaceVariant)
-                }
-            }
-            Spacer(Modifier.height(28.dp))
-            ThinSeekBar(
-                progress = seekProgress,
-                bufferedProgress = snapshot.bufferedFraction,
-                onSeek = { seeking = true; seekProgress = it },
-                onFinished = { seeking = false; onSeek((duration * seekProgress).toLong()) },
-            )
-            Row(Modifier.fillMaxWidth()) {
-                Text(formatPlaybackTime((duration * seekProgress).toLong()), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                Spacer(Modifier.weight(1f))
-                Text(formatPlaybackTime(duration), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-            }
-            Spacer(Modifier.height(18.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onPrevious, modifier = Modifier.size(50.dp)) { Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(31.dp)) }
-                IconButton(onClick = onToggle, modifier = Modifier.size(68.dp), colors = IconButtonDefaults.iconButtonColors(containerColor = colors.primary, contentColor = colors.onPrimary)) {
-                    Icon(if (snapshot.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (snapshot.isPlaying) tr("player.pause") else tr("player.play"), Modifier.size(35.dp))
-                }
-                IconButton(onClick = onNext, modifier = Modifier.size(50.dp)) { Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(31.dp)) }
-            }
-            Spacer(Modifier.weight(1f))
-            ThemeTextButton(onClick = onLyrics, modifier = Modifier.align(Alignment.CenterHorizontally)) {
-                Icon(Icons.Outlined.Lyrics, null, Modifier.size(18.dp)); Spacer(Modifier.width(7.dp)); Text(tr("player.lyrics"))
-            }
-            snapshot.message?.let { Text(it, Modifier.fillMaxWidth().padding(bottom = 8.dp), style = MaterialTheme.typography.bodySmall, color = colors.error, textAlign = TextAlign.Center) }
             }
         }
     }

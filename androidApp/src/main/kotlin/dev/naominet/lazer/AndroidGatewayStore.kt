@@ -37,6 +37,28 @@ internal fun normalizedArtworkUrl(raw: String?): String? {
     }
 }
 
+/** CDN sizing is shared by the palette thumbnail and the full player artwork. */
+internal val AndroidArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
+
+internal fun enlargedArtworkUrl(raw: String?, sizePx: Int = 1024): String? {
+    require(sizePx > 0)
+    val normalized = normalizedArtworkUrl(raw) ?: return null
+    val host = runCatching { java.net.URI(normalized).host }.getOrNull().orEmpty()
+    if (!host.equals("music.126.net", ignoreCase = true) &&
+        !host.endsWith(".music.126.net", ignoreCase = true)
+    ) return normalized
+    if (AndroidArtworkSizeParameter.containsMatchIn(normalized)) {
+        return normalized.replace(AndroidArtworkSizeParameter) { match ->
+            "${match.groupValues[1]}${sizePx}y$sizePx"
+        }
+    }
+    if (normalized.contains("param=", ignoreCase = true)) return normalized
+    val base = normalized.substringBefore('#')
+    val fragment = normalized.substringAfter('#', "").let { if ('#' in normalized) "#$it" else "" }
+    return base + (if ('?' in base) "&" else "?") + "param=${sizePx}y$sizePx" + fragment
+}
+
+
 /**
  * A small Android-only representation of the data the player needs to render and queue a song.
  * Keeping it independent from the transport model avoids passing cookies or raw API responses into
