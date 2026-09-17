@@ -2,22 +2,27 @@ package dev.naominet.lazer.gateway
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class GatewayProviderSettingsTest {
     @Test
-    fun normalizesProviderRootUrls() {
-        assertEquals(DEFAULT_GATEWAY_BASE_URL, normalizeGatewayBaseUrl("music.naominet.dev/"))
-        assertEquals("http://localhost:3000/api", normalizeGatewayBaseUrl(" HTTP://localhost:3000/api/ "))
-        assertEquals("https://[::1]:3000", normalizeGatewayBaseUrl("https://[::1]:3000"))
+    fun `session cookie normalization keeps protocol-required session fields`() {
+        val cookie = "MUSIC_U=session-token; __csrf=csrf-token; NMTID=00Aabcdefg"
+        val normalized = normalizeGatewaySessionCookie(cookie)
+
+        assertEquals(
+            "MUSIC_U=session-token; __csrf=csrf-token; NMTID=00Aabcdefg",
+            normalized,
+        )
     }
 
     @Test
-    fun rejectsUnsafeOrIncompleteProviderUrls() {
-        assertNull(normalizeGatewayBaseUrl(""))
-        assertNull(normalizeGatewayBaseUrl("ftp://music.example.com"))
-        assertNull(normalizeGatewayBaseUrl("https://user:password@music.example.com"))
-        assertNull(normalizeGatewayBaseUrl("https://music.example.com?token=secret"))
-        assertNull(normalizeGatewayBaseUrl("https://music.example.com/#fragment"))
+    fun `session cookie normalization discards attributes and blank input`() {
+        assertEquals(
+            "MUSIC_U=token",
+            normalizeGatewaySessionCookie("MUSIC_U=token; Path=/; HttpOnly; Max-Age=100"),
+        )
+        assertEquals(null, normalizeGatewaySessionCookie(""))
+        assertEquals(null, normalizeGatewaySessionCookie("   "))
     }
 }

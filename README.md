@@ -14,7 +14,7 @@
 
 Lazer 是一个基于 Kotlin Multiplatform 和 Compose Multiplatform 构建的音乐客户端。项目将界面与核心 Gateway 数据模型放在共享模块中，再通过 Android、iOS 和 JVM Desktop 平台实现播放、持久化和系统集成。
 
-默认连接 [NeteaseCloudMusicApi Enhanced Gateway](https://music.naominet.dev/docs/)，支持配置为自托管或其他兼容 Gateway 地址。
+API Gateway 已内置于共享模块中，直接与音乐服务通信，无需部署或配置额外的云端 Gateway 服务。
 
 ## Screenshot
 
@@ -87,7 +87,6 @@ Lazer/
 - JDK 11 或更高版本
 - Android Studio（Android 开发与构建）
 - Xcode（仅 macOS，iOS 开发与构建）
-- 可访问的 Gateway 服务
 
 项目使用 Gradle Wrapper，通常不需要单独安装 Gradle。
 
@@ -167,21 +166,9 @@ iOS 目标仅在 macOS 主机上注册。使用 Xcode 打开 [`iosApp`](./iosApp
 ./gradlew :shared:iosSimulatorArm64Test
 ```
 
-## Gateway 配置
+## Gateway 连接
 
-默认 Gateway 地址为：
-
-```text
-https://music.naominet.dev
-```
-
-应用设置中可以修改 Gateway 地址。地址支持 `http://` 或 `https://`，也可以省略协议并默认使用 HTTPS。为避免凭据或请求参数泄露，Gateway 地址不能包含：
-
-- 查询参数
-- URL 片段
-- 内嵌用户名和密码
-
-Gateway 请求默认携带 `randomCNIP=true`。只有部署明确提供稳定的中国大陆 `realIP` 时，才应关闭该默认行为。Gateway API 的详细约定请参考[官方文档](https://music.naominet.dev/docs/)。
+应用已内置 API Gateway，开箱即用，无需额外配置。登录会话 Cookie 会在各平台的安全存储中持久化，登录后自动生效。
 
 ## 发布构建
 
@@ -227,7 +214,7 @@ LAZER_KEY_PASSWORD
 - 共享功能优先放入 `shared` 模块，平台专属能力放入对应的 `androidMain`、`iosMain` 或 `jvmMain`
 - 颜色、排版、间距和交互优先复用 `LazerTheme.kt` 中的设计令牌
 - 用户可见文案使用简洁自然的中文
-- 新增 Gateway 路由、参数或登录行为前，先查阅 [Gateway API 文档](https://music.naominet.dev/docs/)
+- 内置 Gateway 的新增路由需同时补充协议编码与传输映射，并在 `shared` 的网关测试中覆盖
 - 不要提交 `build/`、本地配置、密钥、密码或发布签名文件
 
 ## 许可证
