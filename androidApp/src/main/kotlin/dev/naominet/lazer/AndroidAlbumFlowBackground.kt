@@ -333,7 +333,6 @@ private fun normalizeFlowPalette(colors: List<Color>): List<Color> {
     return List(5) { index -> source[index % source.size] }
 }
 
-private val AndroidArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
 private fun String.toAndroidPaletteArtworkUrl(): String {
     val secure = trim().replaceFirst("http://", "https://")
         .let { if (it.startsWith("//")) "https:$it" else it }

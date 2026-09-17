@@ -890,7 +890,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
         private const val CHANNEL_ID = "lazer.playback"
         private const val NOTIFICATION_ID = 2036
-        private const val PROGRESS_UPDATE_MILLIS = 100L
+        private const val PROGRESS_UPDATE_MILLIS = 32L
         private const val NETWORK_TIMEOUT_MILLIS = 10_000
         private const val PREPARATION_WAKE_LOCK_TIMEOUT_MILLIS = 45_000L
         private const val STREAM_URL_CACHE_SIZE = 6
