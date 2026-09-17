@@ -28,7 +28,6 @@ import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.RequiresApi
 import dev.naominet.lazer.gateway.AudioQuality
-import dev.naominet.lazer.gateway.GatewayConfig
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -226,7 +225,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         super.onCreate()
         gatewaySettings = AndroidSettingsStore(applicationContext)
         gatewaySessionStore = AndroidGatewaySessionStore(applicationContext)
-        gateway = createGateway(gatewaySettings.gatewayBaseUrl)
+        gateway = NeteaseMusicGateway(sessionStore = gatewaySessionStore)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) createNotificationChannel()
         if (gatewaySettings.playbackInterface.usesSystemMediaControls()) ensureMediaSession()
@@ -355,7 +354,6 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         trackId: Long,
         preferredQuality: AudioQuality = gatewaySettings.audioQuality,
     ): String? {
-        refreshGatewayProvider()
         val cacheKey = AndroidStreamCacheKey(trackId, preferredQuality)
         val now = System.currentTimeMillis()
         streamUrls[cacheKey]
@@ -400,18 +398,6 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             }
         }
     }
-
-    private fun refreshGatewayProvider() {
-        val configuredBaseUrl = gatewaySettings.gatewayBaseUrl
-        if (gateway.config.baseUrl == configuredBaseUrl) return
-        gateway.close()
-        gateway = createGateway(configuredBaseUrl)
-    }
-
-    private fun createGateway(baseUrl: String): NeteaseMusicGateway = NeteaseMusicGateway(
-        config = GatewayConfig(baseUrl = baseUrl),
-        sessionStore = gatewaySessionStore,
-    )
 
     private fun resumeCurrent(requestFocus: Boolean = true) {
         val currentPlayer = player

@@ -7,9 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import dev.naominet.lazer.gateway.AudioQuality
-import dev.naominet.lazer.gateway.GatewayConfig
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
-import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.Song
@@ -70,6 +68,8 @@ private data class AndroidCachedBootstrap(
     val likedSongIds: Set<Long>,
 )
 
+private const val MESSAGE_BANNER_DURATION_MILLIS = 15_000L
+
 /**
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
  * so composables only receive human-readable loading and failure states.
@@ -79,8 +79,7 @@ class AndroidGatewayController(context: Context) {
     private val cache = AndroidPlaylistCache(appContext)
     private val settings = AndroidSettingsStore(appContext)
     private val gatewaySessionStore = AndroidGatewaySessionStore(appContext)
-    private var gateway = NeteaseMusicGateway(
-        config = GatewayConfig(baseUrl = settings.gatewayBaseUrl),
+    private val gateway = NeteaseMusicGateway(
         sessionStore = gatewaySessionStore,
     )
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -140,8 +139,6 @@ class AndroidGatewayController(context: Context) {
         private set
     val independentPlayback: Boolean
         get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
-    var gatewayBaseUrl by mutableStateOf(settings.gatewayBaseUrl)
-        private set
     var currentUser by mutableStateOf<UserProfile?>(null)
         private set
     var featuredPlaylists by mutableStateOf<List<AndroidPlaylist>>(emptyList())
@@ -166,8 +163,23 @@ class AndroidGatewayController(context: Context) {
         private set
     var isPlaylistLoading by mutableStateOf(false)
         private set
-    var message by mutableStateOf<String?>(null)
-        private set
+    private var bannerMessage by mutableStateOf<String?>(null)
+    private var messageDismissJob: Job? = null
+    var message: String?
+        get() = bannerMessage
+        private set(value) {
+            // Every notification gets a fresh timeout, even when its text repeats.
+            messageDismissJob?.cancel()
+            messageDismissJob = null
+            bannerMessage = value
+            if (value != null) {
+                messageDismissJob = scope.launch {
+                    delay(MESSAGE_BANNER_DURATION_MILLIS)
+                    bannerMessage = null
+                    messageDismissJob = null
+                }
+            }
+        }
 
     var searchQuery by mutableStateOf("")
         private set
@@ -383,44 +395,6 @@ class AndroidGatewayController(context: Context) {
         playbackInterface = value
         settings.playbackInterface = value
         AndroidPlaybackConnection.updatePlaybackInterface(appContext)
-    }
-
-    fun updateGatewayBaseUrl(value: String): Boolean {
-        val normalized = normalizeGatewayBaseUrl(value) ?: return false
-        if (normalized == gatewayBaseUrl) return true
-
-        bootstrapJob?.cancel()
-        searchJob?.cancel()
-        playlistJob?.cancel()
-        artistJob?.cancel()
-        lyricJob?.cancel()
-        qrLoginJob?.cancel()
-        postLoginSyncJob?.cancel()
-        gateway.close()
-        playlistRequestGeneration += 1
-
-        settings.gatewayBaseUrl = normalized
-        gatewayBaseUrl = normalized
-        gateway = NeteaseMusicGateway(
-            config = GatewayConfig(baseUrl = normalized),
-            sessionStore = gatewaySessionStore,
-        )
-
-        activePlaylist = null
-        activePlaylistTracks = emptyList()
-        isPlaylistLoading = false
-        activeArtist = null
-        activeArtistTracks = emptyList()
-        isArtistLoading = false
-        searchResults = emptyList()
-        lyrics = emptyList()
-        lyricsMessage = null
-        isLoginVisible = false
-        qrState = AndroidQrLoginState.IDLE
-        qrImageData = null
-        bootstrap()
-        message = tr("status.music_switched")
-        return true
     }
 
     fun isSongLiked(songId: Long): Boolean = songId in likedSongIds
