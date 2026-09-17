@@ -121,6 +121,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -2850,14 +2851,39 @@ private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlay
     if (playlists.isEmpty()) {
         QuietState(tr("strip.empty"))
     } else {
+        // The rounded shape belongs to the cover, so only the top corners are clipped: the tile
+        // shape bounds the tap ripple, and a radius reaching into the label shaved the first and
+        // last characters of the title and subtitle sitting at the bottom of the tile.
+        val tileShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomEnd = 0.dp, bottomStart = 0.dp)
+        // The stock ripple only ends at the tile's half diagonal, which a tap that is over by then
+        // never sees; the radius is put well past the tile so the mask arrives at its full width.
+        val tileRipple = ripple(bounded = true, radius = 260.dp)
         LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             items(playlists, key = AndroidPlaylist::id) { playlist ->
                 Column(
-                    Modifier.width(158.dp).clip(RoundedCornerShape(18.dp)).clickable(role = Role.Button) { onOpen(playlist) }.padding(bottom = 4.dp),
+                    Modifier
+                        .width(158.dp)
+                        .clip(tileShape)
+                        .clickable(
+                            interactionSource = null,
+                            indication = tileRipple,
+                            role = Role.Button,
+                            onClick = { onOpen(playlist) },
+                        )
+                        .padding(bottom = 4.dp),
                 ) {
                     MobileArtwork(playlist.coverUrl, playlist.title, Modifier.size(158.dp), 18.dp)
                     Spacer(Modifier.height(10.dp))
-                    Text(playlist.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    // The row is as tall as its tallest visible tile, so both title lines are
+                    // reserved: without minLines a single wrapped title scrolling in or out resizes
+                    // the strip and shoves every section below it up and down along the way.
+                    Text(
+                        playlist.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        minLines = 2,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Text(playlist.subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
