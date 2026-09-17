@@ -449,67 +449,13 @@ class NeteaseMusicGateway(
         setSongLiked(songId, userId, liked)
     }
 
+    private val transport = NeteaseTransport(config, httpClient, { sessionCookie }, nowMillis)
+
     private suspend fun requestJson(
         method: HttpMethod,
         path: String,
         inputParameters: Map<String, String>,
-    ): JsonElement {
-        val endpoint = config.endpointUrl(path)
-        val requestParameters = configuredParameters(inputParameters)
-        val response = httpClient.request(endpoint) {
-            this.method = method
-            accept(ContentType.Application.Json)
-            sessionCookie?.let {
-                header(HttpHeaders.Cookie, it)
-            }
-
-            if (method == HttpMethod.Get) {
-                url {
-                    requestParameters.forEach { (key, value) -> this.parameters.append(key, value) }
-                }
-            } else {
-                url {
-                    this.parameters.append("timestamp", nowMillis().toString())
-                }
-                contentType(ContentType.Application.Json)
-                setBody(
-                    gatewayJson.encodeToString(
-                        JsonObject.serializer(),
-                        requestParameters.toJsonObject(),
-                    ),
-                )
-            }
-        }
-
-        val responseBody = response.bodyAsText()
-        if (!response.status.isSuccess()) {
-            throw GatewayHttpException(
-                statusCode = response.status.value,
-                endpoint = path,
-                responseBody = redactCookie(responseBody),
-            )
-        }
-
-        return try {
-            gatewayJson.parseToJsonElement(responseBody)
-        } catch (exception: Throwable) {
-            throw GatewayProtocolException(path, exception)
-        }
-    }
-
-    private fun configuredParameters(parameters: Map<String, String>): Map<String, String> =
-        parameters.toMutableMap().apply {
-            // Non-browser clients must pass the login response cookie explicitly. Keep the Cookie
-            // header as well for compatible deployments, while this parameter follows the
-            // Gateway's documented contract for authenticated routes.
-            sessionCookie?.let { putIfAbsent("cookie", it) }
-            config.realIp?.takeIf(String::isNotBlank)?.let { putIfAbsent("realIP", it) }
-            // A caller must not accidentally turn this off for one route. Deployments that use a
-            // stable mainland `realIP` can explicitly disable it in GatewayConfig; otherwise
-            // every GET and POST carries the documented randomCNIP=true parameter.
-            if (config.randomChineseIp) put("randomCNIP", "true")
-            config.userAgent?.takeIf(String::isNotBlank)?.let { putIfAbsent("ua", it) }
-        }
+    ): JsonElement = transport.request(path, inputParameters)
 
     private fun freshParameters(
         forceRefresh: Boolean,

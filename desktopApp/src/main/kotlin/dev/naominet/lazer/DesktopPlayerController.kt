@@ -9,9 +9,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import dev.naominet.lazer.gateway.AudioQuality
-import dev.naominet.lazer.gateway.GatewayConfig
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
-import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.QrCheckResponse
@@ -99,7 +97,7 @@ private data class DesktopCachedBootstrap(
 )
 
 class DesktopPlayerController(
-    private var gateway: NeteaseMusicGateway = createDesktopGateway(),
+    private val gateway: NeteaseMusicGateway = createDesktopGateway(),
 ) {
     private val controllerJob = SupervisorJob()
     private val scope = CoroutineScope(controllerJob + Dispatchers.Swing)
@@ -222,8 +220,6 @@ class DesktopPlayerController(
     var lyricFontSizeSp by mutableIntStateOf(DesktopSettings.lyricFontSizeSp)
         private set
     var showFullLyrics by mutableStateOf(DesktopSettings.showFullLyrics)
-        private set
-    var gatewayBaseUrl by mutableStateOf(gateway.config.baseUrl)
         private set
     var isLoading by mutableStateOf(false)
         private set
@@ -537,36 +533,6 @@ class DesktopPlayerController(
     fun updateShowFullLyrics(enabled: Boolean) {
         showFullLyrics = enabled
         DesktopSettings.showFullLyrics = enabled
-    }
-
-    fun updateGatewayBaseUrl(value: String): Boolean {
-        val normalized = normalizeGatewayBaseUrl(value) ?: return false
-        if (normalized == gatewayBaseUrl) return true
-
-        bootstrapJob?.cancel()
-        searchJob?.cancel()
-        playlistJob?.cancel()
-        artistJob?.cancel()
-        playlistRequestGeneration += 1
-        lyricsJob?.cancel()
-        qrLoginJob?.cancel()
-        gateway.close()
-        streamUrls.clear()
-        streamUrlPrefetches.clear()
-
-        DesktopSettings.gatewayBaseUrl = normalized
-        gatewayBaseUrl = normalized
-        gateway = createDesktopGateway(normalized)
-        searchResults = emptyList()
-        activeArtist = null
-        activeArtistTracks = emptyList()
-        isArtistLoading = false
-        isLoginVisible = false
-        qrLoginState = QrLoginState.IDLE
-        qrImageData = null
-        qrFallbackUrl = null
-        connectMusicService()
-        return true
     }
 
     fun updateSearchQuery(query: String) {
@@ -1727,9 +1693,8 @@ class DesktopPlayerController(
     }
 }
 
-private fun createDesktopGateway(baseUrl: String = DesktopSettings.gatewayBaseUrl): NeteaseMusicGateway =
+private fun createDesktopGateway(): NeteaseMusicGateway =
     NeteaseMusicGateway(
-        config = GatewayConfig(baseUrl = baseUrl),
         sessionStore = DesktopGatewaySessionStore(),
     )
 
