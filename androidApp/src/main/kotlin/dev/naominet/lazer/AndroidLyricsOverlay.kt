@@ -290,7 +290,10 @@ private fun AnimatedLyricsViewport(
             .pointerInput(lines.size, maxScroll) {
                 detectVerticalDragGestures(
                     onDragStart = {
-                        if (currentActiveIndex >= 0) {
+                        // Only while following does the motion field hold the rendered position; a
+                        // paused (manual) scroll is already the source of truth, so adopting the
+                        // field there would snap the view back to the active line on the next touch.
+                        if (followPlayback && currentActiveIndex >= 0) {
                             lyricScroll = lyricLineMotion.positionFor(currentActiveIndex)
                                 .coerceIn(0f, currentMaxScroll)
                         }
