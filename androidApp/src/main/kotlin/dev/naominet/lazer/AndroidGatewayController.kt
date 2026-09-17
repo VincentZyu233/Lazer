@@ -70,6 +70,8 @@ private data class AndroidCachedBootstrap(
     val likedSongIds: Set<Long>,
 )
 
+private const val MESSAGE_BANNER_DURATION_MILLIS = 15_000L
+
 /**
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
  * so composables only receive human-readable loading and failure states.
@@ -166,8 +168,23 @@ class AndroidGatewayController(context: Context) {
         private set
     var isPlaylistLoading by mutableStateOf(false)
         private set
-    var message by mutableStateOf<String?>(null)
-        private set
+    private var bannerMessage by mutableStateOf<String?>(null)
+    private var messageDismissJob: Job? = null
+    var message: String?
+        get() = bannerMessage
+        private set(value) {
+            // Every notification gets a fresh timeout, even when its text repeats.
+            messageDismissJob?.cancel()
+            messageDismissJob = null
+            bannerMessage = value
+            if (value != null) {
+                messageDismissJob = scope.launch {
+                    delay(MESSAGE_BANNER_DURATION_MILLIS)
+                    bannerMessage = null
+                    messageDismissJob = null
+                }
+            }
+        }
 
     var searchQuery by mutableStateOf("")
         private set
