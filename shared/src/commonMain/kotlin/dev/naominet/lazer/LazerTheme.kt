@@ -1,20 +1,35 @@
 package dev.naominet.lazer
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalRippleConfiguration
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RippleConfiguration
 import androidx.compose.material3.Shapes
+import androidx.compose.material3.SliderColors
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -122,6 +137,8 @@ fun LazerSlider(
     onValueChangeFinished: (() -> Unit)? = null,
 ) {
     if (engine == LazerThemeEngine.MIUIX) {
+        // Miuix springs its own value and grows the knob while it is held, so it takes the value
+        // as it comes. The Material slider does neither, and is animated here instead.
         MiuixSlider(
             value = value,
             onValueChange = onValueChange,
@@ -133,7 +150,7 @@ fun LazerSlider(
             showKeyPoints = steps > 0,
         )
     } else {
-        Material3Slider(
+        MaterialLazerSlider(
             value = value,
             onValueChange = onValueChange,
             modifier = modifier,
@@ -141,6 +158,120 @@ fun LazerSlider(
             valueRange = valueRange,
             steps = steps,
             onValueChangeFinished = onValueChangeFinished,
+        )
+    }
+}
+
+/**
+ * Value springs. A drag has to stay under the finger, so it uses a stiff one that only takes the
+ * edge off the raw pointer, while a value arriving from anywhere else - a tap on the track, a
+ * keyboard step, a setting restored with the rest of the screen - settles through a soft one that
+ * makes the move visible. Both are bouncy-free, matching the springs the rest of the app moves on.
+ */
+private val SliderDragValueSpring = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 1755f)
+private val SliderSettleValueSpring = spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 360f)
+
+/** Press halo: peak opacity, and how long it takes to bloom and to fade back out. */
+private const val SliderHaloAlpha = 0.30f
+private const val SliderHaloInMillis = 140
+private const val SliderHaloOutMillis = 260
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MaterialLazerSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    modifier: Modifier,
+    enabled: Boolean,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    onValueChangeFinished: (() -> Unit)?,
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val colors = SliderDefaults.colors()
+    val state = remember(steps, valueRange) {
+        SliderState(steps = steps, valueRange = valueRange).apply {
+            // Ticks still decide where a gesture lands; letting them snap the rendered value too
+            // would quantize the glide back into the jumps it exists to hide.
+            shouldAutoSnap = false
+        }
+    }
+    state.onValueChange = onValueChange
+    state.onValueChangeFinished = onValueChangeFinished
+
+    val animatedValue by animateFloatAsState(
+        targetValue = value.coerceIn(valueRange.start, valueRange.endInclusive),
+        animationSpec = if (state.isDragging) SliderDragValueSpring else SliderSettleValueSpring,
+        label = "lazer-slider-value",
+    )
+    state.value = animatedValue
+
+    Material3Slider(
+        state = state,
+        modifier = modifier,
+        enabled = enabled,
+        colors = colors,
+        interactionSource = interactionSource,
+        thumb = { thumbState ->
+            LazerSliderThumb(
+                state = thumbState,
+                interactionSource = interactionSource,
+                colors = colors,
+                enabled = enabled,
+            )
+        },
+    )
+}
+
+/**
+ * The stock handle with a halo that blooms once the thumb is held and fades when it is let go. The
+ * halo is drawn behind the handle and outside its layout bounds, so the slider keeps measuring the
+ * handle alone and none of its position mapping moves.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LazerSliderThumb(
+    state: SliderState,
+    interactionSource: MutableInteractionSource,
+    colors: SliderColors,
+    enabled: Boolean,
+) {
+    val pressed by interactionSource.collectIsPressedAsState()
+    // A press turns into a drag once the finger travels, so the halo follows both.
+    val held = enabled && (pressed || state.isDragging)
+    val halo by animateFloatAsState(
+        targetValue = if (held) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = if (held) SliderHaloInMillis else SliderHaloOutMillis,
+            easing = FastOutSlowInEasing,
+        ),
+        label = "lazer-slider-halo",
+    )
+    val haloColor = MaterialTheme.colorScheme.primary
+    Box(
+        Modifier.drawBehind {
+            val radius = size.height * 0.5f * (0.82f + 0.2f * halo)
+            if (halo <= 0.01f || radius <= 0f) return@drawBehind
+            drawCircle(
+                brush = Brush.radialGradient(
+                    // Fading to the same hue instead of transparent black keeps the glow from
+                    // picking up a grey edge on the way out.
+                    colors = listOf(
+                        haloColor.copy(alpha = SliderHaloAlpha * halo),
+                        haloColor.copy(alpha = 0f),
+                    ),
+                    center = center,
+                    radius = radius,
+                ),
+                radius = radius,
+                center = center,
+            )
+        },
+    ) {
+        SliderDefaults.Thumb(
+            interactionSource = interactionSource,
+            colors = colors,
+            enabled = enabled,
         )
     }
 }
