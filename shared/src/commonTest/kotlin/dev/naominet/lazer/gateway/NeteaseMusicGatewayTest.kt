@@ -3,15 +3,13 @@ package dev.naominet.lazer.gateway
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.request.forms.FormDataContent
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -49,151 +47,21 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
-    fun `random Chinese IP is enabled by default for every gateway request`() = runTest {
-        val client = HttpClient(MockEngine { request ->
-            assertEquals("true", request.url.parameters["randomCNIP"])
-            respond(content = "{\"code\":200}", headers = jsonHeaders())
-        })
-        val gateway = NeteaseMusicGateway(
-            config = GatewayConfig(baseUrl = "https://gateway.example"),
-            httpClient = client,
-            closeHttpClient = false,
-        )
-
-        gateway.getRaw("/search", mapOf("keywords" to "quiet", "randomCNIP" to "false"))
-    }
-
-    @Test
-    fun `daily recommendations decode their picUrl cover field`() = runTest {
-        val client = HttpClient(MockEngine { request ->
-            assertEquals("/api/recommend/resource", request.url.encodedPath)
-            respond(
-                content = """
-                    {
-                      "code": 200,
-                      "recommend": [{
-                        "id": 42,
-                        "name": "今日推荐",
-                        "picUrl": "https://p1.music.126.net/recommend.jpg",
-                        "trackCount": 20
-                      }]
-                    }
-                """.trimIndent(),
-                headers = jsonHeaders(),
-            )
-        })
-        val gateway = gateway(client)
-
-        val playlist = gateway.dailyRecommendedPlaylists().recommend.single()
-
-        assertEquals("https://p1.music.126.net/recommend.jpg", playlist.picUrl)
-        assertNull(playlist.coverImgUrl)
-    }
-
-    @Test
-    fun `forced playlist refresh adds the documented cache busting timestamp`() = runTest {
-        val client = HttpClient(MockEngine { request ->
-            assertEquals("/api/user/playlist", request.url.encodedPath)
-            assertEquals("123456789", request.url.parameters["timestamp"])
-            assertEquals("9", request.url.parameters["uid"])
-            respond(content = "{\"code\":200,\"playlist\":[],\"more\":false}", headers = jsonHeaders())
-        })
-
-        gateway(client).userPlaylists(uid = 9, forceRefresh = true)
-    }
-
-    @Test
-    fun `blank coverImgUrl does not hide picUrl when resolving covers`() = runTest {
-        val client = HttpClient(MockEngine {
-            respond(
-                content = """
-                    {
-                      "code": 200,
-                      "recommend": [{
-                        "id": 7,
-                        "name": "空白封面字段",
-                        "coverImgUrl": "",
-                        "picUrl": "https://p1.music.126.net/real.jpg",
-                        "trackCount": 12
-                      }]
-                    }
-                """.trimIndent(),
-                headers = jsonHeaders(),
-            )
-        })
-        val playlist = gateway(client).dailyRecommendedPlaylists().recommend.single()
-        val cover = sequenceOf(playlist.coverImgUrl, playlist.picUrl)
-            .mapNotNull { it?.trim()?.takeIf(String::isNotBlank) }
-            .firstOrNull()
-
-        assertEquals("https://p1.music.126.net/real.jpg", cover)
-    }
-
-    @Test
-    fun `search encodes query, applies gateway options, and decodes an evolving response`() = runTest {
-        val session = InMemoryGatewaySessionStore("MUSIC_U=existing-session")
-        val client = HttpClient(MockEngine { request ->
-            assertEquals(HttpMethod.Get, request.method)
-            assertEquals("/api/search", request.url.encodedPath)
-            assertEquals("A & B", request.url.parameters["keywords"])
-            assertEquals("1", request.url.parameters["type"])
-            assertEquals("5", request.url.parameters["limit"])
-            assertEquals("2", request.url.parameters["offset"])
-            assertEquals("116.25.146.177", request.url.parameters["realIP"])
-            assertEquals("true", request.url.parameters["randomCNIP"])
-            assertEquals("Lazer test client", request.url.parameters["ua"])
-            assertEquals("MUSIC_U=existing-session", request.headers[HttpHeaders.Cookie])
-            assertEquals("MUSIC_U=existing-session", request.url.parameters["cookie"])
-
-            respond(
-                content = """
-                    {
-                      "code": 200,
-                      "result": {
-                        "songCount": 1,
-                        "songs": [{
-                          "id": 33894312,
-                          "name": "晴天",
-                          "ar": [{"id": 6452, "name": "周杰伦"}],
-                          "al": {"id": 1868553, "name": "叶惠美"},
-                          "futureGatewayField": "ignored"
-                        }]
-                      }
-                    }
-                """.trimIndent(),
-                headers = jsonHeaders(),
-            )
-        })
-        val gateway = gateway(client, session)
-
-        val response = gateway.search("A & B", limit = 5, offset = 2)
-
-        assertEquals(200, response.code)
-        assertEquals(1, response.result?.songCount)
-        assertEquals("晴天", response.result?.songs?.single()?.name)
-        assertEquals("周杰伦", response.result?.songs?.single()?.artists?.single()?.name)
-        assertEquals("叶惠美", response.result?.songs?.single()?.album?.name)
-    }
-
-    @Test
-    fun `password login uses POST body, timestamp, and stores returned cookie`() = runTest {
+    fun `password login posts the encrypted form and stores the returned cookie`() = runTest {
         val session = InMemoryGatewaySessionStore()
         val client = HttpClient(MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)
-            assertEquals("/api/login/cellphone", request.url.encodedPath)
-            assertEquals("123456789", request.url.parameters["timestamp"])
-            assertFalse(request.url.toString().contains("secret-password"))
-
-            val body = request.body as TextContent
-            val payload = Json.parseToJsonElement(body.text).jsonObject
-            assertEquals("13800138000", payload["phone"]?.toString()?.trim('"'))
-            assertEquals("secret-password", payload["password"]?.toString()?.trim('"'))
-            assertEquals("86", payload["countrycode"]?.toString()?.trim('"'))
-            assertEquals("true", payload["randomCNIP"]?.toString()?.trim('"'))
+            assertEquals("/weapi/w/login/cellphone", request.url.encodedPath)
+            val form = (request.body as FormDataContent).formData
+            assertEquals(setOf("params", "encSecKey"), form.names())
+            assertFalse(form.entries().any { (_, value) -> value.any { "13800138000" in it } })
+            assertFalse(form.entries().any { (_, value) -> value.any { "secret-password" in it } })
 
             respond(
-                content = """{"code":200,"cookie":"MUSIC_U=new-session","profile":{"userId":7,"nickname":"Lazer"}}""",
-                headers = jsonHeaders(),
+                content = """{"code":200,"profile":{"userId":7,"nickname":"Lazer"}}""",
+                headers = mergeJsonAndCookieHeaders(
+                    "MUSIC_U=new-session; Path=/; HttpOnly",
+                ),
             )
         })
         val gateway = gateway(client, session)
@@ -210,20 +78,28 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
+    fun `qr create returns the documented scan URL without a network request`() = runTest {
+        val client = HttpClient(MockEngine { error("QR create is synthesized locally") })
+        val gateway = gateway(client)
+
+        val response = gateway.createQrCode("qr-key", includeImage = false)
+
+        assertEquals(200, response.code)
+        assertEquals("https://music.163.com/login?codekey=qr-key", response.data?.qrurl)
+    }
+
+    @Test
     fun `authorized QR result stores its session cookie`() = runTest {
         val session = InMemoryGatewaySessionStore()
         val client = HttpClient(MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)
-            assertEquals("/api/login/qr/check", request.url.encodedPath)
-            assertEquals("123456789", request.url.parameters["timestamp"])
-            val body = request.body as TextContent
-            val requestBody = Json.parseToJsonElement(body.text).jsonObject
-            assertEquals("qr-key", requestBody["key"]?.toString()?.trim('"'))
-            assertEquals("web", requestBody["platform"]?.toString()?.trim('"'))
+            assertEquals("/eapi/login/qrcode/client/login", request.url.encodedPath)
+            val form = (request.body as FormDataContent).formData
+            assertEquals(setOf("params"), form.names())
 
             respond(
-                content = """{"code":803,"message":"授权登录成功","cookie":"MUSIC_U=qr-session"}""",
-                headers = jsonHeaders(),
+                content = """{"code":803,"message":"授权登录成功"}""",
+                headers = mergeJsonAndCookieHeaders("MUSIC_U=qr-session; Path=/"),
             )
         })
         val gateway = gateway(client, session)
@@ -235,20 +111,15 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
-    fun `login status posts the session parameter with a cache busting timestamp`() = runTest {
+    fun `login status wraps the account and profile response`() = runTest {
         val session = InMemoryGatewaySessionStore("MUSIC_U=qr-session")
         val client = HttpClient(MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)
-            assertEquals("/api/login/status", request.url.encodedPath)
-            assertEquals("123456789", request.url.parameters["timestamp"])
+            assertEquals("/weapi/w/nuser/account/get", request.url.encodedPath)
             assertEquals("MUSIC_U=qr-session", request.headers[HttpHeaders.Cookie])
 
-            val body = request.body as TextContent
-            val payload = Json.parseToJsonElement(body.text).jsonObject
-            assertEquals("MUSIC_U=qr-session", payload["cookie"]?.toString()?.trim('"'))
-
             respond(
-                content = """{"data":{"code":200,"account":{"id":7},"profile":{"userId":7,"nickname":"Lazer"}}}""",
+                content = """{"code":200,"account":{"id":7},"profile":{"userId":7,"nickname":"Lazer"}}""",
                 headers = jsonHeaders(),
             )
         })
@@ -265,13 +136,10 @@ class NeteaseMusicGatewayTest {
         val session = InMemoryGatewaySessionStore("MUSIC_U=previous-session")
         val client = HttpClient(MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)
-            assertEquals("/api/login/status", request.url.encodedPath)
+            assertEquals("/weapi/w/nuser/account/get", request.url.encodedPath)
             assertEquals("MUSIC_U=browser-session", request.headers[HttpHeaders.Cookie])
-            val body = request.body as TextContent
-            val payload = Json.parseToJsonElement(body.text).jsonObject
-            assertEquals("MUSIC_U=browser-session", payload["cookie"]?.toString()?.trim('"'))
             respond(
-                content = """{"data":{"code":200,"account":{"id":7},"profile":{"userId":7,"nickname":"Lazer"}}}""",
+                content = """{"code":200,"account":{"id":7},"profile":{"userId":7,"nickname":"Lazer"}}""",
                 headers = jsonHeaders(),
             )
         })
@@ -287,7 +155,7 @@ class NeteaseMusicGatewayTest {
     fun `invalid cookie login restores the previous session`() = runTest {
         val session = InMemoryGatewaySessionStore("MUSIC_U=previous-session")
         val client = HttpClient(MockEngine {
-            respond(content = """{"data":{"code":301,"account":null,"profile":null}}""", headers = jsonHeaders())
+            respond(content = """{"code":301,"account":null,"profile":null}""", headers = jsonHeaders())
         })
         val gateway = gateway(client, session)
 
@@ -298,15 +166,12 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
-    fun `user detail provides a profile fallback for account-only login status`() = runTest {
+    fun `user detail posts the profile route and decodes the profile`() = runTest {
         val session = InMemoryGatewaySessionStore("MUSIC_U=active-session")
         val client = HttpClient(MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)
-            assertEquals("/api/user/detail", request.url.encodedPath)
-            val body = request.body as TextContent
-            val payload = Json.parseToJsonElement(body.text).jsonObject
-            assertEquals("7", payload["uid"]?.toString()?.trim('"'))
-            assertEquals("MUSIC_U=active-session", payload["cookie"]?.toString()?.trim('"'))
+            assertEquals("/weapi/v1/user/detail/7", request.url.encodedPath)
+            assertEquals("MUSIC_U=active-session", request.headers[HttpHeaders.Cookie])
             respond(
                 content = """{"code":200,"profile":{"userId":7,"nickname":"Lazer"}}""",
                 headers = jsonHeaders(),
@@ -320,21 +185,19 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
-    fun `song URLs send all playback choices and decode nullable URLs`() = runTest {
+    fun `song URLs decode nullable URLs from the player route`() = runTest {
         val client = HttpClient(MockEngine { request ->
-            assertEquals(HttpMethod.Get, request.method)
-            assertEquals("/api/song/url/v1", request.url.encodedPath)
-            assertEquals("1,2", request.url.parameters["id"])
-            assertEquals("hires", request.url.parameters["level"])
-            assertEquals("true", request.url.parameters["unblock"])
-            assertEquals("ste", request.url.parameters["immerseType"])
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("/weapi/song/enhance/player/url", request.url.encodedPath)
+            val form = (request.body as FormDataContent).formData
+            assertEquals(setOf("params", "encSecKey"), form.names())
 
             respond(
                 content = """
                     {
                       "code": 200,
                       "data": [
-                        {"id":1,"url":"https://cdn.example/1.flac","br":999000,"size":42,"type":"flac"},
+                        {"id":1,"url":"https://cdn.example/1.mp3","br":320000,"size":42,"type":"mp3"},
                         {"id":2,"url":null,"code":404}
                       ]
                     }
@@ -344,23 +207,17 @@ class NeteaseMusicGatewayTest {
         })
         val gateway = gateway(client)
 
-        val response = gateway.songUrls(
-            ids = listOf(1, 2),
-            quality = AudioQuality.HI_RES,
-            unblock = true,
-            immerseType = "ste",
-        )
+        val response = gateway.songUrls(ids = listOf(1, 2), quality = AudioQuality.EXHIGH)
 
-        assertEquals("https://cdn.example/1.flac", response.data[0].url)
+        assertEquals("https://cdn.example/1.mp3", response.data[0].url)
         assertEquals(null, response.data[1].url)
     }
 
     @Test
-    fun `artist detail decodes the nested artist returned by the gateway`() = runTest {
+    fun `artist detail decodes the nested artist`() = runTest {
         val client = HttpClient(MockEngine { request ->
-            assertEquals(HttpMethod.Get, request.method)
-            assertEquals("/api/artist/detail", request.url.encodedPath)
-            assertEquals("6452", request.url.parameters["id"])
+            assertEquals(HttpMethod.Post, request.method)
+            assertEquals("/eapi/artist/head/info/get", request.url.encodedPath)
             respond(
                 content = """
                     {
@@ -422,8 +279,8 @@ class NeteaseMusicGatewayTest {
         val session = InMemoryGatewaySessionStore("MUSIC_U=active-session")
         val client = HttpClient(MockEngine { request ->
             assertEquals(HttpMethod.Post, request.method)
+            assertEquals("/eapi/logout", request.url.encodedPath)
             assertEquals("MUSIC_U=active-session", request.headers[HttpHeaders.Cookie])
-            assertEquals("123456789", request.url.parameters["timestamp"])
             respond(content = "{\"code\":200}", headers = jsonHeaders())
         })
         val gateway = gateway(client, session)
@@ -453,11 +310,11 @@ class NeteaseMusicGatewayTest {
         val client = HttpClient(MockEngine { request ->
             requestedPaths += request.url.encodedPath
             when (request.url.encodedPath) {
-                "/api/lyric/new" -> respond(
+                "/eapi/song/lyric/v1" -> respond(
                     content = """{"code":200,"yrc":{"lyric":"{\"t\":0}"}}""",
                     headers = jsonHeaders(),
                 )
-                "/api/lyric" -> respond(
+                "/eapi/song/lyric" -> respond(
                     content = """{"code":200,"lrc":{"lyric":"[00:01.00]普通歌词"}}""",
                     headers = jsonHeaders(),
                 )
@@ -468,7 +325,7 @@ class NeteaseMusicGatewayTest {
         val response = gateway(client).preferredLyrics(42)
 
         assertEquals("[00:01.00]普通歌词", response.lrc?.lyric)
-        assertEquals(listOf("/api/lyric/new", "/api/lyric"), requestedPaths)
+        assertEquals(listOf("/eapi/song/lyric/v1", "/eapi/song/lyric"), requestedPaths)
     }
 
     @Test
@@ -476,7 +333,7 @@ class NeteaseMusicGatewayTest {
         var requestCount = 0
         val client = HttpClient(MockEngine { request ->
             requestCount++
-            assertEquals("/api/lyric/new", request.url.encodedPath)
+            assertEquals("/eapi/song/lyric/v1", request.url.encodedPath)
             respond(
                 content = """{"code":200,"yrc":{"lyric":"[1000,500](1000,500,0)一句"}}""",
                 headers = jsonHeaders(),
@@ -501,22 +358,88 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
-    fun `base URL rejects embedded query parameters`() {
-        assertFailsWith<IllegalArgumentException> {
-            GatewayConfig(baseUrl = "https://gateway.example/api?override=true")
-        }
+    fun `playlist tracks page through detail then song detail`() = runTest {
+        val requestedPaths = mutableListOf<String>()
+        val client = HttpClient(MockEngine { request ->
+            requestedPaths += request.url.encodedPath
+            when (request.url.encodedPath) {
+                "/eapi/v6/playlist/detail" -> respond(
+                    content = """{"code":200,"playlist":{"id":9,"trackIds":[{"id":1},{"id":2},{"id":3}]}}""",
+                    headers = jsonHeaders(),
+                )
+                "/eapi/v3/song/detail" -> respond(
+                    content = """{"code":200,"songs":[{"id":2,"name":"第二首"},{"id":3,"name":"第三首"}]}""",
+                    headers = jsonHeaders(),
+                )
+                else -> error("Unexpected route: ${request.url.encodedPath}")
+            }
+        })
+
+        val response = gateway(client).playlistTracks(id = 9, limit = 2, offset = 1)
+
+        assertEquals(listOf("/eapi/v6/playlist/detail", "/eapi/v3/song/detail"), requestedPaths)
+        assertEquals(listOf(2L, 3L), response.songs.map { it.id })
+    }
+
+    @Test
+    fun `daily recommendations decode their picUrl cover field`() = runTest {
+        val client = HttpClient(MockEngine { request ->
+            assertEquals("/weapi/v1/discovery/recommend/resource", request.url.encodedPath)
+            respond(
+                content = """
+                    {
+                      "code": 200,
+                      "recommend": [{
+                        "id": 42,
+                        "name": "今日推荐",
+                        "picUrl": "https://p1.music.126.net/recommend.jpg",
+                        "trackCount": 20
+                      }]
+                    }
+                """.trimIndent(),
+                headers = jsonHeaders(),
+            )
+        })
+        val gateway = gateway(client)
+
+        val playlist = gateway.dailyRecommendedPlaylists().recommend.single()
+
+        assertEquals("https://p1.music.126.net/recommend.jpg", playlist.picUrl)
+        assertNull(playlist.coverImgUrl)
+    }
+
+    @Test
+    fun `blank coverImgUrl does not hide picUrl when resolving covers`() = runTest {
+        val client = HttpClient(MockEngine {
+            respond(
+                content = """
+                    {
+                      "code": 200,
+                      "recommend": [{
+                        "id": 7,
+                        "name": "空白封面字段",
+                        "coverImgUrl": "",
+                        "picUrl": "https://p1.music.126.net/real.jpg",
+                        "trackCount": 12
+                      }]
+                    }
+                """.trimIndent(),
+                headers = jsonHeaders(),
+            )
+        })
+        val playlist = gateway(client).dailyRecommendedPlaylists().recommend.single()
+        val cover = sequenceOf(playlist.coverImgUrl, playlist.picUrl)
+            .mapNotNull { it?.trim()?.takeIf(String::isNotBlank) }
+            .firstOrNull()
+
+        assertEquals("https://p1.music.126.net/real.jpg", cover)
     }
 
     private fun gateway(
         client: HttpClient,
         sessionStore: GatewaySessionStore = InMemoryGatewaySessionStore(),
     ): NeteaseMusicGateway = NeteaseMusicGateway(
-        config = GatewayConfig(
-            baseUrl = "https://gateway.example/api/",
-            realIp = "116.25.146.177",
-            randomChineseIp = true,
-            userAgent = "Lazer test client",
-        ),
+        config = GatewayConfig(userAgent = "Lazer test client"),
         sessionStore = sessionStore,
         httpClient = client,
         closeHttpClient = false,
@@ -526,5 +449,10 @@ class NeteaseMusicGatewayTest {
     private fun jsonHeaders() = headersOf(
         HttpHeaders.ContentType,
         ContentType.Application.Json.toString(),
+    )
+
+    private fun mergeJsonAndCookieHeaders(cookie: String) = headersOf(
+        HttpHeaders.ContentType to listOf(ContentType.Application.Json.toString()),
+        HttpHeaders.SetCookie to listOf(cookie),
     )
 }

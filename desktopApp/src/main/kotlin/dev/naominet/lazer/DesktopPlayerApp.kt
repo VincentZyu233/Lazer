@@ -63,8 +63,6 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.WindowScope
 import coil3.compose.AsyncImage
 import dev.naominet.lazer.gateway.AudioQuality
-import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
-import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -733,13 +731,9 @@ private fun DesktopSettingsPage(
     var lyricFontSizeSliderValue by remember(controller.lyricFontSizeSp) {
         mutableFloatStateOf(controller.lyricFontSizeSp.toFloat())
     }
-    var gatewayBaseUrlDraft by remember(controller.gatewayBaseUrl) {
-        mutableStateOf(controller.gatewayBaseUrl)
-    }
     val displayedFollowDelay = normalizeLyricFollowDelayMillis(followDelaySliderValue.roundToLong())
     val displayedLyricFontSize = normalizeLyricFontSizeSp(lyricFontSizeSliderValue.roundToInt())
     val animationSpeedOptions = LyricAnimationSpeed.entries
-    val normalizedGatewayBaseUrl = normalizeGatewayBaseUrl(gatewayBaseUrlDraft)
     val scrollState = rememberScrollState()
     val inertia = LocalScrollInertia.current
     Column(
@@ -1153,46 +1147,6 @@ private fun DesktopSettingsPage(
                         },
                     ) {
                         Text(tr("settings.cookie.read"))
-                    }
-                }
-                HorizontalDivider()
-                Text(tr("settings.service"), style = MaterialTheme.typography.titleSmall)
-                Text(
-                    tr("settings.service.hint"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = gatewayBaseUrlDraft,
-                    onValueChange = { gatewayBaseUrlDraft = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text(tr("settings.service.address")) },
-                    placeholder = { Text(DEFAULT_GATEWAY_BASE_URL) },
-                    supportingText = if (gatewayBaseUrlDraft.isNotBlank() && normalizedGatewayBaseUrl == null) {
-                        { Text(tr("settings.service.invalid.desktop")) }
-                    } else {
-                        null
-                    },
-                    isError = gatewayBaseUrlDraft.isNotBlank() && normalizedGatewayBaseUrl == null,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(onClick = { gatewayBaseUrlDraft = DEFAULT_GATEWAY_BASE_URL }) {
-                        Text(tr("settings.service.reset"))
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            normalizedGatewayBaseUrl?.let(controller::updateGatewayBaseUrl)
-                        },
-                        enabled = normalizedGatewayBaseUrl != null &&
-                            normalizedGatewayBaseUrl != controller.gatewayBaseUrl,
-                    ) {
-                        Text(tr("settings.save"))
                     }
                 }
         }

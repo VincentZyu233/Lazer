@@ -3,14 +3,12 @@
 Lazer is a calm, intent-driven music space. Any new screen or component must feel like a quiet
 sheet of listening notes rather than a technical dashboard.
 
-## Gateway documentation
+## Gateway 协议
 
-- The canonical API documentation is <https://music.naominet.dev/docs/>.
-- Check this documentation before adding or changing any Gateway route, parameter, login flow,
-  response model, cookie behavior, or synchronization logic. Do not infer endpoint behavior from
-  UI requirements alone.
-- Gateway requests include `randomCNIP=true` by default. Preserve this default unless a deployment
-  explicitly provides a stable mainland China `realIP`.
+- API Gateway 已内置于 `shared` 模块：`NeteaseMusicGateway` + `NeteaseTransport` 直接与音乐服务通信，应用不再依赖云端 Gateway Wrapper。
+- 修改路由、参数、登录流程、响应模型、Cookie 行为或同步逻辑前，先对照参考实现 `D:\api-enhanced`（NeteaseCloudMusicApi Enhanced）中对应 `module/*.js` 的路径、加密方式与请求体；不要只凭 UI 需求推断。
+- 协议编码集中在 `NeteaseCrypto.kt`（EAPI/WEAPI + 跨平台 AES/MD5/RSA），平台实现位于 `NeteaseCrypto.*.kt`。新的编码能力必须先补 expect 声明，再补齐 JVM/Android/iOS 三个 actual。
+- 只携带服务器签发的会话字段（`MUSIC_U`、`MUSIC_A`、`NMTID`、`deviceId`、`__csrf`），不要合成反作弊令牌，也不要加入 IP 伪装参数。
 
 ## Design principles
 

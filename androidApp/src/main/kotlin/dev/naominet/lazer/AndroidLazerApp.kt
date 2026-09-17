@@ -198,8 +198,6 @@ import com.kashif_e.backdrop.effects.vibrancy
 import com.kashif_e.backdrop.highlight.Highlight
 import com.kashif_e.backdrop.shadow.InnerShadow
 import dev.naominet.lazer.gateway.AudioQuality
-import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
-import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -1342,13 +1340,9 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
     var lyricFontSizeSliderValue by remember(controller.lyricFontSizeSp) {
         mutableFloatStateOf(controller.lyricFontSizeSp.toFloat())
     }
-    var gatewayBaseUrlDraft by remember(controller.gatewayBaseUrl) {
-        mutableStateOf(controller.gatewayBaseUrl)
-    }
     val displayedFollowDelay = normalizeLyricFollowDelayMillis(followDelaySliderValue.roundToLong())
     val displayedLyricFontSize = normalizeLyricFontSizeSp(lyricFontSizeSliderValue.roundToInt())
     val animationSpeedOptions = LyricAnimationSpeed.entries
-    val normalizedGatewayBaseUrl = normalizeGatewayBaseUrl(gatewayBaseUrlDraft)
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp, 10.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
@@ -1926,51 +1920,6 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     }
                     ThemeButton(onClick = controller::forceResync, enabled = !controller.isLoading) {
                         Text(if (controller.isLoading) tr("settings.resync.doing") else tr("settings.resync.action"))
-                    }
-                }
-            }
-        }
-        item { SectionTitle(tr("settings.service")) }
-        item {
-            SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(18.dp)) {
-                    Text(tr("settings.service.title"), style = MaterialTheme.typography.titleSmall)
-                    Spacer(Modifier.height(3.dp))
-                    Text(
-                        tr("settings.service.hint"),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = colors.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
-                        value = gatewayBaseUrlDraft,
-                        onValueChange = { gatewayBaseUrlDraft = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text(tr("settings.service.address")) },
-                        placeholder = { Text(DEFAULT_GATEWAY_BASE_URL) },
-                        supportingText = if (gatewayBaseUrlDraft.isNotBlank() && normalizedGatewayBaseUrl == null) {
-                            { Text(tr("settings.service.invalid")) }
-                        } else {
-                            null
-                        },
-                        isError = gatewayBaseUrlDraft.isNotBlank() && normalizedGatewayBaseUrl == null,
-                        singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                    )
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        ThemeTextButton(onClick = { gatewayBaseUrlDraft = DEFAULT_GATEWAY_BASE_URL }) {
-                            Text(tr("settings.service.reset"))
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        ThemeButton(
-                            onClick = {
-                                normalizedGatewayBaseUrl?.let { controller.updateGatewayBaseUrl(it) }
-                            },
-                            enabled = normalizedGatewayBaseUrl != null && normalizedGatewayBaseUrl != controller.gatewayBaseUrl,
-                        ) {
-                            Text(tr("settings.save"))
-                        }
                     }
                 }
             }
@@ -2921,15 +2870,17 @@ private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit)
         Column(Modifier.weight(1f)) {
             Text(track.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // Artist names size to their content but cap out at roughly a third of the row, so
+                // a long list ellipsizes early instead of squeezing the album caption off the card.
                 AndroidArtistNames(
                     artists = track.artists,
                     fallback = track.artist,
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
-                    modifier = Modifier.weight(1f, fill = false),
+                    modifier = Modifier.weight(0.55f, fill = false),
                 )
                 if (track.album.isNotBlank()) {
-                    Text(" · ${track.album}", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(" · ${track.album}", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                 }
             }
         }

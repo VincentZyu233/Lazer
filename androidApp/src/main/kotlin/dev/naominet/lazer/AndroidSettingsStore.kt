@@ -2,8 +2,6 @@ package dev.naominet.lazer
 
 import android.content.Context
 import dev.naominet.lazer.gateway.AudioQuality
-import dev.naominet.lazer.gateway.DEFAULT_GATEWAY_BASE_URL
-import dev.naominet.lazer.gateway.normalizeGatewayBaseUrl
 
 internal val ANDROID_AUDIO_QUALITY_OPTIONS = listOf(
     AudioQuality.STANDARD,
@@ -142,14 +140,6 @@ internal class AndroidSettingsStore(context: Context) {
         get() = preferences.getBoolean(KEY_AUDIO_REACTIVE_LEVELS, false)
         set(value) = preferences.edit().putBoolean(KEY_AUDIO_REACTIVE_LEVELS, value).apply()
 
-    var gatewayBaseUrl: String
-        get() = normalizeGatewayBaseUrl(
-            preferences.getString(KEY_GATEWAY_BASE_URL, DEFAULT_GATEWAY_BASE_URL).orEmpty(),
-        ) ?: DEFAULT_GATEWAY_BASE_URL
-        set(value) = preferences.edit()
-            .putString(KEY_GATEWAY_BASE_URL, normalizeGatewayBaseUrl(value) ?: DEFAULT_GATEWAY_BASE_URL)
-            .apply()
-
     private companion object {
         const val PREFERENCES_NAME = "lazer.android.settings"
         const val KEY_DARK_THEME = "appearance.dark"
@@ -173,6 +163,5 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"
-        const val KEY_GATEWAY_BASE_URL = "gateway.base_url"
     }
 }
