@@ -12,17 +12,20 @@ import kotlin.math.min
  * Where the app takes its colour from.
  *  - [Default] uses the built-in paper/lake-blue scheme.
  *  - [System] uses the platform Monet palette (Android 12+); falls back to [Default] elsewhere.
+ *  - [NowPlaying] follows the dominant colour of the current track artwork where supported.
  *  - [Custom] derives every role from a user-picked seed colour, on every platform.
  */
 sealed interface LazerPalette {
     data object Default : LazerPalette
     data object System : LazerPalette
+    data object NowPlaying : LazerPalette
     data class Custom(val seed: Color) : LazerPalette
 
     companion object {
         fun parse(value: String?): LazerPalette = when {
             value == null -> Default
             value.equals("SYSTEM", ignoreCase = true) -> System
+            value.equals("NOW_PLAYING", ignoreCase = true) -> NowPlaying
             value.startsWith("CUSTOM:", ignoreCase = true) ->
                 value.substringAfter(':').toLongOrNull()?.let { Custom(Color(it.toInt())) } ?: Default
             else -> Default
@@ -32,6 +35,7 @@ sealed interface LazerPalette {
     fun serialize(): String = when (this) {
         Default -> "DEFAULT"
         System -> "SYSTEM"
+        NowPlaying -> "NOW_PLAYING"
         is Custom -> "CUSTOM:${seed.value.toLong()}"
     }
 }

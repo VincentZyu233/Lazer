@@ -5,7 +5,6 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
@@ -86,9 +85,9 @@ fun Modifier.captureLiquidGlass(glass: LazerLiquidGlass): Modifier =
     glass.backdrop?.let { layerBackdrop(it) } ?: this
 
 /**
- * Applies a liquid-glass surface that samples the captured content behind it: vibrancy, a light
- * blur, and lens refraction, finished with a neutral translucent surface for readability. No-op
- * when disabled.
+ * Applies a restrained glass surface that samples the captured content behind it. The lens is
+ * intentionally shallow and colour-neutral so text stays readable and stacked glass does not
+ * become a collection of bright, expensive distortion layers.
  */
 fun Modifier.liquidGlassSurface(
     glass: LazerLiquidGlass,
@@ -104,24 +103,24 @@ fun Modifier.liquidGlassSurface(
         shape = { shape },
         effects = {
             vibrancy()
+            colorControls(brightness = 0.02f, saturation = 1.08f)
             blur(effectiveBlurRadius.toPx())
             lens(
-                refractionHeight = 22.dp.toPx(),
-                refractionAmount = 44.dp.toPx(),
+                refractionHeight = 14.dp.toPx(),
+                refractionAmount = 24.dp.toPx(),
                 depthEffect = true,
-                chromaticAberration = true,
+                chromaticAberration = false,
             )
         },
-        highlight = { Highlight.Ambient },
-        innerShadow = { InnerShadow(radius = 12.dp, color = Color.Black.copy(alpha = 0.10f)) },
-        // Near-colourless: the material is the refraction, not a white fill.
-        onDrawSurface = { drawRect(surfaceColor.copy(alpha = 0.08f)) },
+        highlight = { Highlight.Plain.copy(alpha = 0.62f) },
+        innerShadow = { InnerShadow(radius = 8.dp, color = Color.Black.copy(alpha = 0.06f)) },
+        onDrawSurface = { drawRect(surfaceColor.copy(alpha = 0.18f)) },
     )
 }
 
 /**
  * Crisp, responsive glass for buttons and other top-level controls. At rest it stays quiet; while
- * pressed it gains stronger lensing, a small gel-like expansion, and a prismatic edge.
+ * pressed it gains a small amount of depth without adding chromatic shimmer.
  */
 fun Modifier.liquidGlassControlSurface(
     glass: LazerLiquidGlass,
@@ -140,32 +139,32 @@ fun Modifier.liquidGlassControlSurface(
         shape = { shape },
         effects = {
             vibrancy()
+            colorControls(brightness = 0.02f, saturation = 1.06f)
             blur(effectiveBlurRadius.toPx())
             lens(
-                refractionHeight = (12.dp + 6.dp * pressed).toPx(),
-                refractionAmount = (24.dp + 12.dp * pressed).toPx(),
-                depthEffect = pressed > 0f,
-                chromaticAberration = pressed > 0.12f,
+                refractionHeight = (10.dp + 3.dp * pressed).toPx(),
+                refractionAmount = (18.dp + 6.dp * pressed).toPx(),
+                depthEffect = pressed > 0.2f,
+                chromaticAberration = false,
             )
         },
-        highlight = { Highlight.Ambient.copy(alpha = 0.72f + 0.28f * pressed) },
+        highlight = { Highlight.Plain.copy(alpha = 0.66f + 0.22f * pressed) },
         innerShadow = {
             InnerShadow(
-                radius = 6.dp + 4.dp * pressed,
-                color = Color.Black.copy(alpha = 0.07f + 0.05f * pressed),
+                radius = 6.dp + 2.dp * pressed,
+                color = Color.Black.copy(alpha = 0.06f + 0.03f * pressed),
             )
         },
         layerBlock = {
-            val scale = 1f + 0.035f * pressed
+            val scale = 1f + 0.02f * pressed
             scaleX = scale
             scaleY = scale
         },
         onDrawSurface = {
             if (tint.isSpecified) {
-                drawRect(tint, blendMode = BlendMode.Hue)
-                drawRect(tint.copy(alpha = 0.56f + 0.10f * pressed))
+                drawRect(tint.copy(alpha = 0.38f + 0.08f * pressed))
             } else {
-                drawRect(surfaceColor.copy(alpha = 0.10f + 0.04f * pressed))
+                drawRect(surfaceColor.copy(alpha = 0.16f + 0.05f * pressed))
             }
         },
     )

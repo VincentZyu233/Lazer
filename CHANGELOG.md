@@ -1,5 +1,53 @@
 # Changelog / 更新日志
 
+## v1.2 — 2026-09-20
+
+### English
+
+**Highlights**
+
+- **Android now playing** — rebuilt the cover expansion, compact/large artwork transition, translated song titles, and landscape layout so controls and lyrics remain usable on wide screens.
+- **AMLL-style lyrics** — added hot-inserted interlude dots with integrated entrance/exit motion, improved word timing and row springs, and fixed glow clipping during lyric changes. Interlude dots now share the lyric glow treatment.
+- **Artwork-driven appearance** — backgrounds can use an image, a solid artwork color, or a low-frame-rate animated artwork color. App colors can follow the current cover, and image backgrounds support adjustable blur.
+
+**Interface**
+
+- The Android root page now remains mounted behind detail pages, removing the flash when returning from a playlist.
+- Material navigation now uses the standard navigation bar; Liquid Glass uses calmer refraction and clearer surfaces. The Discover tab and its Android page were removed.
+- Bottom navigation labels stay on one line and use fixed heights in every language, including Japanese.
+- The library rotates through ten localized usage tips on entry. Large artwork gains an animated shadow.
+
+**Performance and fixes**
+
+- Cached artwork palette extraction, reduced continuous background work, and capped optional color motion at 12 fps.
+- Fixed interlude dots disappearing before the lyric layout closed, full-screen artwork animation stopping, and glow being clipped to a small rectangle during focus transitions.
+- Added persistent background modes, image blur settings, translated track-title rendering, and broader lyric/layout tests.
+
+---
+
+### 中文
+
+**重点更新**
+
+- **Android 正在播放页** — 重做封面展开、大小封面过渡、歌曲译名显示和横屏布局，宽屏下控制区与歌词区均可正常使用。
+- **AMLL 风格歌词** — 新增可热插入的间奏圆点及融合式进出动画，优化逐字时间、歌词行弹簧，并修复切换歌词时辉光被裁剪的问题；间奏圆点也会跟随歌词发光设置。
+- **封面驱动外观** — 背景可选择图片、封面纯色或低帧率动态封面色；应用配色可跟随当前歌曲封面，图片背景支持可调模糊。
+
+**界面**
+
+- Android 主页常驻在详情页下方，修复从歌单返回时的底部闪烁。
+- Material 底栏改用标准导航组件，液态玻璃降低折射并提高可读性；移除 Android 的“发现”入口与页面。
+- 所有语言的底栏标签固定为单行和固定高度，修复日语界面底栏异常增高。
+- 音乐库每次进入轮换十条本地化提示；大封面模式新增渐进阴影。
+
+**性能与修复**
+
+- 缓存封面取色、减少持续背景绘制，并将可选动态取色限制为 12 帧每秒。
+- 修复间奏圆点提前消失、全屏后封面色动画停止，以及歌词聚焦过程中辉光被限制在小矩形内的问题。
+- 新增可持久化的背景模式、图片模糊设置、歌曲译名渲染，并补充歌词与布局测试。
+
+---
+
 ## v1.1 — 2026-09-13
 
 ### English

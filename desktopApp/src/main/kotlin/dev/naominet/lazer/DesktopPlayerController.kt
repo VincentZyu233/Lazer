@@ -1052,7 +1052,7 @@ class DesktopPlayerController(
                     val connection = java.net.URI(url).toURL().openConnection().apply {
                         connectTimeout = 12_000
                         readTimeout = 20_000
-                        setRequestProperty("User-Agent", "Lazer/1.1")
+                        setRequestProperty("User-Agent", "Lazer/1.2")
                     }
                     target.parentFile?.mkdirs()
                     val temporary = java.io.File(target.parentFile, ".${target.name}.${System.nanoTime()}.part")

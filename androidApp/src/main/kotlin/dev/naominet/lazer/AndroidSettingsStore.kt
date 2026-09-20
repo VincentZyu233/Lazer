@@ -25,6 +25,20 @@ internal fun parseAndroidPlaybackInterface(value: String?): AndroidPlaybackInter
     AndroidPlaybackInterface.entries.firstOrNull { it.name == value }
         ?: AndroidPlaybackInterface.SYSTEM_MEDIA
 
+/** Visual source rendered behind every Android page. */
+enum class AndroidBackgroundMode {
+    SOLID,
+    IMAGE,
+    NOW_PLAYING_DYNAMIC,
+    NOW_PLAYING_STATIC,
+}
+
+internal fun parseAndroidBackgroundMode(value: String?): AndroidBackgroundMode =
+    AndroidBackgroundMode.entries.firstOrNull { it.name == value }
+        ?: AndroidBackgroundMode.SOLID
+
+internal fun normalizeBackgroundImageBlurIntensity(value: Float): Float = value.coerceIn(0f, 1f)
+
 /** App-scoped preferences for Android appearance, playback, and service settings. */
 internal class AndroidSettingsStore(context: Context) {
     private val preferences = context.applicationContext.getSharedPreferences(
@@ -58,9 +72,35 @@ internal class AndroidSettingsStore(context: Context) {
         get() = preferences.getBoolean(KEY_BACKGROUND_IMAGE_ENABLED, true)
         set(value) = preferences.edit().putBoolean(KEY_BACKGROUND_IMAGE_ENABLED, value).apply()
 
+    /** Background source. Migrates the former image enabled switch on first read. */
+    var backgroundMode: AndroidBackgroundMode
+        get() {
+            preferences.getString(KEY_BACKGROUND_MODE, null)?.let {
+                return parseAndroidBackgroundMode(it)
+            }
+            return if (backgroundImagePath != null && backgroundImageEnabled) {
+                AndroidBackgroundMode.IMAGE
+            } else {
+                AndroidBackgroundMode.SOLID
+            }
+        }
+        set(value) = preferences.edit().putString(KEY_BACKGROUND_MODE, value.name).apply()
+
     var backgroundAlpha: Float
         get() = preferences.getFloat(KEY_BACKGROUND_ALPHA, 0.5f).coerceIn(0f, 1f)
         set(value) = preferences.edit().putFloat(KEY_BACKGROUND_ALPHA, value.coerceIn(0f, 1f)).apply()
+
+    var backgroundImageBlurEnabled: Boolean
+        get() = preferences.getBoolean(KEY_BACKGROUND_IMAGE_BLUR_ENABLED, false)
+        set(value) = preferences.edit().putBoolean(KEY_BACKGROUND_IMAGE_BLUR_ENABLED, value).apply()
+
+    var backgroundImageBlurIntensity: Float
+        get() = normalizeBackgroundImageBlurIntensity(
+            preferences.getFloat(KEY_BACKGROUND_IMAGE_BLUR_INTENSITY, 0.35f),
+        )
+        set(value) = preferences.edit()
+            .putFloat(KEY_BACKGROUND_IMAGE_BLUR_INTENSITY, normalizeBackgroundImageBlurIntensity(value))
+            .apply()
 
     var liquidGlassBlurIntensity: Float
         get() = normalizeLiquidGlassBlurIntensity(
@@ -148,7 +188,10 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_PALETTE = "appearance.palette"
         const val KEY_BACKGROUND_IMAGE = "appearance.background_image"
         const val KEY_BACKGROUND_IMAGE_ENABLED = "appearance.background_image_enabled"
+        const val KEY_BACKGROUND_MODE = "appearance.background_mode"
         const val KEY_BACKGROUND_ALPHA = "appearance.background_alpha"
+        const val KEY_BACKGROUND_IMAGE_BLUR_ENABLED = "appearance.background_image_blur_enabled"
+        const val KEY_BACKGROUND_IMAGE_BLUR_INTENSITY = "appearance.background_image_blur_intensity"
         const val KEY_THEME_ENGINE = "appearance.theme_engine"
         const val KEY_LIQUID_GLASS_ENABLED = "appearance.liquid_glass"
         const val KEY_LIQUID_GLASS_BLUR_INTENSITY = "appearance.liquid_glass_blur_intensity"

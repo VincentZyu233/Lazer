@@ -29,7 +29,7 @@ internal object CoverPalette {
             val connection = URI(coverUrl.toPaletteArtworkUrl()).toURL().openConnection().apply {
                 connectTimeout = 8_000
                 readTimeout = 8_000
-                setRequestProperty("User-Agent", "Lazer/1.1")
+                setRequestProperty("User-Agent", "Lazer/1.2")
             }
             val image = connection.getInputStream().buffered(16 * 1024).use(ImageIO::read)
                 ?: return defaultSeed

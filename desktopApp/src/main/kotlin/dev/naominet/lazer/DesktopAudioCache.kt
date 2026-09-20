@@ -185,7 +185,7 @@ private class AudioCacheEntry(
             val connection = URI(url).toURL().openConnection().apply {
                 connectTimeout = 15_000
                 readTimeout = 20_000
-                setRequestProperty("User-Agent", "Lazer/1.1")
+                setRequestProperty("User-Agent", "Lazer/1.2")
                 setRequestProperty("Accept-Encoding", "identity")
                 if (start > 0L) setRequestProperty("Range", "bytes=$start-")
             }
