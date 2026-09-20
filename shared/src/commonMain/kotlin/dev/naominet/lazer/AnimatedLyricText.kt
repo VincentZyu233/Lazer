@@ -25,7 +25,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
@@ -33,10 +35,29 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Constraints
 import kotlin.math.min
 import kotlin.math.roundToLong
 
 private val LyricShaderShadowRadius = 12.dp
+private val LyricGlowOverflowPadding = 18.dp
+
+/** Enlarges only the render layer; the lyric keeps its original measured row size. */
+private fun Modifier.expandLayerForGlow(padding: Dp): Modifier = layout { measurable, constraints ->
+    val paddingPx = padding.roundToPx()
+    val originalWidth = constraints.maxWidth
+    val originalHeight = constraints.maxHeight
+    val placeable = measurable.measure(
+        Constraints.fixed(
+            width = originalWidth + paddingPx * 2,
+            height = originalHeight + paddingPx * 2,
+        ),
+    )
+    layout(originalWidth, originalHeight) {
+        placeable.place(-paddingPx, -paddingPx)
+    }
+}
 
 @Composable
 fun animatedLyricFocus(active: Boolean, speed: LyricAnimationSpeed): Float {
@@ -106,23 +127,28 @@ fun AmllLyricText(
     // A selected line used to calculate its per-glyph clip geometry twice every frame: once for
     // the blurred selection layer and once for the foreground. Compute it once and reuse it for
     // both passes. Inactive rows do not need a mask at all.
-    val playbackPosition = animatedPosition.roundToLong()
-    val needsMask = timedGlyphs.isNotEmpty() && (active || currentLine || effectStrength > 0.001f)
-    val maskClips = if (needsMask) {
-        remember(layoutResult, timedGlyphs, words, playbackPosition, speed) {
-            layoutResult?.let {
-                lineScanClips(it, timedGlyphs, words, playbackPosition, speed)
-            }.orEmpty()
+    val maskClips = remember(layoutResult, timedGlyphs, words, speed) {
+        var cachedPosition = Long.MIN_VALUE
+        var cachedClips = emptyList<Rect>()
+        val compute: () -> List<Rect> = {
+            val position = animatedPosition.roundToLong()
+            if (position != cachedPosition) {
+                cachedPosition = position
+                cachedClips = layoutResult?.let {
+                    lineScanClips(it, timedGlyphs, words, position, speed)
+                }.orEmpty()
+            }
+            cachedClips
         }
-    } else {
-        emptyList()
+        compute
     }
 
     Box(modifier) {
-        if (glowEnabled) {
+        if (glowEnabled && (currentLine || lineFocus > 0.001f)) {
             Box(
                 Modifier
                     .matchParentSize()
+                    .expandLayerForGlow(LyricGlowOverflowPadding)
                     .graphicsLayer {
                         val radius = LyricShaderShadowRadius.toPx()
                         compositingStrategy = CompositingStrategy.Offscreen
@@ -137,12 +163,16 @@ fun AmllLyricText(
                     .drawBehind {
                         if (lineFocus <= 0.001f) return@drawBehind
                         val measured = layoutResult ?: return@drawBehind
-                        drawLyricShaderShadow(
-                            layout = measured,
-                            hasTimedGlyphs = timedGlyphs.isNotEmpty(),
-                            maskClips = maskClips,
-                            shadowColor = shadowColor,
-                        )
+                        drawRect(color = Color.Transparent, blendMode = BlendMode.Clear)
+                        val inset = LyricGlowOverflowPadding.toPx()
+                        translate(left = inset, top = inset) {
+                            drawLyricShaderShadow(
+                                layout = measured,
+                                hasTimedGlyphs = timedGlyphs.isNotEmpty(),
+                                maskClips = maskClips(),
+                                shadowColor = shadowColor,
+                            )
+                        }
                     }
                     .clearAndSetSemantics { },
             )
@@ -161,7 +191,7 @@ fun AmllLyricText(
                     drawAmllGlyphs(
                         layout = measured,
                         hasTimedGlyphs = timedGlyphs.isNotEmpty(),
-                        maskClips = maskClips,
+                        maskClips = maskClips(),
                         color = color,
                         effectStrength = effectStrength,
                     )
@@ -218,7 +248,6 @@ private fun DrawScope.drawLyricShaderShadow(
     maskClips: List<Rect>,
     shadowColor: Color,
 ) {
-    drawRect(color = Color.Transparent, blendMode = BlendMode.Clear)
     if (!hasTimedGlyphs) {
         drawText(textLayoutResult = layout, color = shadowColor)
         return

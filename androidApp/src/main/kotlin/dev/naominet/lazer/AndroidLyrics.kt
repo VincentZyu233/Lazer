@@ -5,6 +5,7 @@ data class AndroidTimedLyricLine(
     val text: String,
     val translation: String? = null,
     val words: List<TimedLyricWord> = emptyList(),
+    val endTimeMillis: Long? = null,
 )
 
 private val AndroidLrcStampPattern = Regex("""\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?]""")
@@ -30,7 +31,7 @@ internal fun parseAndroidLrc(lrc: String?): List<AndroidTimedLyricLine> {
                 minute * 60_000L + second * 1_000L + millis
             }.toList()
             val text = line.substring(lastStampEnd).trim()
-            if (text.isNotBlank()) stamps.forEach { add(AndroidTimedLyricLine(it, text)) }
+            stamps.forEach { add(AndroidTimedLyricLine(it, text)) }
         }
     }.sortedBy(AndroidTimedLyricLine::timeMillis)
 }
@@ -41,6 +42,7 @@ internal fun parseAndroidWordLyrics(yrc: String?): List<AndroidTimedLyricLine> =
             timeMillis = line.timeMillis,
             text = line.text,
             words = line.words,
+            endTimeMillis = line.timeMillis + line.durationMillis,
         )
     }
 
@@ -72,3 +74,31 @@ internal fun activeAndroidLyricIndex(lines: List<AndroidTimedLyricLine>, positio
     }
     return result
 }
+
+internal fun androidLyricsWithInterludes(lines: List<AndroidTimedLyricLine>, durationMillis: Long): List<AndroidTimedLyricLine> = buildList {
+    val first = lines.firstOrNull() ?: return@buildList
+    if (first.timeMillis >= 5_000L && first.text.isNotBlank()) {
+        add(AndroidTimedLyricLine(0L, "", endTimeMillis = first.timeMillis))
+    }
+    lines.forEachIndexed { index, line ->
+        val next = lines.getOrNull(index + 1)?.timeMillis ?: durationMillis
+        add(if (line.text.isBlank()) line.copy(endTimeMillis = next) else line)
+        if (line.text.isNotBlank()) {
+            val end = line.endTimeMillis ?: line.words.maxOfOrNull { it.startTimeMillis + it.durationMillis }
+            lyricInterludeStart(line.timeMillis, end, next)?.let { start ->
+                add(AndroidTimedLyricLine(start, "", endTimeMillis = next))
+            }
+        }
+    }
+}
+
+/** Timing metadata is retained, but only the current interlude participates in layout. */
+internal fun activeAndroidInterlude(lines: List<AndroidTimedLyricLine>, positionMillis: Long): AndroidTimedLyricLine? =
+    lines.getOrNull(activeAndroidLyricIndex(lines, positionMillis))?.takeIf {
+        it.text.isBlank() && positionMillis < (it.endTimeMillis ?: Long.MAX_VALUE)
+    }
+
+internal fun androidLyricDisplayLines(
+    timeline: List<AndroidTimedLyricLine>,
+    interlude: AndroidTimedLyricLine?,
+): List<AndroidTimedLyricLine> = timeline.filter { it.text.isNotBlank() || it === interlude }

@@ -72,6 +72,7 @@ data class AndroidTrack(
     val durationMillis: Long,
     val coverUrl: String? = null,
     val artists: List<Artist> = emptyList(),
+    val translatedTitle: String? = null,
 ) {
     val durationLabel: String get() = formatPlaybackTime(durationMillis)
 }
@@ -325,6 +326,7 @@ class AndroidPlaylistCache(context: Context) {
                 JSONObject().apply {
                     put("id", track.id)
                     put("title", track.title)
+                    put("translatedTitle", track.translatedTitle)
                     put("artist", track.artist)
                     put("album", track.album)
                     put("durationMillis", track.durationMillis)
@@ -350,6 +352,7 @@ class AndroidPlaylistCache(context: Context) {
                 AndroidTrack(
                     id = item.optLong("id"),
                     title = item.optString("title"),
+                    translatedTitle = item.optString("translatedTitle").takeIf { it.isNotBlank() && it != "null" },
                     artist = item.optString("artist"),
                     album = item.optString("album"),
                     durationMillis = item.optLong("durationMillis"),

@@ -145,6 +145,7 @@ fun WindowScope.DesktopPlayerApp(
         when (val palette = controller.palette) {
             LazerPalette.Default -> null
             LazerPalette.System -> null
+            LazerPalette.NowPlaying -> null
             is LazerPalette.Custom -> seedColorScheme(palette.seed, controller.isDark)
         }
     }
@@ -1891,6 +1892,7 @@ private fun desktopStyleLabel(style: LazerStyle): String =
 private fun paletteLabel(palette: LazerPalette): String = when (palette) {
     LazerPalette.Default -> tr("settings.palette.default")
     LazerPalette.System -> tr("settings.palette.system")
+    LazerPalette.NowPlaying -> tr("settings.palette.now_playing")
     is LazerPalette.Custom -> tr("settings.palette.custom")
 }
 

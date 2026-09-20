@@ -47,6 +47,41 @@ fun lyricLineCenters(
     }
 }
 
+/**
+ * Places one transient row without making the surrounding lyrics jump when it is inserted or
+ * removed. At zero presence the ordinary lyric rows use exactly the same centers as if the row did
+ * not exist; at full presence this is identical to [lyricLineCenters].
+ */
+fun lyricLineCentersWithTransientRow(
+    rowHeightsPx: List<Float>,
+    transientIndex: Int,
+    presence: Float,
+    minimumGapPx: Float,
+    maximumGapPx: Float,
+    gapRatio: Float = 0.10f,
+): FloatArray {
+    val full = lyricLineCenters(rowHeightsPx, minimumGapPx, maximumGapPx, gapRatio)
+    if (transientIndex !in rowHeightsPx.indices || rowHeightsPx.size == 1) return full
+    val amount = presence.coerceIn(0f, 1f)
+    if (amount >= 1f) return full
+
+    val stableHeights = rowHeightsPx.filterIndexed { index, _ -> index != transientIndex }
+    val stable = lyricLineCenters(stableHeights, minimumGapPx, maximumGapPx, gapRatio)
+    val collapsedTransientCenter = when {
+        transientIndex == 0 -> stable.first()
+        transientIndex >= rowHeightsPx.lastIndex -> stable.last()
+        else -> (stable[transientIndex - 1] + stable[transientIndex]) / 2f
+    }
+    return FloatArray(rowHeightsPx.size) { index ->
+        val collapsed = when {
+            index == transientIndex -> collapsedTransientCenter
+            index < transientIndex -> stable[index]
+            else -> stable[index - 1]
+        }
+        collapsed + (full[index] - collapsed) * amount
+    }
+}
+
 /** A translation moves farther from the original as the original wraps onto more lines. */
 fun lyricTranslationGapPx(
     mainLyricHeightPx: Float,

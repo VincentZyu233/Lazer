@@ -17,7 +17,6 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -25,7 +24,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
 import java.net.URL
@@ -37,17 +39,13 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-private const val FlowFrameIntervalNanos = 33_333_333L
+private val ArtworkSeedCache = android.util.LruCache<String, Color>(24)
+private val ArtworkSeedMutex = Mutex()
 private val FluidPaletteEasing = Easing { fraction ->
     ((1.0 - cos(PI * fraction.coerceIn(0f, 1f))) * 0.5).toFloat()
 }
-private val DefaultFlowPalette = listOf(
-    Color(0xFFA9C8D8),
-    Color(0xFFC5D5CE),
-    Color(0xFFB88769),
-    Color(0xFFE7ECEB),
-    Color(0xFF5F91AC),
-)
+private val DefaultArtworkSeed = Color(0xFF5F91AC)
+private val DefaultFlowPalette = flowColorsFromSeed(DefaultArtworkSeed)
 
 @Composable
 internal fun AndroidAlbumFlowBackground(
@@ -55,15 +53,63 @@ internal fun AndroidAlbumFlowBackground(
     modifier: Modifier = Modifier,
     cornerRadius: Dp,
     veil: Color,
+    animated: Boolean = false,
+    solid: Boolean = false,
 ) {
-    AndroidArtworkFlowBackground(
-        artworkKey = track?.id,
-        coverUrl = track?.coverUrl,
-        modifier = modifier,
-        cornerRadius = cornerRadius,
-        veil = veil,
-        animated = true,
-    )
+    if (solid) {
+        AndroidArtworkSolidBackground(
+            track = track,
+            modifier = modifier,
+            cornerRadius = cornerRadius,
+            veil = veil,
+        )
+    } else {
+        AndroidArtworkFlowBackground(
+            artworkKey = track?.id,
+            coverUrl = track?.coverUrl,
+            modifier = modifier,
+            cornerRadius = cornerRadius,
+            veil = veil,
+            animated = animated,
+        )
+    }
+}
+
+/** Keeps the previous artwork seed until the next cover has been decoded, avoiding a theme flash. */
+@Composable
+internal fun rememberAndroidArtworkSeed(track: AndroidTrack?): Color? {
+    var seed by remember { mutableStateOf<Color?>(null) }
+    LaunchedEffect(track?.id, track?.coverUrl) {
+        if (track == null) {
+            seed = null
+        } else {
+            seed = extractAndroidArtworkSeed(track.coverUrl) ?: DefaultArtworkSeed
+        }
+    }
+    return seed
+}
+
+@Composable
+private fun AndroidArtworkSolidBackground(
+    track: AndroidTrack?,
+    modifier: Modifier,
+    cornerRadius: Dp,
+    veil: Color,
+) {
+    val seed = rememberAndroidArtworkSeed(track) ?: DefaultArtworkSeed
+    Crossfade(
+        targetState = seed,
+        modifier = modifier.clip(RoundedCornerShape(cornerRadius)),
+        animationSpec = tween(durationMillis = 650, easing = FluidPaletteEasing),
+        label = "android-artwork-solid-color",
+    ) { activeSeed ->
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(activeSeed)
+                .background(veil),
+        )
+    }
 }
 
 @Composable
@@ -93,25 +139,19 @@ private fun AndroidArtworkFlowBackground(
     animated: Boolean,
 ) {
     var colors by remember { mutableStateOf(DefaultFlowPalette) }
-    var phaseSeconds by remember { mutableFloatStateOf(0f) }
+    var phaseSeconds by remember(artworkKey, animated) { mutableFloatStateOf(0f) }
 
     LaunchedEffect(artworkKey, coverUrl) {
         colors = extractAndroidFlowPalette(coverUrl)
     }
-    LaunchedEffect(animated) {
-        if (!animated) return@LaunchedEffect
-        var lastPublishedNs = 0L
-        while (isActive) {
-            withFrameNanos { now ->
-                if (lastPublishedNs == 0L) {
-                    lastPublishedNs = now
-                } else if (now - lastPublishedNs >= FlowFrameIntervalNanos) {
-                    val elapsedSeconds = ((now - lastPublishedNs) / 1_000_000_000.0)
-                        .toFloat()
-                        .coerceAtMost(0.1f)
-                    lastPublishedNs = now
-                    phaseSeconds = (phaseSeconds + elapsedSeconds) % 10_000f
-                }
+    // The optional ambient background is deliberately capped at 12 fps. It keeps the palette
+    // alive without turning a full-screen decorative layer into a display-refresh-rate workload.
+    LaunchedEffect(artworkKey, animated) {
+        phaseSeconds = 0f
+        if (animated) {
+            while (isActive) {
+                delay(83L)
+                phaseSeconds = (phaseSeconds + 0.083f) % 10_000f
             }
         }
     }
@@ -197,24 +237,39 @@ private fun BoxScope.FlowLayer(
     )
 }
 
-private suspend fun extractAndroidFlowPalette(coverUrl: String?): List<Color> = withContext(Dispatchers.IO) {
-    if (coverUrl.isNullOrBlank()) return@withContext DefaultFlowPalette
-    runCatching {
-        val connection = URL(coverUrl.toAndroidPaletteArtworkUrl()).openConnection() as HttpURLConnection
-        connection.connectTimeout = 8_000
-        connection.readTimeout = 8_000
-        connection.setRequestProperty("User-Agent", "Lazer/1.1")
-        connection.inputStream.use(BitmapFactory::decodeStream)
-            ?.let(::seedFromBitmap)
-            ?.let(::flowColorsFromSeed)
-            ?: DefaultFlowPalette
-    }.getOrDefault(DefaultFlowPalette)
+private suspend fun extractAndroidFlowPalette(coverUrl: String?): List<Color> =
+    extractAndroidArtworkSeed(coverUrl)?.let(::flowColorsFromSeed) ?: DefaultFlowPalette
+
+private suspend fun extractAndroidArtworkSeed(coverUrl: String?): Color? = withContext(Dispatchers.IO) {
+    if (coverUrl.isNullOrBlank()) return@withContext null
+    val artworkUrl = coverUrl.toAndroidPaletteArtworkUrl()
+    ArtworkSeedCache.get(artworkUrl)?.let { return@withContext it }
+    ArtworkSeedMutex.withLock {
+        ArtworkSeedCache.get(artworkUrl)?.let { return@withLock it }
+        runCatching {
+            val connection = URL(artworkUrl).openConnection() as HttpURLConnection
+            connection.connectTimeout = 8_000
+            connection.readTimeout = 8_000
+            connection.setRequestProperty("User-Agent", "Lazer/1.2")
+            try {
+                val bitmap = connection.inputStream.use(BitmapFactory::decodeStream)
+                    ?: return@runCatching null
+                try {
+                    seedFromBitmap(bitmap).also { ArtworkSeedCache.put(artworkUrl, it) }
+                } finally {
+                    bitmap.recycle()
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+    }
 }
 
 private fun seedFromBitmap(bitmap: Bitmap): Color {
     val width = bitmap.width
     val height = bitmap.height
-    if (width <= 0 || height <= 0) return Color(0xFF5F91AC)
+    if (width <= 0 || height <= 0) return DefaultArtworkSeed
     val stepX = max(1, width / 48)
     val stepY = max(1, height / 48)
     val weightedRed = DoubleArray(24)
@@ -271,21 +326,19 @@ private fun seedFromBitmap(bitmap: Bitmap): Color {
             (averageBlue / averageCount).roundToInt().coerceIn(0, 255) / 255f,
         )
     } else {
-        Color(0xFF5F91AC)
+        DefaultArtworkSeed
     }
 }
 
 private fun flowColorsFromSeed(seed: Color): List<Color> {
     val hsl = rgbToHsl(seed.red, seed.green, seed.blue)
-    val primaryChroma = (hsl[1] * 0.70f + 0.12f).coerceIn(0.22f, 0.55f)
-    val tertiaryHue = (hsl[0] + 48f) % 360f
-    val paperHue = lerpHue(hsl[0], 42f, 0.55f)
+    val primaryChroma = (hsl[1] * 0.72f + 0.12f).coerceIn(0.20f, 0.58f)
     return listOf(
-        hslToColor(hsl[0], primaryChroma, 0.90f),
-        hslToColor(hsl[0], 0.14f, 0.90f),
-        hslToColor(tertiaryHue, 0.20f, 0.40f),
-        hslToColor(paperHue, 0.045f, 0.86f),
-        hslToColor(hsl[0], primaryChroma, 0.38f),
+        hslToColor(hsl[0], primaryChroma * 0.55f, 0.90f),
+        hslToColor(hsl[0], primaryChroma * 0.72f, 0.76f),
+        hslToColor(hsl[0], primaryChroma, 0.58f),
+        hslToColor(hsl[0], primaryChroma * 0.86f, 0.43f),
+        hslToColor(hsl[0], primaryChroma * 0.74f, 0.31f),
     )
 }
 
@@ -321,11 +374,6 @@ private fun hslToColor(hue: Float, saturation: Float, lightness: Float): Color {
     }
     val match = safeLightness - chroma / 2f
     return Color(red + match, green + match, blue + match)
-}
-
-private fun lerpHue(start: Float, end: Float, fraction: Float): Float {
-    val distance = ((end - start + 540f) % 360f) - 180f
-    return ((start + distance * fraction) % 360f + 360f) % 360f
 }
 
 private fun normalizeFlowPalette(colors: List<Color>): List<Color> {

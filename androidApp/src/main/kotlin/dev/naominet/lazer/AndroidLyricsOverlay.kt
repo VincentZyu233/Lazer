@@ -27,11 +27,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -45,6 +49,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
+import androidx.compose.runtime.snapshotFlow
 import kotlin.math.roundToInt
 
 @Composable
@@ -63,13 +69,34 @@ internal fun AndroidLyricsViewport(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val timeline = remember(lines, track?.durationMillis) {
+        androidLyricsWithInterludes(lines, track?.durationMillis ?: 0L)
+    }
+    val targetInterlude = activeAndroidInterlude(timeline, positionMillis)
+    var renderedInterlude by remember(track?.id, timeline) { mutableStateOf<AndroidTimedLyricLine?>(null) }
+    val interludePresence = remember(track?.id, timeline) { Animatable(0f) }
+    LaunchedEffect(targetInterlude) {
+        if (targetInterlude == renderedInterlude) return@LaunchedEffect
+        if (renderedInterlude != null) {
+            interludePresence.animateTo(0f, tween(560, easing = FastOutSlowInEasing))
+        }
+        renderedInterlude = targetInterlude
+        if (targetInterlude != null) {
+            interludePresence.snapTo(0f)
+            interludePresence.animateTo(1f, tween(360, easing = FastOutSlowInEasing))
+        }
+    }
+    val displayLines = remember(timeline, renderedInterlude) {
+        androidLyricDisplayLines(timeline, renderedInterlude)
+    }
     when {
         track == null -> LyricEmpty(tr("lyrics.empty"), modifier)
         isLoading -> LyricEmpty(tr("lyrics.loading"), modifier)
-        lines.isEmpty() -> LyricEmpty(message ?: tr("lyrics.none"), modifier)
+        displayLines.isEmpty() -> LyricEmpty(message ?: tr("lyrics.none"), modifier)
         else -> AnimatedLyricsViewport(
             trackId = track.id,
-            lines = lines,
+            lines = displayLines,
+            interludePresence = interludePresence.value,
             positionMillis = positionMillis,
             followDelayMillis = followDelayMillis,
             animationSpeed = animationSpeed,
@@ -87,6 +114,7 @@ internal fun AndroidLyricsViewport(
 private fun AnimatedLyricsViewport(
     trackId: Long,
     lines: List<AndroidTimedLyricLine>,
+    interludePresence: Float,
     positionMillis: Long,
     followDelayMillis: Long,
     animationSpeed: LyricAnimationSpeed,
@@ -112,11 +140,11 @@ private fun AnimatedLyricsViewport(
     val translationFontSp = (lyricFontSizeSp * 0.50f).coerceIn(12f, 20f).sp
     val translationLineHeightSp = (translationFontSp.value * 1.38f).sp
     val lyricMaxLines = if (showFullLyrics) Int.MAX_VALUE else 2
-    val measuredRowHeightsPx = remember(lines, lyricFontSizeSp, showFullLyrics) {
-        mutableStateMapOf<Int, Int>()
+    val measuredRowHeightsPx = remember(trackId, lyricFontSizeSp, showFullLyrics) {
+        mutableStateMapOf<AndroidTimedLyricLine, Int>()
     }
-    val measuredMainHeightsPx = remember(lines, lyricFontSizeSp, showFullLyrics) {
-        mutableStateMapOf<Int, Int>()
+    val measuredMainHeightsPx = remember(trackId, lyricFontSizeSp, showFullLyrics) {
+        mutableStateMapOf<AndroidTimedLyricLine, Int>()
     }
     val estimatedMainHeightPx = with(density) { mainLineHeightSp.toPx() }
     val estimatedTranslationHeightPx = with(density) { translationLineHeightSp.toPx() }
@@ -126,8 +154,8 @@ private fun AnimatedLyricsViewport(
     val maximumRowGapPx = spacing.maximumRowGapPx
     val minimumTranslationGapPx = spacing.minimumTranslationGapPx
     val maximumTranslationGapPx = spacing.maximumTranslationGapPx
-    val rowHeightsPx = lines.mapIndexed { index, line ->
-        measuredRowHeightsPx[index]?.toFloat() ?: (
+    val rowHeightsPx = lines.map { line ->
+        measuredRowHeightsPx[line]?.toFloat() ?: (
             estimatedMainHeightPx + if (line.translation.isNullOrBlank()) {
                 0f
             } else {
@@ -139,8 +167,11 @@ private fun AnimatedLyricsViewport(
             }
         )
     }
-    val lineCentersPx = lyricLineCenters(
+    val transientIndex = lines.indexOfFirst { it.text.isBlank() }
+    val lineCentersPx = lyricLineCentersWithTransientRow(
         rowHeightsPx = rowHeightsPx,
+        transientIndex = transientIndex,
+        presence = interludePresence,
         minimumGapPx = minimumRowGapPx,
         maximumGapPx = maximumRowGapPx,
     )
@@ -154,9 +185,10 @@ private fun AnimatedLyricsViewport(
     var flingVelocity by remember { mutableFloatStateOf(0f) }
     var lastDragNanos by remember { mutableLongStateOf(0L) }
     var lastFrameNanos by remember { mutableLongStateOf(0L) }
+    var motionFrame by remember { mutableLongStateOf(0L) }
     val lyricLineMotion = remember { LyricLineMotionField() }
 
-    LaunchedEffect(lines.size, trackId, lyricFontSizeSp, showFullLyrics) {
+    LaunchedEffect(trackId, lyricFontSizeSp, showFullLyrics) {
         followPlayback = true
         isDragging = false
         flingVelocity = 0f
@@ -165,8 +197,25 @@ private fun AnimatedLyricsViewport(
         lyricLineMotion.reset(lines.size, lyricScroll)
         lastFrameNanos = 0L
     }
+    var previousLines by remember(trackId) { mutableStateOf(lines) }
+    LaunchedEffect(lines) {
+        // Inserting/removing a dot row must not reset manual browsing or existing row springs.
+        lyricLineMotion.remap(lines.map { previousLines.indexOf(it) }, lyricScroll)
+        previousLines = lines
+        motionFrame++
+    }
     LaunchedEffect(Unit) {
+        var moving = true
         while (isActive) {
+            if (!moving && followPlayback) {
+                // No frame callbacks or spring integration while the lyrics are at rest.
+                snapshotFlow {
+                    !followPlayback || kotlin.math.abs(
+                        currentLineCentersPx.getOrElse(currentActiveIndex.coerceAtLeast(0)) { 0f } - lyricScroll
+                    ) > 0.02f
+                }.first { it }
+                lastFrameNanos = 0L
+            }
             withFrameNanos { now ->
                 val deltaSeconds = if (lastFrameNanos == 0L) {
                     1f / 60f
@@ -189,18 +238,17 @@ private fun AnimatedLyricsViewport(
                         val intervalMillis = currentLines.getOrNull(liveIndex - 1)?.let { previous ->
                             (currentLines[liveIndex].timeMillis - previous.timeMillis).coerceAtLeast(0L)
                         }
-                        if (lyricLineMotion.advance(
+                        moving = lyricLineMotion.advance(
                                 target = target,
                                 activeIndex = liveIndex,
                                 seconds = deltaSeconds,
                                 intervalMillis = intervalMillis,
                                 speed = currentAnimationSpeed,
                             )
-                        ) {
-                            // The per-frame placement below reads the scroll state inside the offset
-                            // lambda, so advancing the motion field only re-lays-out rows.
-                        }
+                        motionFrame++
                         lyricScroll = lyricLineMotion.positionFor(liveIndex).coerceIn(0f, currentMaxScroll)
+                    } else {
+                        moving = false
                     }
                 } else if (!isDragging && kotlin.math.abs(flingVelocity) >= 8f) {
                     val nextScroll = (lyricScroll + flingVelocity * deltaSeconds).coerceIn(0f, currentMaxScroll)
@@ -216,11 +264,9 @@ private fun AnimatedLyricsViewport(
     BoxWithConstraints(
         modifier = modifier
             .clipToBounds()
-            // Keyed only on the line count: maxScroll moves whenever a lazily mounted row is first
-            // measured, and restarting the detector mid-swipe cancels the gesture and zeroes the
-            // fling velocity, killing the scroll exactly as the finger crosses new lyric lines.
-            // The handlers read live values through rememberUpdatedState instead.
-            .pointerInput(lines.size) {
+            // A transient dot row must not cancel an ongoing drag. Read changing bounds through
+            // rememberUpdatedState and restart the gesture detector only when the track changes.
+            .pointerInput(trackId) {
                 detectVerticalDragGestures(
                     onDragStart = {
                         // Only while following does the motion field hold the rendered position; a
@@ -273,7 +319,7 @@ private fun AnimatedLyricsViewport(
                 lyricVisualIndex(lineCentersPx, lyricScroll)
             }
         }
-        val visibleRange by remember(lineCentersPx, rowHeightsPx, rowHeightMarginPx) {
+        val visibleRange by remember(lineCentersPx, rowHeightsPx, rowHeightMarginPx, centerYPx, heightPx) {
             derivedStateOf {
                 var first = lines.lastIndex
                 var last = 0
@@ -297,7 +343,7 @@ private fun AnimatedLyricsViewport(
                 return@forEachIndexed
             }
             val distance = kotlin.math.abs(index - visualIndex)
-            val focus = androidx.compose.runtime.key(trackId, index) {
+            val focus = androidx.compose.runtime.key(trackId, line) {
                 animatedLyricFocus(index == activeIndexValue, animationSpeed)
             }
             val ambient = (1f - distance / 4f).coerceAtLeast(0f)
@@ -305,7 +351,7 @@ private fun AnimatedLyricsViewport(
             val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
             val hasTranslation = !line.translation.isNullOrBlank()
             val textWidthFraction = 1f / 1.04f
-            val mainHeightPx = measuredMainHeightsPx[index]?.toFloat() ?: estimatedMainHeightPx
+            val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
             val translationGap = with(density) {
                 lyricTranslationGapPx(
                     mainHeightPx,
@@ -319,6 +365,7 @@ private fun AnimatedLyricsViewport(
                 modifier = Modifier
                     .fillMaxWidth()
                     .offset {
+                        motionFrame // Also place trailing rows after the focused spring settles.
                         // In follow mode each row rides its own staggered spring. The motion field
                         // is a plain array, so reading it alone would never invalidate layout and
                         // the cascade would freeze; anchoring on the lyricScroll state read makes
@@ -336,9 +383,19 @@ private fun AnimatedLyricsViewport(
                         )
                     }
                     .padding(horizontal = 26.dp)
+                    .graphicsLayer {
+                        if (line.text.isBlank()) {
+                            // The row geometry already collapses with interludePresence. Keep the
+                            // content almost full-sized while its three dots fade in sequence, so
+                            // the next lyric and the interlude read as one continuous movement.
+                            scaleX = 0.94f + interludePresence * 0.06f
+                            scaleY = 0.92f + interludePresence * 0.08f
+                            transformOrigin = TransformOrigin.Center
+                        }
+                    }
                     .onSizeChanged { size ->
-                        if (measuredRowHeightsPx[index] != size.height) {
-                            measuredRowHeightsPx[index] = size.height
+                        if (measuredRowHeightsPx[line] != size.height) {
+                            measuredRowHeightsPx[line] = size.height
                         }
                     }
                     .clickable {
@@ -349,7 +406,26 @@ private fun AnimatedLyricsViewport(
                 contentAlignment = Alignment.TopCenter,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    androidx.compose.runtime.key(trackId, index) {
+                    if (line.text.isBlank()) {
+                        val interludeEndMillis = line.endTimeMillis
+                            ?: lines.getOrNull(index + 1)?.timeMillis
+                            ?: line.timeMillis + 5_000L
+                        LyricInterludeDots(
+                            startMillis = line.timeMillis,
+                            endMillis = interludeEndMillis,
+                            // Once the next lyric becomes active, retain the fully revealed dot
+                            // state while the row exits. Resetting to startMillis here made the
+                            // reveal factor hit zero in one frame and caused the visible hard cut.
+                            positionMillis = if (index == activeIndexValue) {
+                                positionMillis
+                            } else {
+                                interludeEndMillis
+                            },
+                            visibility = interludePresence,
+                            glowEnabled = lyricGlowEnabled,
+                        )
+                    } else {
+                    androidx.compose.runtime.key(trackId, line) {
                         AmllLyricText(
                             text = line.text,
                             words = line.words,
@@ -366,14 +442,18 @@ private fun AnimatedLyricsViewport(
                             modifier = Modifier
                                 .fillMaxWidth(textWidthFraction)
                                 .onSizeChanged { size ->
-                                    if (measuredMainHeightsPx[index] != size.height) {
-                                        measuredMainHeightsPx[index] = size.height
+                                    if (measuredMainHeightsPx[line] != size.height) {
+                                        measuredMainHeightsPx[line] = size.height
                                     }
                                 }
                                 .graphicsLayer {
                                     scaleX = scale
                                     scaleY = scale
                                     this.alpha = alpha
+                                    // Per-draw alpha avoids allocating a temporary layer with the
+                                    // lyric's exact bounds, which clipped the blur during focus.
+                                    compositingStrategy = CompositingStrategy.ModulateAlpha
+                                    clip = false
                                     transformOrigin = TransformOrigin.Center
                                 },
                             style = MaterialTheme.typography.bodyLarge.copy(
@@ -385,6 +465,7 @@ private fun AnimatedLyricsViewport(
                             maxLines = lyricMaxLines,
                             overflow = TextOverflow.Ellipsis,
                         )
+                    }
                     }
                     if (hasTranslation) {
                         Spacer(Modifier.height(translationGap))

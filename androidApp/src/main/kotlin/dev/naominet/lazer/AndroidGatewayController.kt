@@ -28,10 +28,9 @@ import kotlinx.coroutines.withContext
 
 enum class AndroidRootDestination(private val labelKey: String, val motionIndex: Int) {
     HOME("nav.today", 0),
-    DISCOVER("nav.discover", 1),
-    SEARCH("nav.search", 2),
-    LIBRARY("nav.library", 3),
-    ME("nav.me", 4);
+    SEARCH("nav.search", 1),
+    LIBRARY("nav.library", 2),
+    ME("nav.me", 3);
 
     val label: String get() = tr(labelKey)
 }
@@ -69,6 +68,10 @@ private data class AndroidCachedBootstrap(
 )
 
 private const val MESSAGE_BANNER_DURATION_MILLIS = 15_000L
+internal const val ANDROID_LIBRARY_TIP_COUNT = 10
+
+internal fun nextAndroidLibraryTipIndex(current: Int): Int =
+    (current + 1).mod(ANDROID_LIBRARY_TIP_COUNT)
 
 /**
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
@@ -95,6 +98,8 @@ class AndroidGatewayController(context: Context) {
 
     var destination by mutableStateOf(AndroidRootDestination.HOME)
         private set
+    var libraryTipIndex by mutableIntStateOf(-1)
+        private set
     var isSettingsVisible by mutableStateOf(false)
         private set
     var isDark by mutableStateOf(settings.isDark)
@@ -105,9 +110,13 @@ class AndroidGatewayController(context: Context) {
         private set
     var backgroundImage by mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
         private set
-    var backgroundImageEnabled by mutableStateOf(settings.backgroundImageEnabled)
+    var backgroundMode by mutableStateOf(settings.backgroundMode)
         private set
     var backgroundAlpha by mutableStateOf(settings.backgroundAlpha)
+        private set
+    var backgroundImageBlurEnabled by mutableStateOf(settings.backgroundImageBlurEnabled)
+        private set
+    var backgroundImageBlurIntensity by mutableStateOf(settings.backgroundImageBlurIntensity)
         private set
     var style by mutableStateOf(settings.style)
         private set
@@ -242,14 +251,24 @@ class AndroidGatewayController(context: Context) {
         settings.backgroundAlpha = backgroundAlpha
     }
 
+    fun updateBackgroundMode(value: AndroidBackgroundMode) {
+        backgroundMode = value
+        settings.backgroundMode = value
+    }
+
+    fun updateBackgroundImageBlurEnabled(enabled: Boolean) {
+        backgroundImageBlurEnabled = enabled
+        settings.backgroundImageBlurEnabled = enabled
+    }
+
+    fun updateBackgroundImageBlurIntensity(value: Float) {
+        backgroundImageBlurIntensity = normalizeBackgroundImageBlurIntensity(value)
+        settings.backgroundImageBlurIntensity = backgroundImageBlurIntensity
+    }
+
     fun updateLiquidGlassBlurIntensity(value: Float) {
         liquidGlassBlurIntensity = normalizeLiquidGlassBlurIntensity(value)
         settings.liquidGlassBlurIntensity = liquidGlassBlurIntensity
-    }
-
-    fun updateBackgroundImageEnabled(enabled: Boolean) {
-        backgroundImageEnabled = enabled
-        settings.backgroundImageEnabled = enabled
     }
 
     private suspend fun loadBackgroundImage() {
@@ -278,6 +297,7 @@ class AndroidGatewayController(context: Context) {
             if (decoded != null) {
                 backgroundImage = decoded
                 settings.backgroundImagePath = java.io.File(appContext.filesDir, BACKGROUND_IMAGE_FILE).absolutePath
+                updateBackgroundMode(AndroidBackgroundMode.IMAGE)
             }
         }
     }
@@ -285,12 +305,18 @@ class AndroidGatewayController(context: Context) {
     fun clearBackgroundImage() {
         backgroundImage = null
         settings.backgroundImagePath = null
+        if (backgroundMode == AndroidBackgroundMode.IMAGE) {
+            updateBackgroundMode(AndroidBackgroundMode.SOLID)
+        }
         runCatching { java.io.File(appContext.filesDir, BACKGROUND_IMAGE_FILE).delete() }
     }
 
     val isSignedIn: Boolean get() = currentUser != null
 
     fun selectDestination(value: AndroidRootDestination) {
+        if (value == AndroidRootDestination.LIBRARY && destination != AndroidRootDestination.LIBRARY) {
+            libraryTipIndex = nextAndroidLibraryTipIndex(libraryTipIndex)
+        }
         destination = value
         isSettingsVisible = false
         closeArtist()
@@ -493,7 +519,7 @@ class AndroidGatewayController(context: Context) {
                     val connection = java.net.URL(url).openConnection().apply {
                         connectTimeout = 12_000
                         readTimeout = 20_000
-                        setRequestProperty("User-Agent", "Lazer/1.1")
+                        setRequestProperty("User-Agent", "Lazer/1.2")
                     }
                     connection.getInputStream().buffered().use { input ->
                         checkNotNull(appContext.contentResolver.openOutputStream(destination, "w"))
@@ -1084,6 +1110,7 @@ class AndroidGatewayController(context: Context) {
 private fun toAndroidTrack(song: Song): AndroidTrack = AndroidTrack(
     id = song.id,
     title = song.name.ifBlank { tr("track.unknown_song") },
+    translatedTitle = song.translations.map(String::trim).filter { it.isNotBlank() && it != song.name }.distinct().joinToString(" / ").takeIf(String::isNotBlank),
     artist = song.artists.joinToString(" / ") { it.name }.ifBlank { tr("track.unknown_artist.android") },
     album = song.album?.name.orEmpty(),
     durationMillis = song.durationMillis ?: 0L,

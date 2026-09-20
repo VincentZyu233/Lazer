@@ -80,6 +80,16 @@ class LyricLineMotionField {
 
     fun positionFor(index: Int): Float = positions.getOrElse(index) { targetPosition }
 
+    /** Preserve each existing row's spring when a transient interlude row enters or leaves. */
+    fun remap(previousIndices: List<Int>, fallbackPosition: Float) {
+        val oldPositions = positions
+        val oldVelocities = velocities
+        val oldDelays = delays
+        positions = FloatArray(previousIndices.size) { oldPositions.getOrElse(previousIndices[it]) { fallbackPosition } }
+        velocities = FloatArray(previousIndices.size) { oldVelocities.getOrElse(previousIndices[it]) { 0f } }
+        delays = FloatArray(previousIndices.size) { oldDelays.getOrElse(previousIndices[it]) { 0f } }
+    }
+
     fun advance(
         target: Float,
         activeIndex: Int,

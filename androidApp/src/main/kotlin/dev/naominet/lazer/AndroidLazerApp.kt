@@ -5,7 +5,6 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Context
 import android.content.pm.PackageManager
-import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Base64
@@ -92,7 +91,6 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.outlined.DarkMode
-import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.LibraryMusic
@@ -113,6 +111,9 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.RadioButton
@@ -141,6 +142,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -174,9 +176,12 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
@@ -209,6 +214,8 @@ import com.kashif_e.backdrop.shadow.InnerShadow
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
 import top.yukonga.miuix.kmp.basic.ButtonColors as MiuixButtonColors
@@ -290,7 +297,24 @@ private fun Modifier.capturedPageBackground(backdrop: LayerBackdrop): Modifier =
 
 @Composable
 private fun isLandscapeLayout(): Boolean =
-    LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    LocalConfiguration.current.let { it.screenWidthDp > it.screenHeightDp }
+
+@Composable
+private fun AdaptiveDetailHeader(artwork: @Composable () -> Unit, content: @Composable () -> Unit) {
+    if (isLandscapeLayout()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            artwork()
+            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) { content() }
+        }
+    } else {
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            artwork()
+            Spacer(Modifier.height(12.dp))
+            content()
+        }
+    }
+}
 
 @Composable
 private fun LiquidGlassIconButton(
@@ -541,7 +565,11 @@ private fun ExperimentalBadge() {
 fun AndroidLazerApp() {
     val context = LocalContext.current
     val controller = remember(context.applicationContext) { AndroidGatewayController(context.applicationContext) }
-    val playback by AndroidPlaybackConnection.snapshot.collectAsState()
+    // Library/navigation only need transport changes; position ticks belong to the visible player.
+    val playback by remember {
+        AndroidPlaybackConnection.snapshot.map { it.copy(positionMillis = 0L, bufferedFraction = 0f) }
+            .distinctUntilChanged()
+    }.collectAsState(initial = AndroidPlaybackConnection.snapshot.value)
     var playerVisible by remember { mutableStateOf(false) }
     var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
     var coverSaveRequest by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
@@ -621,10 +649,14 @@ fun AndroidLazerApp() {
         else -> AndroidMainPage(AndroidMainPageKind.ROOT)
     }
     val systemConfiguration = LocalConfiguration.current
+    val nowPlayingPaletteSeed = rememberAndroidArtworkSeed(
+        playback.track.takeIf { controller.palette == LazerPalette.NowPlaying },
+    )
     val paletteColorScheme = remember(
         controller.palette,
         controller.isDark,
         systemConfiguration,
+        nowPlayingPaletteSeed,
     ) {
         when (val palette = controller.palette) {
             LazerPalette.Default -> null
@@ -632,6 +664,9 @@ fun AndroidLazerApp() {
                 if (controller.isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
             } else {
                 null
+            }
+            LazerPalette.NowPlaying -> nowPlayingPaletteSeed?.let {
+                seedColorScheme(it, controller.isDark)
             }
             is LazerPalette.Custom -> seedColorScheme(palette.seed, controller.isDark)
         }
@@ -672,14 +707,18 @@ fun AndroidLazerApp() {
                 }
             }
         }
-        // A custom background wallpaper is drawn fully opaque; the slider fades the app's own
-        // surfaces above it (see LocalLazerUiAlpha), never the wallpaper.
-        val wallpaper = controller.backgroundImage.takeIf { controller.backgroundImageEnabled }
-        val hasWallpaper = wallpaper != null
-        val uiAlpha = if (hasWallpaper) controller.backgroundAlpha else 1f
+        val wallpaper = controller.backgroundImage.takeIf {
+            controller.backgroundMode == AndroidBackgroundMode.IMAGE
+        }
+        val usesNowPlayingPalette = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_DYNAMIC ||
+            controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_STATIC
+        val hasVisualBackground = wallpaper != null || usesNowPlayingPalette
+        // The slider controls the opacity of app surfaces above visual backgrounds. The image or
+        // artwork palette itself stays opaque, so navigation transitions never expose another page.
+        val uiAlpha = if (hasVisualBackground) controller.backgroundAlpha else 1f
         // Preserve the previous steady-state appearance, where equal global and page scrims were
         // composited, while baking that result into one transition-safe background canvas.
-        val backgroundCanvasAlpha = if (hasWallpaper) {
+        val backgroundCanvasAlpha = if (hasVisualBackground) {
             1f - (1f - uiAlpha) * (1f - uiAlpha)
         } else {
             1f
@@ -692,7 +731,7 @@ fun AndroidLazerApp() {
                 Modifier
                     .fillMaxSize()
                     .then(
-                        if (hasWallpaper) {
+                        if (hasVisualBackground) {
                             Modifier.layerBackdrop(pageBackgroundBackdrop)
                         } else {
                             Modifier
@@ -703,11 +742,33 @@ fun AndroidLazerApp() {
                 // wallpapers cannot reveal another page underneath during overlap.
                 Box(Modifier.fillMaxSize().background(colors.background))
                 wallpaper?.let { image ->
+                    val imageModifier = if (controller.backgroundImageBlurEnabled) {
+                        Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = 1.08f
+                                scaleY = 1.08f
+                            }
+                            .blur(40.dp * controller.backgroundImageBlurIntensity)
+                    } else {
+                        Modifier.fillMaxSize()
+                    }
                     Image(
                         bitmap = image,
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
+                        modifier = imageModifier,
+                    )
+                }
+                if (usesNowPlayingPalette) {
+                    AndroidAlbumFlowBackground(
+                        track = playback.track,
                         modifier = Modifier.fillMaxSize(),
+                        cornerRadius = 0.dp,
+                        veil = Color.Transparent,
+                        animated = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_DYNAMIC &&
+                            !playerVisible,
+                        solid = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_STATIC,
                     )
                 }
                 Box(
@@ -721,7 +782,10 @@ fun AndroidLazerApp() {
                 backgroundColor = colors.background,
                 blurIntensity = controller.liquidGlassBlurIntensity,
             )
-            val floatingControlsInset = if (liquidGlass.isEnabled) {
+            val landscape = isLandscapeLayout()
+            val floatingControlsInset = if (landscape) {
+                if (playback.track != null) 60.dp + navigationBarBottomInset() else 0.dp
+            } else if (liquidGlass.isEnabled) {
                 navigationBarBottomInset() + if (playback.track != null) 176.dp else 104.dp
             } else {
                 0.dp
@@ -738,27 +802,26 @@ fun AndroidLazerApp() {
             Column(
                 Modifier
                     .fillMaxSize()
+                    .padding(start = if (landscape) 64.dp else 0.dp)
+                    .then(if (landscape) Modifier.safeDrawingPadding() else Modifier)
                     .captureLiquidGlass(liquidGlass),
             ) {
                 // Manual status-bar inset. The fixed background canvas already paints this area.
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(if (playlistOwnsStatusBarBackdrop) 0.dp else statusBarTopInset()),
+                        .height(if (landscape || playlistOwnsStatusBarBackdrop) 0.dp else statusBarTopInset()),
                 )
                 Box(Modifier.weight(1f)) {
-                    if (
-                        transformedBackLayer == AndroidBackLayer.PLAYLIST ||
-                        transformedBackLayer == AndroidBackLayer.SETTINGS
-                    ) {
-                        AndroidRootContent(
-                            controller = controller,
-                            currentTrackId = playback.track?.id,
-                            onPlay = playFromQueue,
-                            showHeaderControls = !liquidGlass.isEnabled,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    }
+                    // Keep the root page mounted. Detail pages animate above it, so returning from
+                    // a playlist cannot replay the root page or bottom-edge entrance animation.
+                    AndroidRootContent(
+                        controller = controller,
+                        currentTrackId = playback.track?.id,
+                        onPlay = playFromQueue,
+                        showHeaderControls = !liquidGlass.isEnabled || landscape,
+                        modifier = Modifier.fillMaxSize(),
+                    )
                     AnimatedContent(
                         targetState = mainPage,
                         modifier = Modifier.fillMaxSize(),
@@ -782,6 +845,10 @@ fun AndroidLazerApp() {
                         contentKey = AndroidMainPage::contentKey,
                         label = "android-main-page",
                     ) { page ->
+                        if (page.kind == AndroidMainPageKind.ROOT) {
+                            Box(Modifier.fillMaxSize())
+                            return@AnimatedContent
+                        }
                         Surface(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -796,7 +863,7 @@ fun AndroidLazerApp() {
                                     swipeEdge = backSwipeEdge,
                                 )
                                 .then(
-                                    if (hasWallpaper) {
+                                    if (hasVisualBackground) {
                                         Modifier.capturedPageBackground(pageBackgroundBackdrop)
                                     } else {
                                         Modifier
@@ -804,7 +871,7 @@ fun AndroidLazerApp() {
                                 ),
                             // With wallpaper, the captured canvas is an opaque visual page plane:
                             // it hides sibling content without adding a second translucent scrim.
-                            color = if (hasWallpaper) Color.Transparent else colors.background,
+                            color = if (hasVisualBackground) Color.Transparent else colors.background,
                             contentColor = colors.onBackground,
                         ) {
                             when (page.kind) {
@@ -825,25 +892,19 @@ fun AndroidLazerApp() {
                                         tracks = page.tracks,
                                         isLoading = page.isLoading,
                                         currentId = playback.track?.id,
-                                        isPlaying = playback.isPlaying,
+                                        isPlaying = playback.isPlaying && !playerVisible,
                                         liquidGlassEnabled = controller.liquidGlassEnabled,
                                         liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                                         onBack = controller::closePlaylist,
                                         onPlay = playFromQueue,
                                     )
                                 }
-                                AndroidMainPageKind.ROOT -> AndroidRootContent(
-                                    controller = controller,
-                                    currentTrackId = playback.track?.id,
-                                    onPlay = playFromQueue,
-                                    showHeaderControls = !liquidGlass.isEnabled,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
+                                AndroidMainPageKind.ROOT -> Unit
                             }
                         }
                     }
                 }
-                if (!liquidGlass.isEnabled) {
+                if (!liquidGlass.isEnabled && !landscape) {
                     playback.track?.let { track ->
                         MiniPlayer(track, playback.isPlaying, playback.isPreparing, { playerVisible = true }) {
                             AndroidPlaybackConnection.toggle(context)
@@ -857,7 +918,7 @@ fun AndroidLazerApp() {
             }
             }
 
-            if (liquidGlass.isEnabled && mainPage.kind == AndroidMainPageKind.ROOT) {
+            if (liquidGlass.isEnabled && !landscape && mainPage.kind == AndroidMainPageKind.ROOT) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -885,8 +946,16 @@ fun AndroidLazerApp() {
                 }
             }
 
-            if (liquidGlass.isEnabled) {
-                Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+            if (landscape) {
+                LandscapeNavigationRail(
+                    controller = controller,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                )
+            }
+            if (liquidGlass.isEnabled || landscape) {
+                Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .padding(start = if (landscape) 64.dp else 0.dp)
+                    .then(if (landscape) Modifier.navigationBarsPadding() else Modifier)) {
                     playback.track?.let { track ->
                         MiniPlayer(
                             track = track,
@@ -894,10 +963,11 @@ fun AndroidLazerApp() {
                             isPreparing = playback.isPreparing,
                             onOpen = { playerVisible = true },
                             glass = liquidGlass,
+                            compact = landscape,
                             onToggle = { AndroidPlaybackConnection.toggle(context) },
                         )
                     }
-                    LiquidGlassBottomDock(
+                    if (!landscape) LiquidGlassBottomDock(
                         selected = controller.destination,
                         onSelect = controller::selectDestination,
                         glass = liquidGlass,
@@ -926,7 +996,7 @@ fun AndroidLazerApp() {
                 label = "now-playing-page",
             ) {
                 NowPlayingPage(
-                    snapshot = playback,
+                    snapshot = AndroidPlaybackConnection.snapshot.collectAsState().value,
                     lyricLines = controller.lyrics,
                     lyricsLoading = controller.lyricsLoading,
                     lyricsMessage = controller.lyricsMessage,
@@ -938,6 +1008,8 @@ fun AndroidLazerApp() {
                     liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                     lyricFontSizeSp = controller.lyricFontSizeSp,
                     showFullLyrics = controller.showFullLyrics,
+                    animateAlbumBackground = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_DYNAMIC,
+                    solidAlbumBackground = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_STATIC,
                     isLiked = playback.track?.let { controller.isSongLiked(it.id) } == true,
                     onToggleLiked = { playback.track?.let(controller::toggleSongLiked) },
                     onDismiss = { playerVisible = false },
@@ -1035,11 +1107,13 @@ private fun AndroidRootContent(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
-        MobileHeader(
-            controller = controller,
-            showControls = showHeaderControls,
-            modifier = Modifier.padding(start = 20.dp, top = 12.dp, end = 20.dp, bottom = 6.dp),
-        )
+        if (!isLandscapeLayout()) {
+            MobileHeader(
+                controller = controller,
+                showControls = showHeaderControls,
+                modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 4.dp),
+            )
+        }
         AnimatedContent(
             targetState = controller.destination,
             modifier = Modifier.weight(1f),
@@ -1061,9 +1135,6 @@ private fun AndroidRootContent(
                 AndroidRootDestination.HOME -> HomePage(controller, currentTrackId) { track ->
                     onPlay(controller.homeTracks, track)
                 }
-                AndroidRootDestination.DISCOVER -> DiscoverPage(controller, currentTrackId) { track ->
-                    onPlay(controller.homeTracks, track)
-                }
                 AndroidRootDestination.SEARCH -> SearchPage(controller, currentTrackId) { track ->
                     onPlay(controller.searchResults, track)
                 }
@@ -1077,11 +1148,57 @@ private fun AndroidRootContent(
 }
 
 @Composable
+private fun LandscapeNavigationRail(
+    controller: AndroidGatewayController,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.fillMaxHeight().width(64.dp),
+        color = colors.surface.copy(alpha = 0.90f),
+        tonalElevation = 2.dp,
+    ) {
+        Column(
+            Modifier.safeDrawingPadding().padding(vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Column(
+                Modifier.weight(1f).verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                AndroidRootDestination.entries.forEach { destination ->
+                    val selectedDestination = !controller.isSettingsVisible &&
+                        controller.activeArtist == null && controller.activePlaylist == null &&
+                        controller.destination == destination
+                    IconButton(
+                        onClick = { controller.selectDestination(destination) },
+                        modifier = Modifier.size(48.dp).semantics { selected = selectedDestination },
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = if (selectedDestination) colors.primaryContainer else Color.Transparent,
+                            contentColor = if (selectedDestination) colors.onPrimaryContainer else colors.onSurfaceVariant,
+                        ),
+                    ) { Icon(destination.icon(), destination.label) }
+                }
+            }
+            IconButton(
+                onClick = controller::openSettings,
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.iconButtonColors(
+                    containerColor = if (controller.isSettingsVisible) colors.primaryContainer else Color.Transparent,
+                    contentColor = if (controller.isSettingsVisible) colors.onPrimaryContainer else colors.onSurfaceVariant,
+                ),
+            ) { Icon(Icons.Outlined.Settings, tr("player.open_settings")) }
+        }
+    }
+}
+
+@Composable
 private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
             SectionTitle(tr("home.section.title"), if (controller.isSignedIn) tr("home.section.signed") else tr("home.section.anon"))
@@ -1098,26 +1215,6 @@ private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onP
 }
 
 @Composable
-private fun DiscoverPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        item {
-            Column(Modifier.widthIn(max = 470.dp)) {
-                Text(tr("discover.title"), style = MaterialTheme.typography.displaySmall)
-                Spacer(Modifier.height(6.dp))
-                Text(tr("discover.sub"), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        item { PlaylistStrip(controller.featuredPlaylists, controller::openPlaylist) }
-        item { SectionTitle(tr("discover.playing")) }
-        items(controller.homeTracks.take(12), key = AndroidTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
-    }
-}
-
-@Composable
 private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val searchGlass = rememberLazerLiquidGlass(
@@ -1129,10 +1226,10 @@ private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, o
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize().captureLiquidGlass(searchGlass),
-            contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-            verticalArrangement = Arrangement.spacedBy(18.dp),
+            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { Text(tr("search.title"), style = MaterialTheme.typography.displaySmall) }
+            item { Text(tr("search.title"), style = MaterialTheme.typography.headlineMedium) }
             if (searchGlass.isEnabled) {
                 // The fixed search control floats above this reserved space and samples the list.
                 item { Spacer(Modifier.height(58.dp)) }
@@ -1164,7 +1261,7 @@ private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, o
                 Modifier
                     .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .padding(start = 20.dp, top = 62.dp, end = 20.dp),
+                    .padding(start = 16.dp, top = 48.dp, end = 16.dp),
             ) {
                 OutlinedTextField(
                     value = controller.searchQuery,
@@ -1199,14 +1296,18 @@ private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, o
 private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
-            Text(tr("library.title"), style = MaterialTheme.typography.displaySmall)
+            Text(tr("library.title"), style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.height(6.dp))
             Text(
-                if (controller.isSignedIn) tr("library.sub.signed") else tr("library.sub.anon"),
+                if (controller.isSignedIn) {
+                    tr("library.tip.${controller.libraryTipIndex.coerceAtLeast(0) + 1}")
+                } else {
+                    tr("library.sub.anon")
+                },
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1228,12 +1329,12 @@ private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, 
 private fun MePage(controller: AndroidGatewayController) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 12.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (!controller.isSignedIn) {
             item {
-                Text(tr("me.title"), style = MaterialTheme.typography.displaySmall)
+                Text(tr("me.title"), style = MaterialTheme.typography.headlineMedium)
                 Spacer(Modifier.height(6.dp))
                 Text(tr("me.sub"), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -1311,23 +1412,27 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
     val animationSpeedOptions = LyricAnimationSpeed.entries
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 10.dp, 20.dp, 18.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(18.dp),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 18.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = controller::closeSettings) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back"))
-                }
-                Spacer(Modifier.width(4.dp))
+            if (isLandscapeLayout()) {
                 Text(tr("settings.title"), style = MaterialTheme.typography.headlineSmall)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = controller::closeSettings) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back"))
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    Text(tr("settings.title"), style = MaterialTheme.typography.headlineSmall)
+                }
             }
         }
         item { SectionTitle(tr("settings.appearance")) }
         item {
             SettingsCard {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1351,7 +1456,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
@@ -1401,10 +1506,11 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
             val paletteOptions = buildList {
                 add(LazerPalette.Default)
                 if (systemMonetAvailable) add(LazerPalette.System)
+                add(LazerPalette.NowPlaying)
                 add(LazerPalette.Custom(LazerSeedSwatches.first()))
             }
             SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.palette"), style = MaterialTheme.typography.titleSmall)
@@ -1434,7 +1540,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(tr("settings.language"), style = MaterialTheme.typography.titleSmall)
                         Text(controller.language.displayName, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
@@ -1448,32 +1554,64 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.background"), style = MaterialTheme.typography.titleSmall)
                             Text(
-                                if (controller.backgroundImage != null) tr("settings.background.change") else tr("settings.background.none"),
+                                backgroundModeHint(controller.backgroundMode),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.onSurfaceVariant,
                             )
                         }
-                        if (controller.backgroundImage != null) {
-                            LazerSwitch(
-                                engine = controller.themeEngine,
-                                checked = controller.backgroundImageEnabled,
-                                onCheckedChange = controller::updateBackgroundImageEnabled,
+                        SettingsDropdown(
+                            options = AndroidBackgroundMode.entries,
+                            selected = controller.backgroundMode,
+                            label = ::backgroundModeLabel,
+                            onSelected = { mode ->
+                                controller.updateBackgroundMode(mode)
+                                if (mode == AndroidBackgroundMode.IMAGE && controller.backgroundImage == null) {
+                                    backgroundPicker.launch("image/*")
+                                }
+                            },
+                        )
+                    }
+
+                    if (controller.backgroundMode == AndroidBackgroundMode.IMAGE) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (controller.backgroundImage == null) {
+                                    tr("settings.background.none")
+                                } else {
+                                    tr("settings.background.image.ready")
+                                },
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
                             )
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        ThemeTextButton(onClick = { backgroundPicker.launch("image/*") }) {
-                            Text(tr("settings.background.pick"))
+                            ThemeTextButton(onClick = { backgroundPicker.launch("image/*") }) {
+                                Text(
+                                    if (controller.backgroundImage == null) {
+                                        tr("settings.background.pick")
+                                    } else {
+                                        tr("settings.background.change")
+                                    },
+                                )
+                            }
                         }
                     }
-                    if (controller.backgroundImage != null) {
+
+                    val hasSelectedVisualBackground = when (controller.backgroundMode) {
+                        AndroidBackgroundMode.SOLID -> false
+                        AndroidBackgroundMode.IMAGE -> controller.backgroundImage != null
+                        AndroidBackgroundMode.NOW_PLAYING_DYNAMIC,
+                        AndroidBackgroundMode.NOW_PLAYING_STATIC -> true
+                    }
+                    if (hasSelectedVisualBackground) {
                         Spacer(Modifier.height(10.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(tr("settings.background.alpha"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            Text(tr("settings.background.surface_alpha"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             Spacer(Modifier.width(12.dp))
                             LazerSlider(
                                 engine = controller.themeEngine,
@@ -1485,8 +1623,56 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             Spacer(Modifier.width(8.dp))
                             Text("${(controller.backgroundAlpha * 100).roundToInt()}%", style = MaterialTheme.typography.labelMedium, color = colors.primary)
                         }
-                        ThemeTextButton(onClick = controller::clearBackgroundImage) {
-                            Text(tr("settings.background.clear"), color = colors.error)
+                    }
+
+                    if (controller.backgroundMode == AndroidBackgroundMode.IMAGE && controller.backgroundImage != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(role = Role.Switch) {
+                                    controller.updateBackgroundImageBlurEnabled(!controller.backgroundImageBlurEnabled)
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(tr("settings.background.blur"), style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    tr("settings.background.blur.hint"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            LazerSwitch(
+                                engine = controller.themeEngine,
+                                checked = controller.backgroundImageBlurEnabled,
+                                onCheckedChange = null,
+                            )
+                        }
+                        if (controller.backgroundImageBlurEnabled) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(tr("settings.background.blur.strength"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                                Spacer(Modifier.width(12.dp))
+                                LazerSlider(
+                                    engine = controller.themeEngine,
+                                    value = controller.backgroundImageBlurIntensity,
+                                    onValueChange = controller::updateBackgroundImageBlurIntensity,
+                                    valueRange = 0f..1f,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "${(controller.backgroundImageBlurIntensity * 100).roundToInt()}%",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = colors.primary,
+                                )
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            ThemeTextButton(onClick = controller::clearBackgroundImage) {
+                                Text(tr("settings.background.clear"), color = colors.error)
+                            }
                         }
                     }
                 }
@@ -1499,7 +1685,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(role = Role.Button) { isAudioQualitySheetVisible = true }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1527,7 +1713,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                         .clickable(role = Role.Switch) {
                             controller.updateIndependentPlayback(!controller.independentPlayback)
                         }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1560,7 +1746,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             enabled = !controller.independentPlayback,
                             role = Role.Switch,
                         ) { controller.updateExclusiveAudio(!controller.exclusiveAudio) }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1599,7 +1785,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                                 else -> microphoneRequest.launch(Manifest.permission.RECORD_AUDIO)
                             }
                         }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1627,7 +1813,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 },
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1654,7 +1840,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 },
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1676,7 +1862,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.lyric.speed.title"), style = MaterialTheme.typography.titleSmall)
@@ -1727,7 +1913,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.lyric.font.title"), style = MaterialTheme.typography.titleSmall)
@@ -1778,7 +1964,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 },
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1804,7 +1990,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 16.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.lyric.follow.title"), style = MaterialTheme.typography.titleSmall)
@@ -1855,7 +2041,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(role = Role.Button) { isCacheSheetVisible = true }
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1873,7 +2059,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         item {
             SettingsCard {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -1899,7 +2085,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 },
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -2016,7 +2202,22 @@ private fun <T> SettingsDropdown(
 private fun paletteLabel(palette: LazerPalette): String = when (palette) {
     LazerPalette.Default -> tr("settings.palette.default")
     LazerPalette.System -> tr("settings.palette.system")
+    LazerPalette.NowPlaying -> tr("settings.palette.now_playing")
     is LazerPalette.Custom -> tr("settings.palette.custom")
+}
+
+private fun backgroundModeLabel(mode: AndroidBackgroundMode): String = when (mode) {
+    AndroidBackgroundMode.SOLID -> tr("settings.background.mode.solid")
+    AndroidBackgroundMode.IMAGE -> tr("settings.background.mode.image")
+    AndroidBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.mode.now_playing_dynamic")
+    AndroidBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.mode.now_playing_static")
+}
+
+private fun backgroundModeHint(mode: AndroidBackgroundMode): String = when (mode) {
+    AndroidBackgroundMode.SOLID -> tr("settings.background.hint.solid")
+    AndroidBackgroundMode.IMAGE -> tr("settings.background.hint.image")
+    AndroidBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.hint.now_playing_dynamic")
+    AndroidBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.hint.now_playing_static")
 }
 
 @Composable
@@ -2052,7 +2253,7 @@ private fun CacheChoiceSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = colors.surface,
     ) {
-        Column(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 28.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, bottom = 20.dp)) {
             Text(tr("settings.cache.dialog.title"), style = MaterialTheme.typography.headlineSmall)
             Text(
                 tr("settings.cache.dialog.body.mobile"),
@@ -2087,7 +2288,8 @@ private fun CurrentCookieSheet(
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 24.dp, end = 24.dp, bottom = 28.dp),
+                .verticalScroll(rememberScrollState())
+                .padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(tr("settings.cookie.title"), style = MaterialTheme.typography.headlineSmall)
@@ -2209,8 +2411,8 @@ private fun ArtistPage(
     val colors = MaterialTheme.colorScheme
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp, 10.dp, 20.dp, 24.dp + LocalAndroidContentBottomInset.current),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 24.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2219,16 +2421,16 @@ private fun ArtistPage(
             }
         }
         item {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            AdaptiveDetailHeader(artwork = {
                 MobileArtwork(
                     url = sequenceOf(artist.cover, artist.picUrl, artist.avatar)
                         .mapNotNull(::normalizedArtworkUrl)
                         .firstOrNull(),
                     label = artist.name,
-                    modifier = Modifier.size(184.dp),
+                    modifier = Modifier.size(if (isLandscapeLayout()) 112.dp else 160.dp),
                     cornerRadius = 32.dp,
                 )
-                Spacer(Modifier.height(20.dp))
+            }) {
                 Text(artist.name, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
                 if (artist.alias.isNotEmpty()) {
                     Spacer(Modifier.height(4.dp))
@@ -2328,8 +2530,8 @@ private fun StandardPlaylistDetail(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(20.dp, 10.dp, 20.dp, (if (currentTrackIndex >= 0) 96.dp else 20.dp) + LocalAndroidContentBottomInset.current),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, (if (currentTrackIndex >= 0) 96.dp else 20.dp) + LocalAndroidContentBottomInset.current),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2390,7 +2592,7 @@ private fun LiquidGlassPlaylistDetail(
     val colors = MaterialTheme.colorScheme
     val currentTrackIndex = tracks.indexOfFirst { it.id == currentId }
     // Keep the cover as the visual anchor without making it dominate the song list.
-    val artworkSize = (LocalConfiguration.current.screenWidthDp.dp * 0.48f).coerceIn(150.dp, 220.dp)
+    val artworkSize = if (isLandscapeLayout()) 112.dp else (LocalConfiguration.current.screenWidthDp.dp * 0.44f).coerceIn(140.dp, 200.dp)
     val primaryText = Color(0xFFF4FAFD)
     val secondaryText = primaryText.copy(alpha = 0.78f)
     val prominentInk = Color(0xFF183246)
@@ -2417,7 +2619,7 @@ private fun LiquidGlassPlaylistDetail(
             )
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().statusBarsPadding(),
+                modifier = Modifier.fillMaxSize().then(if (isLandscapeLayout()) Modifier else Modifier.statusBarsPadding()),
                 contentPadding = PaddingValues(
                     top = 39.dp,
                     bottom = 28.dp + LocalAndroidContentBottomInset.current,
@@ -2425,9 +2627,10 @@ private fun LiquidGlassPlaylistDetail(
             ) {
                 item(key = "playlist-hero") {
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
+                        AdaptiveDetailHeader(artwork = {
                         MobileArtwork(
                             url = playlist.coverUrl,
                             label = playlist.title,
@@ -2436,7 +2639,7 @@ private fun LiquidGlassPlaylistDetail(
                                 .border(1.dp, Color.White.copy(alpha = 0.20f), artworkShape),
                             cornerRadius = 28.dp,
                         )
-                        Spacer(Modifier.height(24.dp))
+                        }) {
                         Text(
                             text = playlist.title,
                             style = MaterialTheme.typography.headlineSmall,
@@ -2463,7 +2666,8 @@ private fun LiquidGlassPlaylistDetail(
                             style = MaterialTheme.typography.labelMedium,
                             color = secondaryText,
                         )
-                        Spacer(Modifier.height(22.dp))
+                        }
+                        Spacer(Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -2605,6 +2809,7 @@ private fun LiquidGlassPlaylistTrackRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                TranslatedTrackTitle(track.translatedTitle, secondaryText)
                 if (track.artist.isNotBlank()) {
                     AndroidArtistNames(
                         artists = track.artists,
@@ -2646,7 +2851,7 @@ private const val NOW_PLAYING_BAR_DESCENT_MILLIS = 420
  */
 @Composable
 private fun NowPlayingBars(color: Color, isPlaying: Boolean) {
-    val liveLevels by AndroidAudioLevels.levels.collectAsState()
+    val liveLevels = if (isPlaying) AndroidAudioLevels.levels.collectAsState().value else null
     val spectrum = liveLevels?.takeIf { it.size == AUDIO_LEVEL_BAND_COUNT }
     var phaseSeconds by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(isPlaying, spectrum != null) {
@@ -2843,6 +3048,7 @@ private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit)
         Spacer(Modifier.width(13.dp))
         Column(Modifier.weight(1f)) {
             Text(track.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            TranslatedTrackTitle(track.translatedTitle)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // Artist names size to their content but cap out at roughly a third of the row, so
                 // a long list ellipsizes early instead of squeezing the album caption off the card.
@@ -2859,6 +3065,14 @@ private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit)
             }
         }
         Text(track.durationLabel, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun TranslatedTrackTitle(title: String?, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) {
+    if (!title.isNullOrBlank()) {
+        Text(title, color = color, style = MaterialTheme.typography.bodySmall,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -2967,27 +3181,39 @@ private fun MiniPlayer(
     isPreparing: Boolean,
     onOpen: () -> Unit,
     glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
+    compact: Boolean = false,
     onToggle: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val content: @Composable () -> Unit = {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = if (glass.isEnabled) 14.dp else 20.dp),
+            Modifier.fillMaxWidth().padding(horizontal = if (compact) 12.dp else if (glass.isEnabled) 14.dp else 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             MobileArtwork(
                 track.coverUrl,
                 track.title,
-                Modifier.size(if (glass.isEnabled) 44.dp else 48.dp),
-                12.dp,
+                Modifier.size(if (compact) 40.dp else if (glass.isEnabled) 44.dp else 48.dp),
+                if (compact) 10.dp else 12.dp,
                 saveOnLongPress = true,
             )
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(track.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (isPreparing) {
-                    Text(tr("player.preparing"), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                if (compact) {
+                    Text(
+                        track.translatedTitle ?: track.artist,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 } else {
+                    TranslatedTrackTitle(track.translatedTitle)
+                }
+                if (!compact && isPreparing) {
+                    Text(tr("player.preparing"), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                } else if (!compact) {
                     AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.labelSmall, colors.onSurfaceVariant)
                 }
             }
@@ -3008,12 +3234,12 @@ private fun MiniPlayer(
     }
 
     if (glass.isEnabled) {
-        val shape = RoundedCornerShape(36.dp)
+        val shape = RoundedCornerShape(if (compact) 24.dp else 36.dp)
         Box(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp, bottom = 2.dp)
-                .height(72.dp)
+                .padding(start = if (compact) 8.dp else 16.dp, end = if (compact) 8.dp else 16.dp, bottom = if (compact) 0.dp else 2.dp)
+                .height(if (compact) 60.dp else 72.dp)
                 .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 10.dp)
                 .clip(shape)
                 .clickable(role = Role.Button, onClick = onOpen)
@@ -3024,7 +3250,7 @@ private fun MiniPlayer(
         }
     } else {
         Surface(
-            modifier = Modifier.fillMaxWidth().height(76.dp).clickable(role = Role.Button, onClick = onOpen),
+            modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).clickable(role = Role.Button, onClick = onOpen),
             color = colors.surface.copy(alpha = 0.98f * LocalLazerUiAlpha.current),
             border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.78f)),
             content = content,
@@ -3039,7 +3265,9 @@ private fun BottomDock(
 ) {
     if (LocalLazerThemeEngine.current == LazerThemeEngine.MIUIX) {
         MiuixNavigationBar(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(72.dp + navigationBarBottomInset()),
             showDivider = true,
             defaultWindowInsetsPadding = true,
             mode = MiuixNavigationBarDisplayMode.IconAndText,
@@ -3057,28 +3285,36 @@ private fun BottomDock(
     }
 
     val colors = MaterialTheme.colorScheme
-    // The gesture bar area is painted by this Surface itself (a manual Box, not navigationBarsPadding)
-    // so a custom background wallpaper behind the app never clashes with a system nav-bar scrim.
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = colors.background.copy(alpha = LocalLazerUiAlpha.current),
+    NavigationBar(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(80.dp + navigationBarBottomInset()),
+        containerColor = colors.surfaceContainer.copy(alpha = LocalLazerUiAlpha.current),
+        contentColor = colors.onSurface,
+        tonalElevation = 0.dp,
     ) {
-        Column(Modifier.fillMaxWidth()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp), horizontalArrangement = Arrangement.SpaceAround) {
-                AndroidRootDestination.entries.forEach { destination ->
-                    val active = selected == destination
-                    Column(
-                        Modifier.clip(RoundedCornerShape(13.dp)).clickable(role = Role.Tab) { onSelect(destination) }
-                            .padding(horizontal = 14.dp, vertical = 6.dp).semantics { contentDescription = destination.label },
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Icon(destination.icon(), null, Modifier.size(20.dp), tint = if (active) colors.primary else colors.onSurfaceVariant)
-                        Text(destination.label, style = MaterialTheme.typography.labelSmall, color = if (active) colors.primary else colors.onSurfaceVariant, fontWeight = if (active) FontWeight.Medium else FontWeight.Normal)
-                    }
-                }
-            }
-            // Manual bottom gesture-bar inset, painted by the same surface.
-            Box(Modifier.fillMaxWidth().height(navigationBarBottomInset()))
+        AndroidRootDestination.entries.forEach { destination ->
+            NavigationBarItem(
+                selected = selected == destination,
+                onClick = { onSelect(destination) },
+                icon = { Icon(destination.icon(), contentDescription = destination.label) },
+                label = {
+                    Text(
+                        destination.label,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                alwaysShowLabel = true,
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = colors.onSecondaryContainer,
+                    selectedTextColor = colors.onSurface,
+                    indicatorColor = colors.secondaryContainer,
+                    unselectedIconColor = colors.onSurfaceVariant,
+                    unselectedTextColor = colors.onSurfaceVariant,
+                ),
+            )
         }
     }
 }
@@ -3102,8 +3338,8 @@ private fun LiquidGlassBottomDock(
     val isDark = colors.background.luminance() < 0.5f
     val searchDestination = AndroidRootDestination.SEARCH
     val destinations = AndroidRootDestination.entries.filterNot { it == searchDestination }
-    val barShape = RoundedCornerShape(36.dp)
-    val selectorShape = RoundedCornerShape(28.dp)
+    val barShape = RoundedCornerShape(30.dp)
+    val selectorShape = RoundedCornerShape(22.dp)
     val density = androidx.compose.ui.platform.LocalDensity.current
     // While a long press is active the droplet follows the finger; otherwise `pressCenter` is null
     // and the droplet rests under the selected tab.
@@ -3131,12 +3367,12 @@ private fun LiquidGlassBottomDock(
     Box(
         Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 10.dp + navigationBarBottomInset()),
+            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp + navigationBarBottomInset()),
     ) {
-        BoxWithConstraints(Modifier.fillMaxWidth().padding(end = 82.dp)) {
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(end = 72.dp)) {
         val slotWidth = maxWidth / destinations.size
         val slotWidthPx = with(density) { slotWidth.toPx() }
-        val selectorWidth = slotWidth - 14.dp
+        val selectorWidth = slotWidth - 10.dp
         val isDragging = pressCenter != null
         val selectorExpansion by animateDpAsState(
             targetValue = if (isDragging) 6.dp else 0.dp,
@@ -3154,7 +3390,7 @@ private fun LiquidGlassBottomDock(
             label = "pressed-icon-scale",
         )
         val renderedSelectorWidth = selectorWidth + selectorExpansion
-        val renderedSelectorHeight = 56.dp + selectorExpansion
+        val renderedSelectorHeight = 50.dp + selectorExpansion
         val selectorCenterX by animateDpAsState(
             targetValue = with(density) {
                 val halfSelectorWidth = renderedSelectorWidth.toPx() / 2f
@@ -3211,6 +3447,9 @@ private fun LiquidGlassBottomDock(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (active) activeColor else colors.onSurfaceVariant,
                                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
@@ -3228,7 +3467,7 @@ private fun LiquidGlassBottomDock(
         Box(
             Modifier
                 .fillMaxWidth()
-                .height(72.dp)
+                .height(64.dp)
                 // One gesture handler for the whole bar: quick release selects a tab, holding ~0.5s
                 // starts the finger-following droplet. Per-item clickable is intentionally omitted
                 // so it cannot swallow the long press.
@@ -3277,17 +3516,19 @@ private fun LiquidGlassBottomDock(
                             shape = { barShape },
                             effects = {
                                 vibrancy()
-                                blur(glass.scaledBlurRadius(10.dp).toPx())
+                                blur(glass.scaledBlurRadius(8.dp).toPx())
                                 lens(
-                                    refractionHeight = 26.dp.toPx(),
-                                    refractionAmount = 52.dp.toPx(),
+                                    refractionHeight = 16.dp.toPx(),
+                                    refractionAmount = 28.dp.toPx(),
                                     depthEffect = true,
-                                    chromaticAberration = true,
+                                    chromaticAberration = false,
                                 )
                             },
-                            highlight = { Highlight.Ambient },
-                            innerShadow = { InnerShadow(radius = 14.dp, color = Color.Black.copy(alpha = 0.10f)) },
-                            onDrawSurface = { drawRect(Color.White.copy(alpha = if (isDark) 0.06f else 0.10f)) },
+                            highlight = { Highlight.Plain.copy(alpha = 0.58f) },
+                            innerShadow = { InnerShadow(radius = 8.dp, color = Color.Black.copy(alpha = 0.06f)) },
+                            onDrawSurface = {
+                                drawRect(colors.surface.copy(alpha = if (isDark) 0.20f else 0.28f))
+                            },
                         ),
                 )
                 renderIcons(priorityOne)
@@ -3303,7 +3544,7 @@ private fun LiquidGlassBottomDock(
                     .offset {
                         IntOffset(
                             x = (selectorCenterX.toPx() - renderedSelectorWidth.toPx() / 2f).roundToInt(),
-                            y = (((72.dp - renderedSelectorHeight) / 2f) - selectorLift).toPx().roundToInt(),
+                            y = (((64.dp - renderedSelectorHeight) / 2f) - selectorLift).toPx().roundToInt(),
                         )
                     }
                     .size(renderedSelectorWidth, renderedSelectorHeight)
@@ -3318,22 +3559,22 @@ private fun LiquidGlassBottomDock(
                                 ).toPx(),
                             )
                             lens(
-                                refractionHeight = 22.dp.toPx(),
-                                refractionAmount = 64.dp.toPx(),
+                                refractionHeight = 14.dp.toPx(),
+                                refractionAmount = 32.dp.toPx(),
                                 depthEffect = true,
-                                chromaticAberration = true,
+                                chromaticAberration = false,
                             )
                         },
-                        highlight = { Highlight.Default },
-                        innerShadow = { InnerShadow(radius = 10.dp, color = Color.Black.copy(alpha = 0.08f)) },
+                        highlight = { Highlight.Plain.copy(alpha = 0.76f) },
+                        innerShadow = { InnerShadow(radius = 7.dp, color = Color.Black.copy(alpha = 0.06f)) },
                         onDrawSurface = {
                             drawRect(
-                                Color.White.copy(
+                                colors.primaryContainer.copy(
                                     alpha = when {
-                                        isDragging && isDark -> 0.09f
-                                        isDragging -> 0.13f
-                                        isDark -> 0.05f
-                                        else -> 0.09f
+                                        isDragging && isDark -> 0.34f
+                                        isDragging -> 0.42f
+                                        isDark -> 0.24f
+                                        else -> 0.32f
                                     },
                                 ),
                             )
@@ -3346,7 +3587,7 @@ private fun LiquidGlassBottomDock(
             renderIcons(priorityZero)
 
             // A separate, visually transparent interaction layer keeps the custom drag gesture
-            // intact while exposing four real main-tab actions to accessibility services and
+            // intact while exposing the main-tab actions to accessibility services and
             // keyboards. Search is the independent circular action beside this pill.
             Row(Modifier.fillMaxSize()) {
                 destinations.forEach { destination ->
@@ -3402,7 +3643,7 @@ private fun LiquidGlassBottomDock(
             modifier = Modifier.align(Alignment.TopEnd),
             glass = glass,
             tint = if (selected == searchDestination) colors.primary else Color.Unspecified,
-            size = 72.dp,
+            size = 64.dp,
         ) {
             Icon(searchDestination.icon(), null, Modifier.size(26.dp))
         }
@@ -3443,6 +3684,8 @@ private fun NowPlayingPage(
     liquidGlassBlurIntensity: Float,
     lyricFontSizeSp: Int,
     showFullLyrics: Boolean,
+    animateAlbumBackground: Boolean,
+    solidAlbumBackground: Boolean,
     isLiked: Boolean,
     onToggleLiked: () -> Unit,
     onDismiss: () -> Unit,
@@ -3461,14 +3704,12 @@ private fun NowPlayingPage(
     )
     val duration = snapshot.durationMillis.takeIf { it > 0L } ?: track.durationMillis
     val target = if (duration > 0) snapshot.positionMillis.toFloat() / duration else 0f
-    val display by animateFloatAsState(
-        target.coerceIn(0f, 1f),
-        if (snapshot.isPlaying) spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessHigh) else snap(),
-        label = "android-playback-progress",
-    )
+    // A 100 ms service tick is already finer than this seek rail. Animating this value in the
+    // page scope used to recompose the whole player at display refresh rate.
+    val display = target.coerceIn(0f, 1f)
     var seeking by remember(track.id) { mutableStateOf(false) }
-    var seekProgress by remember(track.id) { mutableFloatStateOf(display) }
-    LaunchedEffect(display, seeking) { if (!seeking) seekProgress = display }
+    var draggedProgress by remember(track.id) { mutableFloatStateOf(display) }
+    val seekProgress = if (seeking) draggedProgress else display
 
     // Keep the visual background edge-to-edge; only the controls need to avoid system bars.
     Surface(modifier.fillMaxSize(), color = colors.background) {
@@ -3481,60 +3722,105 @@ private fun NowPlayingPage(
                         .captureLiquidGlass(glass),
                     cornerRadius = 0.dp,
                     veil = colors.background.copy(alpha = 0.38f),
+                    animated = animateAlbumBackground,
+                    solid = solidAlbumBackground,
                 )
-                Row(
+                BoxWithConstraints(
                     Modifier
                         .fillMaxSize()
-                        .statusBarsPadding()
-                        .navigationBarsPadding()
-                        .padding(horizontal = 36.dp, vertical = 0.dp),
+                        .safeDrawingPadding()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 ) {
+                    val artworkSide = (maxHeight * 0.25f).coerceIn(72.dp, 148.dp)
+                    Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
                     Column(
                         Modifier
-                            .widthIn(min = 230.dp, max = 320.dp)
-                            .fillMaxSize()
-                            .padding(10.dp)
-                            .liquidGlassSurface(glass, RoundedCornerShape(32.dp), colors.surface)
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .weight(0.44f)
+                            .fillMaxHeight()
+                            .widthIn(max = 440.dp)
+                            .padding(horizontal = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, tr("player.collapse"), tint = colors.onSurfaceVariant) }
-                            Text(tr("player.now_playing"), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+                        Row(
+                            Modifier.fillMaxWidth().height(44.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            LiquidGlassIconButton(
+                                onClick = onDismiss,
+                                contentDescription = tr("player.collapse"),
+                                glass = glass,
+                                size = 40.dp,
+                            ) { Icon(Icons.Filled.Close, null, tint = colors.onSurface) }
+                            Spacer(Modifier.width(8.dp))
                         }
                         MobileArtwork(
                             track.coverUrl,
                             track.title,
-                            Modifier.size(132.dp).align(Alignment.CenterHorizontally),
-                            20.dp,
+                            Modifier.size(artworkSide),
+                            18.dp,
                             saveOnLongPress = true,
                         )
-                        Spacer(Modifier.height(10.dp))
-                        Text(track.title, color = colors.onBackground, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            track.title,
+                            color = colors.onBackground,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
+                        TranslatedTrackTitle(track.translatedTitle)
                         AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant)
                         Spacer(Modifier.weight(1f))
-                        ThinSeekBar(
-                            progress = seekProgress,
-                            bufferedProgress = snapshot.bufferedFraction,
-                            onSeek = { seeking = true; seekProgress = it },
-                            onFinished = { seeking = false; onSeek((duration * seekProgress).toLong()) },
-                        )
-                        Row(Modifier.fillMaxWidth()) {
-                            Text(formatPlaybackTime((duration * seekProgress).toLong()), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                            Spacer(Modifier.weight(1f))
-                            Text(formatPlaybackTime(duration), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onPrevious, modifier = Modifier.size(48.dp)) { Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(30.dp), tint = colors.onBackground) }
-                            IconButton(onClick = onToggle, modifier = Modifier.size(60.dp), colors = IconButtonDefaults.iconButtonColors(containerColor = colors.primary, contentColor = colors.onPrimary)) {
-                                Icon(if (snapshot.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (snapshot.isPlaying) tr("player.pause") else tr("player.play"), Modifier.size(32.dp))
+                        Column(
+                            Modifier.fillMaxWidth()
+                                .liquidGlassSurface(glass, RoundedCornerShape(24.dp), colors.surface, blurRadius = 8.dp)
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                        ) {
+                            ThinSeekBar(
+                                progress = seekProgress,
+                                bufferedProgress = snapshot.bufferedFraction,
+                                onSeek = { draggedProgress = it; seeking = true },
+                                onFinished = { onSeek((duration * draggedProgress).toLong()); seeking = false },
+                            )
+                            Row(Modifier.fillMaxWidth()) {
+                                Text(formatPlaybackTime((duration * seekProgress).toLong()), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                                Spacer(Modifier.weight(1f))
+                                Text(formatPlaybackTime(duration), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                             }
-                            IconButton(onClick = onNext, modifier = Modifier.size(48.dp)) { Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(30.dp), tint = colors.onBackground) }
-                            IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
-                                Icon(if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder, if (isLiked) tr("player.like.remove") else tr("player.like.add"), tint = if (isLiked) colors.primary else colors.onBackground)
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                IconButton(onClick = onPrevious, modifier = Modifier.size(44.dp)) {
+                                    Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(27.dp))
+                                }
+                                IconButton(
+                                    onClick = onToggle,
+                                    modifier = Modifier.size(52.dp),
+                                    colors = IconButtonDefaults.iconButtonColors(containerColor = colors.primary, contentColor = colors.onPrimary),
+                                ) {
+                                    Icon(
+                                        if (snapshot.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                        if (snapshot.isPlaying) tr("player.pause") else tr("player.play"),
+                                        Modifier.size(29.dp),
+                                    )
+                                }
+                                IconButton(onClick = onNext, modifier = Modifier.size(44.dp)) {
+                                    Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(27.dp))
+                                }
+                                IconButton(onClick = onToggleLiked, modifier = Modifier.size(44.dp)) {
+                                    Icon(
+                                        if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                        if (isLiked) tr("player.like.remove") else tr("player.like.add"),
+                                        tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }
-                    Spacer(Modifier.width(24.dp))
+                    Spacer(Modifier.width(8.dp))
                     AndroidLyricsViewport(
                         track = track,
                         lines = lyricLines,
@@ -3548,8 +3834,9 @@ private fun NowPlayingPage(
                         lyricFontSizeSp = lyricFontSizeSp,
                         showFullLyrics = showFullLyrics,
                         onSeek = onSeek,
-                        modifier = Modifier.weight(1f).fillMaxSize(),
+                        modifier = Modifier.weight(0.56f).fillMaxHeight().padding(horizontal = 4.dp),
                     )
+                    }
                 }
             }
         } else {
@@ -3559,15 +3846,12 @@ private fun NowPlayingPage(
             var coverCompactRect by remember { mutableStateOf<Rect?>(null) }
             var coverExpandedRect by remember { mutableStateOf<Rect?>(null) }
             var coverCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
-            var coverExpanded by remember { mutableStateOf(false) }
+            var coverExpanded by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
             val coverProgress = remember { Animatable(0f) }
             LaunchedEffect(coverExpanded) {
                 coverProgress.animateTo(
                     if (coverExpanded) 1f else 0f,
-                    spring(
-                        dampingRatio = Spring.DampingRatioNoBouncy,
-                        stiffness = Spring.StiffnessMedium,
-                    ),
+                    tween(durationMillis = 420, easing = LazerMotionEasing),
                 )
             }
             val coverDensity = LocalDensity.current
@@ -3577,6 +3861,8 @@ private fun NowPlayingPage(
                     modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
                     cornerRadius = 0.dp,
                     veil = colors.background.copy(alpha = 0.38f),
+                    animated = animateAlbumBackground,
+                    solid = solidAlbumBackground,
                 )
                 Column(
                     Modifier
@@ -3612,16 +3898,12 @@ private fun NowPlayingPage(
                                 .graphicsLayer { translationX = -52.dp.toPx() * coverProgress.value },
                         ) {
                             Text(
-                                tr("player.now_playing"),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                            Text(
                                 track.title,
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
+                            TranslatedTrackTitle(track.translatedTitle)
                             AndroidArtistNames(
                                 track.artists, track.artist,
                                 MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
@@ -3640,7 +3922,8 @@ private fun NowPlayingPage(
                                     }
                                 },
                         )
-                        if (!coverExpanded || coverProgress.value < 1f) {
+                        val lyricsVisible by remember { derivedStateOf { coverProgress.value < 0.999f } }
+                        if (lyricsVisible) {
                             AndroidLyricsViewport(
                                 track = track,
                                 lines = lyricLines,
@@ -3671,8 +3954,8 @@ private fun NowPlayingPage(
                         ThinSeekBar(
                             progress = seekProgress,
                             bufferedProgress = snapshot.bufferedFraction,
-                            onSeek = { seeking = true; seekProgress = it },
-                            onFinished = { seeking = false; onSeek((duration * seekProgress).toLong()) },
+                            onSeek = { draggedProgress = it; seeking = true },
+                            onFinished = { onSeek((duration * draggedProgress).toLong()); seeking = false },
                         )
                         Row(Modifier.fillMaxWidth()) {
                             Text(
@@ -3740,7 +4023,7 @@ private fun NowPlayingPage(
                 // and everything between is the animated flight between them.
                 val compactRect = coverCompactRect
                 val expandedRect = coverExpandedRect
-                if (compactRect != null && expandedRect != null) {
+                if (compactRect != null && expandedRect != null && expandedRect.width > 0f && expandedRect.height > 0f) {
                     // All interpolation parameters are computed once per frame inside graphicsLayer,
                     // avoiding layout pass entirely — only the GPU transform updates.
                     val startLeft = compactRect.left
@@ -3754,26 +4037,27 @@ private fun NowPlayingPage(
                     Box(
                         Modifier
                             .offset { IntOffset(startLeft.roundToInt(), startTop.roundToInt()) }
-                            .size(with(coverDensity) { startSize.toDp() })
+                            .size(with(coverDensity) { endSize.toDp() })
                             .graphicsLayer {
                                 val progress = coverProgress.value
                                 // Scale to reach target size
-                                val scale = androidx.compose.ui.util.lerp(1f, endSize / startSize, progress)
+                                val scale = androidx.compose.ui.util.lerp(startSize / endSize, 1f, progress)
                                 scaleX = scale
                                 scaleY = scale
                                 // Translate to reach target position (accounting for scale origin)
                                 translationX = androidx.compose.ui.util.lerp(0f, endLeft - startLeft, progress)
                                 translationY = androidx.compose.ui.util.lerp(0f, endTop - startTop, progress)
                                 transformOrigin = TransformOrigin(0f, 0f)
-                                // Corner radius: 36dp (compact) → 144dp (expanded), adjusted for scale
-                                val cornerPx = androidx.compose.ui.util.lerp(36f, 144f, progress)
+                                val cornerPx = androidx.compose.ui.util.lerp(12.dp.toPx(), 24.dp.toPx(), progress)
+                                shadowElevation = 24.dp.toPx() * progress
+                                ambientShadowColor = colors.scrim.copy(alpha = 0.24f * progress)
+                                spotShadowColor = colors.scrim.copy(alpha = 0.38f * progress)
                                 clip = true
                                 shape = RoundedCornerShape(cornerPx / scale)
                             }
                             .combinedClickable(
-                                interactionSource = null,
-                                indication = null,
                                 role = Role.Button,
+                                onClickLabel = tr(if (coverExpanded) "player.cover.collapse" else "player.cover.expand"),
                                 onClick = { coverExpanded = !coverExpanded },
                                 onLongClick = {
                                     val url = track.coverUrl
@@ -3808,18 +4092,27 @@ private fun ThinSeekBar(
     val colors = MaterialTheme.colorScheme
     val fraction = progress.coerceIn(0f, 1f)
     val buffered = maxOf(fraction, bufferedProgress.coerceIn(0f, 1f))
+    val latestSeek by androidx.compose.runtime.rememberUpdatedState(onSeek)
+    val latestFinished by androidx.compose.runtime.rememberUpdatedState(onFinished)
     BoxWithConstraints(
-        Modifier.height(20.dp).fillMaxWidth().pointerInput(Unit) {
+        Modifier.height(48.dp).fillMaxWidth().semantics {
+            progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+            setProgress { value ->
+                latestSeek(value.coerceIn(0f, 1f))
+                latestFinished()
+                true
+            }
+        }.pointerInput(Unit) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val width = size.width.coerceAtLeast(1)
-                onSeek((down.position.x / width).coerceIn(0f, 1f)); down.consume()
+                latestSeek((down.position.x / width).coerceIn(0f, 1f)); down.consume()
                 while (true) {
                     val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                    onSeek((change.position.x / width).coerceIn(0f, 1f)); change.consume()
+                    latestSeek((change.position.x / width).coerceIn(0f, 1f)); change.consume()
                     if (!change.pressed) break
                 }
-                onFinished()
+                latestFinished()
             }
         },
         contentAlignment = Alignment.CenterStart,
@@ -4134,7 +4427,6 @@ private fun MessageBanner(
 
 private fun AndroidRootDestination.icon() = when (this) {
     AndroidRootDestination.HOME -> Icons.Outlined.Home
-    AndroidRootDestination.DISCOVER -> Icons.Outlined.Explore
     AndroidRootDestination.SEARCH -> Icons.Outlined.Search
     AndroidRootDestination.LIBRARY -> Icons.Outlined.LibraryMusic
     AndroidRootDestination.ME -> Icons.Outlined.Person
