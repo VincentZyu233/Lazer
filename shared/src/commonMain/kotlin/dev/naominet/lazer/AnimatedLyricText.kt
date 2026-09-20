@@ -91,6 +91,7 @@ fun AmllLyricText(
     textAlign: TextAlign? = null,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
+    temporaryGlow: Boolean = false,
 ) {
     var layoutResult by remember(text, style, textAlign, maxLines, overflow) {
         mutableStateOf<TextLayoutResult?>(null)
@@ -144,7 +145,7 @@ fun AmllLyricText(
     }
 
     Box(modifier) {
-        if (glowEnabled && (currentLine || lineFocus > 0.001f)) {
+        if (temporaryGlow || (glowEnabled && (currentLine || lineFocus > 0.001f))) {
             Box(
                 Modifier
                     .matchParentSize()
@@ -153,23 +154,24 @@ fun AmllLyricText(
                         val radius = LyricShaderShadowRadius.toPx()
                         compositingStrategy = CompositingStrategy.Offscreen
                         clip = false
-                        alpha = 0.5f * lineFocus
-                        renderEffect = if (lineFocus > 0.001f) {
+                        alpha = 0.5f * if (temporaryGlow) 1f else lineFocus
+                        renderEffect = if (temporaryGlow || lineFocus > 0.001f) {
                             BlurEffect(radius, radius, TileMode.Decal)
                         } else {
                             null
                         }
                     }
                     .drawBehind {
-                        if (lineFocus <= 0.001f) return@drawBehind
+                        if (!temporaryGlow && lineFocus <= 0.001f) return@drawBehind
                         val measured = layoutResult ?: return@drawBehind
                         drawRect(color = Color.Transparent, blendMode = BlendMode.Clear)
                         val inset = LyricGlowOverflowPadding.toPx()
                         translate(left = inset, top = inset) {
                             drawLyricShaderShadow(
                                 layout = measured,
-                                hasTimedGlyphs = timedGlyphs.isNotEmpty(),
-                                maskClips = maskClips(),
+                                // Click feedback lights the whole line, including before seek completes.
+                                hasTimedGlyphs = !temporaryGlow && timedGlyphs.isNotEmpty(),
+                                maskClips = if (temporaryGlow) emptyList() else maskClips(),
                                 shadowColor = shadowColor,
                             )
                         }

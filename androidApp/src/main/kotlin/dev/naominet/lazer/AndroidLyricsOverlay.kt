@@ -24,6 +24,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -48,6 +49,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.snapshotFlow
@@ -187,6 +190,10 @@ private fun AnimatedLyricsViewport(
     var lastFrameNanos by remember { mutableLongStateOf(0L) }
     var motionFrame by remember { mutableLongStateOf(0L) }
     val lyricLineMotion = remember { LyricLineMotionField() }
+    val clickGlowScope = rememberCoroutineScope()
+    val clickGlowTokens = remember(trackId, lyricGlowEnabled) {
+        mutableStateMapOf<AndroidTimedLyricLine, Any>()
+    }
 
     LaunchedEffect(trackId, lyricFontSizeSp, showFullLyrics) {
         followPlayback = true
@@ -398,7 +405,17 @@ private fun AnimatedLyricsViewport(
                             measuredRowHeightsPx[line] = size.height
                         }
                     }
-                    .clickable {
+                    .clickable(interactionSource = null, indication = null) {
+                        if (!lyricGlowEnabled) {
+                            val token = Any()
+                            clickGlowTokens[line] = token
+                            clickGlowScope.launch {
+                                delay(500L)
+                                if (clickGlowTokens[line] === token) {
+                                    clickGlowTokens.remove(line)
+                                }
+                            }
+                        }
                         lyricLineMotion.snapTo(lyricScroll)
                         followPlayback = true
                         onSeek(line.timeMillis)
@@ -422,7 +439,7 @@ private fun AnimatedLyricsViewport(
                                 interludeEndMillis
                             },
                             visibility = interludePresence,
-                            glowEnabled = lyricGlowEnabled,
+                            glowEnabled = lyricGlowEnabled || clickGlowTokens.containsKey(line),
                         )
                     } else {
                     androidx.compose.runtime.key(trackId, line) {
@@ -438,6 +455,7 @@ private fun AnimatedLyricsViewport(
                             color = colors.onBackground,
                             shadowColor = if (isDark) Color.White else Color.Black,
                             glowEnabled = lyricGlowEnabled,
+                            temporaryGlow = !lyricGlowEnabled && clickGlowTokens.containsKey(line),
                             speed = animationSpeed,
                             modifier = Modifier
                                 .fillMaxWidth(textWidthFraction)
