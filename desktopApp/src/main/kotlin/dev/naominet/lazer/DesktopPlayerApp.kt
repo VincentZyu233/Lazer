@@ -132,14 +132,7 @@ fun WindowScope.DesktopPlayerApp(
         ?: "Lazer"
     // Liquid Glass on Windows uses the native DWM acrylic backdrop, which blurs the real desktop
     // behind the window. Other platforms fall back to the opaque paper surface.
-    val osGlassAvailable = isWindowsDesktop()
-    val osGlassActive = osGlassAvailable && controller.style.usesLiquidGlass
-    LaunchedEffect(osGlassActive, controller.isDark, window) {
-        applyWindowsAcrylic(window, osGlassActive, controller.isDark)
-        // The native window handle can appear a beat after the first frame; re-apply once.
-        kotlinx.coroutines.delay(300)
-        applyWindowsAcrylic(window, osGlassActive, controller.isDark)
-    }
+    val osGlassRequested = isWindowsDesktop() && controller.style.usesLiquidGlass
 
     val paletteColorScheme = remember(controller.palette, controller.isDark) {
         when (val palette = controller.palette) {
@@ -150,12 +143,23 @@ fun WindowScope.DesktopPlayerApp(
         }
     }
     val hasWallpaper = controller.backgroundImage != null && controller.backgroundImageEnabled
-    val uiAlpha = if (hasWallpaper) controller.backgroundAlpha else 1f
+    val uiAlpha = resolveLazerUiAlpha(hasWallpaper, controller.backgroundAlpha)
     LazerTheme(
         isDark = controller.isDark,
         colorScheme = paletteColorScheme,
         engine = controller.themeEngine,
     ) {
+        val backgroundArgb = MaterialTheme.colorScheme.background.toArgb()
+        var nativeGlassApplied by remember(window, osGlassRequested, controller.isDark, backgroundArgb) {
+            mutableStateOf(false)
+        }
+        LaunchedEffect(window, osGlassRequested, controller.isDark, backgroundArgb) {
+            nativeGlassApplied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
+            // Retry once after the initial frame has created the native handle.
+            delay(300)
+            nativeGlassApplied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
+        }
+        val osGlassActive = osGlassRequested && nativeGlassApplied
         val frameShape = RoundedCornerShape(0.dp)
         CompositionLocalProvider(
             LocalScrollInertia provides scrollInertia,
@@ -183,14 +187,13 @@ fun WindowScope.DesktopPlayerApp(
             Box(Modifier.fillMaxSize()) {
             val bg = controller.backgroundImage.takeIf { controller.backgroundImageEnabled }
             if (bg != null) {
-                // The wallpaper is faded by the same opacity in both styles. Under acrylic this is
-                // also what lets the DWM backdrop show through; without acrylic it keeps Material
-                // and Acrylic equally bright at the same slider value.
+                // Keep the wallpaper plane opaque; only the paper veil follows the UI opacity.
+                // The paper base also fills transparent pixels in PNG wallpapers.
+                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
                 Image(
                     bitmap = bg,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    alpha = uiAlpha,
                     modifier = Modifier.fillMaxSize(),
                 )
                 // Global scrim over the wallpaper: the main content's paper tone. Without it the
@@ -425,7 +428,7 @@ private fun NavigationPanel(
     val colors = MaterialTheme.colorScheme
     val glass = LocalOsGlassActive.current
     val uiAlpha = LocalLazerUiAlpha.current
-    val playlistScrollState = rememberScrollState()
+    val playlistScrollState = rememberLazyListState()
     val inertia = LocalScrollInertia.current
     // width() (not requiredWidth) so a narrow window can still shrink the rail.
     val railWidth = if (compact) 72.dp else 208.dp
@@ -496,15 +499,15 @@ private fun NavigationPanel(
                         )
                     }
                     playlists.isNotEmpty() -> {
-                        Column(
+                        LazyColumn(
+                            state = playlistScrollState,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .verticalScroll(playlistScrollState)
                                 .scrollInertia(playlistScrollState, inertia),
                             horizontalAlignment = if (compact) Alignment.CenterHorizontally else Alignment.Start,
                             verticalArrangement = Arrangement.spacedBy(if (compact) 6.dp else 0.dp),
                         ) {
-                            playlists.forEach { playlist ->
+                            items(playlists, key = { it.id }) { playlist ->
                                 SidebarPlaylistRow(
                                     playlist = playlist,
                                     selected = !settingsSelected && controller.activePlaylist?.id == playlist.id,
@@ -809,12 +812,12 @@ private fun DesktopSettingsPage(
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.background"), style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                if (controller.backgroundImage != null) tr("settings.background.change") else tr("settings.background.none"),
+                                if (controller.hasBackgroundImage) tr("settings.background.change") else tr("settings.background.none"),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        if (controller.backgroundImage != null) {
+                        if (controller.hasBackgroundImage) {
                             LazerSwitch(
                                 engine = controller.themeEngine,
                                 checked = controller.backgroundImageEnabled,
@@ -825,13 +828,13 @@ private fun DesktopSettingsPage(
                         TextButton(onClick = { pickBackgroundImage(controller) }) {
                             Text(tr("settings.background.pick"))
                         }
-                        if (controller.backgroundImage != null) {
+                        if (controller.hasBackgroundImage) {
                             TextButton(onClick = controller::clearBackgroundImage) {
                                 Text(tr("settings.background.clear"), color = MaterialTheme.colorScheme.error)
                             }
                         }
                     }
-                    if (controller.backgroundImage != null) {
+                    if (controller.hasBackgroundImage) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(tr("settings.background.alpha"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Spacer(Modifier.width(12.dp))

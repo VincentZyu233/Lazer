@@ -89,6 +89,7 @@ fun Modifier.captureLiquidGlass(glass: LazerLiquidGlass): Modifier =
  * intentionally shallow and colour-neutral so text stays readable and stacked glass does not
  * become a collection of bright, expensive distortion layers.
  */
+@Composable
 fun Modifier.liquidGlassSurface(
     glass: LazerLiquidGlass,
     shape: Shape,
@@ -97,6 +98,7 @@ fun Modifier.liquidGlassSurface(
 ): Modifier {
     if (!glass.isEnabled) return this
     val backdrop = glass.backdrop ?: return this
+    val uiAlpha = LocalLazerUiAlpha.current
     val effectiveBlurRadius = glass.scaledBlurRadius(blurRadius)
     return drawBackdrop(
         backdrop = backdrop,
@@ -114,7 +116,7 @@ fun Modifier.liquidGlassSurface(
         },
         highlight = { Highlight.Plain.copy(alpha = 0.62f) },
         innerShadow = { InnerShadow(radius = 8.dp, color = Color.Black.copy(alpha = 0.06f)) },
-        onDrawSurface = { drawRect(surfaceColor.copy(alpha = 0.18f)) },
+        onDrawSurface = { drawRect(surfaceColor.copy(alpha = lazerSurfaceAlpha(0.18f * surfaceColor.alpha, uiAlpha))) },
     )
 }
 
@@ -122,6 +124,7 @@ fun Modifier.liquidGlassSurface(
  * Crisp, responsive glass for buttons and other top-level controls. At rest it stays quiet; while
  * pressed it gains a small amount of depth without adding chromatic shimmer.
  */
+@Composable
 fun Modifier.liquidGlassControlSurface(
     glass: LazerLiquidGlass,
     shape: Shape,
@@ -133,6 +136,7 @@ fun Modifier.liquidGlassControlSurface(
     if (!glass.isEnabled) return this
     val backdrop = glass.backdrop ?: return this
     val pressed = pressProgress.coerceIn(0f, 1f)
+    val uiAlpha = LocalLazerUiAlpha.current
     val effectiveBlurRadius = glass.scaledBlurRadius(blurRadius)
     return drawBackdrop(
         backdrop = backdrop,
@@ -162,9 +166,9 @@ fun Modifier.liquidGlassControlSurface(
         },
         onDrawSurface = {
             if (tint.isSpecified) {
-                drawRect(tint.copy(alpha = 0.38f + 0.08f * pressed))
+                drawRect(tint.copy(alpha = lazerSurfaceAlpha((0.38f + 0.08f * pressed) * tint.alpha, uiAlpha)))
             } else {
-                drawRect(surfaceColor.copy(alpha = 0.16f + 0.05f * pressed))
+                drawRect(surfaceColor.copy(alpha = lazerSurfaceAlpha((0.16f + 0.05f * pressed) * surfaceColor.alpha, uiAlpha)))
             }
         },
     )
@@ -174,6 +178,7 @@ fun Modifier.liquidGlassControlSurface(
  * Lean frosted material for a control that moves with scrolling content. It deliberately avoids
  * lens and vibrancy passes so the control remains smooth while its backdrop is invalidated.
  */
+@Composable
 fun Modifier.liquidGlassFrostedSurface(
     glass: LazerLiquidGlass,
     shape: Shape,
@@ -182,6 +187,7 @@ fun Modifier.liquidGlassFrostedSurface(
 ): Modifier {
     if (!glass.isEnabled) return this
     val backdrop = glass.backdrop ?: return this
+    val uiAlpha = LocalLazerUiAlpha.current
     val effectiveBlurRadius = glass.scaledBlurRadius(blurRadius)
     return drawBackdrop(
         backdrop = backdrop,
@@ -191,6 +197,6 @@ fun Modifier.liquidGlassFrostedSurface(
             blur(effectiveBlurRadius.toPx())
         },
         highlight = { Highlight.Plain.copy(alpha = 0.58f) },
-        onDrawSurface = { drawRect(surfaceColor.copy(alpha = 0.18f)) },
+        onDrawSurface = { drawRect(surfaceColor.copy(alpha = lazerSurfaceAlpha(0.18f * surfaceColor.alpha, uiAlpha))) },
     )
 }

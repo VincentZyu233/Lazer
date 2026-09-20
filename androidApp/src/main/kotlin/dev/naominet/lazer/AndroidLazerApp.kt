@@ -715,14 +715,7 @@ fun AndroidLazerApp() {
         val hasVisualBackground = wallpaper != null || usesNowPlayingPalette
         // The slider controls the opacity of app surfaces above visual backgrounds. The image or
         // artwork palette itself stays opaque, so navigation transitions never expose another page.
-        val uiAlpha = if (hasVisualBackground) controller.backgroundAlpha else 1f
-        // Preserve the previous steady-state appearance, where equal global and page scrims were
-        // composited, while baking that result into one transition-safe background canvas.
-        val backgroundCanvasAlpha = if (hasVisualBackground) {
-            1f - (1f - uiAlpha) * (1f - uiAlpha)
-        } else {
-            1f
-        }
+        val uiAlpha = resolveLazerUiAlpha(hasVisualBackground, controller.backgroundAlpha)
         val pageBackgroundBackdrop = rememberLayerBackdrop()
         Box(Modifier.fillMaxSize().background(colors.background)) {
             // Keep the wallpaper and its scrim in one fixed, capturable canvas. Animated pages
@@ -774,7 +767,7 @@ fun AndroidLazerApp() {
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(colors.background.copy(alpha = backgroundCanvasAlpha)),
+                        .background(colors.background.copy(alpha = uiAlpha)),
                 )
             }
             val liquidGlass = rememberLazerLiquidGlass(
