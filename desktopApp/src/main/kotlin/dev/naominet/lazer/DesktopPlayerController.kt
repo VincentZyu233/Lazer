@@ -27,6 +27,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.swing.Swing
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
@@ -79,6 +83,7 @@ enum class QrLoginState {
     ERROR,
 }
 
+private data class DecodedBackgroundImage(val bitmap: ImageBitmap?)
 private data class PlaybackProgress(val token: Long, val value: Float)
 private data class CacheProgress(val trackId: Long, val value: Float)
 private data class DesktopStreamCacheKey(val trackId: Long, val quality: AudioQuality)
@@ -112,6 +117,10 @@ class DesktopPlayerController(
     private var qrLoginJob: Job? = null
     private var bootstrapJob: Job? = null
     private var maintenanceJob: Job? = null
+    private var backgroundImageJob: Job? = null
+    private var backgroundImageGeneration = 0L
+    // ImageIO reads are blocking and may ignore cancellation. Hold this through the actual decode.
+    private val backgroundImageDecodeMutex = Mutex()
     private var playlistRequestGeneration = 0L
     private val streamUrls = object : LinkedHashMap<DesktopStreamCacheKey, CachedDesktopSongUrl>(
         STREAM_URL_CACHE_SIZE,
@@ -199,6 +208,8 @@ class DesktopPlayerController(
         private set
     var palette by mutableStateOf(DesktopSettings.palette)
         private set
+    private var backgroundImagePath by mutableStateOf(DesktopSettings.backgroundImagePath)
+    val hasBackgroundImage: Boolean get() = backgroundImagePath != null
     var backgroundImage by mutableStateOf<ImageBitmap?>(null)
         private set
     var backgroundImageEnabled by mutableStateOf(DesktopSettings.backgroundImageEnabled)
@@ -337,9 +348,9 @@ class DesktopPlayerController(
         LazerI18n.switchLanguage(language)
         systemMediaSession.start()
         systemMediaSession.setVolume(volume)
+        loadBackgroundImage()
         scope.launch {
             loadLazerTranslations()
-            loadBackgroundImage()
             connectMusicService()
         }
     }
@@ -355,34 +366,67 @@ class DesktopPlayerController(
     }
 
     fun updateBackgroundImageEnabled(enabled: Boolean) {
+        if (backgroundImageEnabled == enabled) return
         backgroundImageEnabled = enabled
         DesktopSettings.backgroundImageEnabled = enabled
+        cancelBackgroundImageLoad()
+        if (enabled) loadBackgroundImage() else backgroundImage = null
     }
 
-    /** Stores the chosen image's path and decodes it as the new background. */
+    /** Only persist a new selection after it has decoded successfully, even when hidden. */
     fun setBackgroundImage(source: java.io.File) {
-        scope.launch {
-            val decoded = withContext(Dispatchers.IO) {
-                runCatching { javax.imageio.ImageIO.read(source)?.toComposeImageBitmap() }
-                    .onFailure { error -> println("Lazer: background load failed: $error") }
-                    .getOrNull()
-            }
-            if (decoded != null) {
-                backgroundImage = decoded
-                DesktopSettings.backgroundImagePath = source.absolutePath
-            }
-        }
+        requestBackgroundImage(source, saveSelection = true)
     }
 
     fun clearBackgroundImage() {
+        cancelBackgroundImageLoad()
         backgroundImage = null
+        backgroundImagePath = null
         DesktopSettings.backgroundImagePath = null
     }
 
-    private suspend fun loadBackgroundImage() {
-        val path = DesktopSettings.backgroundImagePath ?: return
-        backgroundImage = withContext(Dispatchers.IO) {
-            runCatching { javax.imageio.ImageIO.read(java.io.File(path))?.toComposeImageBitmap() }.getOrNull()
+    private fun cancelBackgroundImageLoad() {
+        backgroundImageGeneration++
+        backgroundImageJob?.cancel()
+        backgroundImageJob = null
+    }
+
+    private fun loadBackgroundImage() {
+        if (!backgroundImageEnabled) return
+        val path = backgroundImagePath ?: return
+        requestBackgroundImage(java.io.File(path), saveSelection = false)
+    }
+
+    private fun requestBackgroundImage(source: java.io.File, saveSelection: Boolean) {
+        cancelBackgroundImageLoad()
+        val generation = backgroundImageGeneration
+        val retainBitmap = backgroundImageEnabled
+        backgroundImageJob = scope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    backgroundImageDecodeMutex.withLock {
+                        currentCoroutineContext().ensureActive()
+                        val image = decodeDesktopBackgroundImage(source) ?: return@withLock null
+                        try {
+                            currentCoroutineContext().ensureActive()
+                            // A hidden selection still gets validated, without retaining a native bitmap.
+                            DecodedBackgroundImage(if (retainBitmap) image.toComposeImageBitmap() else null)
+                        } finally {
+                            image.flush()
+                        }
+                    }
+                }
+                if (generation != backgroundImageGeneration || result == null) return@launch
+                backgroundImage = result.bitmap
+                if (saveSelection) {
+                    backgroundImagePath = source.absolutePath
+                    DesktopSettings.backgroundImagePath = source.absolutePath
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (saveSelection) println("Lazer: background load failed: $error")
+            }
         }
     }
 
@@ -466,6 +510,8 @@ class DesktopPlayerController(
     }
 
     fun dispose() {
+        cancelBackgroundImageLoad()
+        backgroundImage = null
         bootstrapJob?.cancel()
         searchJob?.cancel()
         playJob?.cancel()

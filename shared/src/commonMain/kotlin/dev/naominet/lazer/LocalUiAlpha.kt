@@ -9,3 +9,11 @@ import androidx.compose.runtime.staticCompositionLocalOf
  * transparent (wallpaper fully visible). Text and icons are never affected.
  */
 val LocalLazerUiAlpha = staticCompositionLocalOf { 1f }
+
+/** One linear opacity for the root veil; never apply this to the wallpaper or its content. */
+fun resolveLazerUiAlpha(hasVisualBackground: Boolean, value: Float): Float =
+    if (hasVisualBackground && value.isFinite()) value.coerceIn(0f, 1f) else 1f
+
+/** Retains a surface's tuned opacity while applying the user's surface-opacity setting. */
+fun lazerSurfaceAlpha(baseAlpha: Float, uiAlpha: Float): Float =
+    baseAlpha.coerceIn(0f, 1f) * resolveLazerUiAlpha(true, uiAlpha)

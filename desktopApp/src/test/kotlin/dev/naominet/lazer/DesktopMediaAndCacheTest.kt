@@ -24,8 +24,32 @@ class DesktopMediaAndCacheTest {
     fun `acrylic tint follows the app theme instead of Windows appearance`() {
         // Native acrylic uses AABBGGRR. Day mode is the light paper (#F7F5EF) with an 80% tint,
         // leaving just enough blurred desktop to retain the acrylic character.
-        assertEquals(0xCCEFF5F7.toInt(), windowsAcrylicTint(isDark = false))
-        assertEquals(0x662D281D.toInt(), windowsAcrylicTint(isDark = true))
+        assertEquals(0xCCEFF5F7.toInt(), windowsAcrylicTint(0xFFF7F5EF.toInt(), isDark = false))
+        assertEquals(0x662D281D.toInt(), windowsAcrylicTint(0xFF1D282D.toInt(), isDark = true))
+        // Custom/engine palettes must use their actual paper RGB, with native tint opacity.
+        assertEquals(0xCC563412.toInt(), windowsAcrylicTint(0xFF123456.toInt(), isDark = false))
+        assertEquals(0x66563412.toInt(), windowsAcrylicTint(0xFF123456.toInt(), isDark = true))
+    }
+
+    @Test
+    fun `native accent structures are reflectively writable and use pointer sized SIZE_T`() {
+        val accent = AccentPolicy().apply { gradientColor = 0x12345678 }
+        accent.write()
+        assertEquals(16, accent.size())
+        assertEquals(0x12345678, accent.pointer.getInt(8))
+
+        val data = WindowCompositionAttributeData().apply {
+            attribute = 19
+            this.data = accent.pointer
+            sizeOfData = WindowsSizeT(accent.size().toLong())
+        }
+        data.write()
+        val pointerSize = com.sun.jna.Native.POINTER_SIZE
+        assertEquals(pointerSize * 3, data.size())
+        assertEquals(accent.pointer, data.pointer.getPointer(pointerSize.toLong()))
+        assertEquals(pointerSize, com.sun.jna.Native.getNativeSize(WindowsSizeT::class.java, data.sizeOfData))
+        val nativeSize = if (pointerSize == 8) data.pointer.getLong(16) else data.pointer.getInt(8).toLong()
+        assertEquals(16L, nativeSize)
     }
 
     @Test
