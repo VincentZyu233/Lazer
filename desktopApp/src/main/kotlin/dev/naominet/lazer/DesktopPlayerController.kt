@@ -43,6 +43,7 @@ data class TrackItem(
     val durationMillis: Long,
     val coverUrl: String?,
     val artists: List<Artist> = emptyList(),
+    val translatedTitle: String? = null,
 ) {
     val durationLabel: String
         get() = formatDuration(durationMillis)
@@ -214,6 +215,8 @@ class DesktopPlayerController(
         private set
     var backgroundImageEnabled by mutableStateOf(DesktopSettings.backgroundImageEnabled)
         private set
+    var backgroundMode by mutableStateOf(DesktopSettings.backgroundMode)
+        private set
     var backgroundAlpha by mutableStateOf(DesktopSettings.backgroundAlpha)
         private set
     val themeEngine: LazerThemeEngine get() = style.themeEngine
@@ -299,7 +302,9 @@ class DesktopPlayerController(
         private set
     var isLyricsVisible by mutableStateOf(false)
         private set
-    /** Album-art-derived colors driving the continuous lyric background. */
+    /** Album-art-derived seed and colors driving themes and visual backgrounds. */
+    var nowPlayingArtworkSeed by mutableStateOf(CoverPalette.defaultSeed)
+        private set
     var lyricFlowColors by mutableStateOf(CoverPalette.defaultFlow)
         private set
 
@@ -365,6 +370,18 @@ class DesktopPlayerController(
         DesktopSettings.backgroundAlpha = backgroundAlpha
     }
 
+    fun updateBackgroundMode(value: DesktopBackgroundMode) {
+        if (backgroundMode == value) return
+        backgroundMode = value
+        DesktopSettings.backgroundMode = value
+        cancelBackgroundImageLoad()
+        if (value == DesktopBackgroundMode.IMAGE) {
+            loadBackgroundImage()
+        } else {
+            backgroundImage = null
+        }
+    }
+
     fun updateBackgroundImageEnabled(enabled: Boolean) {
         if (backgroundImageEnabled == enabled) return
         backgroundImageEnabled = enabled
@@ -392,7 +409,7 @@ class DesktopPlayerController(
     }
 
     private fun loadBackgroundImage() {
-        if (!backgroundImageEnabled) return
+        if (!backgroundImageEnabled || backgroundMode != DesktopBackgroundMode.IMAGE) return
         val path = backgroundImagePath ?: return
         requestBackgroundImage(java.io.File(path), saveSelection = false)
     }
@@ -421,6 +438,10 @@ class DesktopPlayerController(
                 if (saveSelection) {
                     backgroundImagePath = source.absolutePath
                     DesktopSettings.backgroundImagePath = source.absolutePath
+                    backgroundMode = DesktopBackgroundMode.IMAGE
+                    backgroundImageEnabled = true
+                    DesktopSettings.backgroundMode = DesktopBackgroundMode.IMAGE
+                    DesktopSettings.backgroundImageEnabled = true
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -643,15 +664,24 @@ class DesktopPlayerController(
     /** Jump playback to the start of a lyric line. */
     fun seekToLyric(index: Int) {
         val line = lyrics.getOrNull(index) ?: return
+        seekToLyricTime(line.timeMs, index)
+    }
+
+    /** Jump to a rendered lyric row, including transient interlude rows not present in [lyrics]. */
+    fun seekToLyricTime(timeMs: Long) {
+        seekToLyricTime(timeMs, null)
+    }
+
+    private fun seekToLyricTime(timeMs: Long, sourceIndex: Int?) {
         val track = nowPlaying ?: return
         if (track.durationMillis <= 0L) return
         val url = streamUrl
         val playWhenReady = isPlaying
         isSeeking = true
-        progress = lyricSeekProgress(line.timeMs, track.durationMillis)
+        progress = lyricSeekProgress(timeMs, track.durationMillis)
         PlaybackDebugLog.event(
             "lyric-seek",
-            "track=${track.id} line=$index target=$progress playing=$playWhenReady hasStream=${!url.isNullOrBlank()}",
+            "track=${track.id} line=${sourceIndex ?: "transient"} target=$progress playing=$playWhenReady hasStream=${!url.isNullOrBlank()}",
         )
         if (url.isNullOrBlank()) {
             isSeeking = false
@@ -703,6 +733,7 @@ class DesktopPlayerController(
             }
             val flow = CoverPalette.flowColorsFromSeed(seed)
             if (nowPlaying?.id == trackId) {
+                nowPlayingArtworkSeed = seed
                 lyricFlowColors = flow
             }
         }
@@ -892,11 +923,16 @@ class DesktopPlayerController(
         if (!isWindowsDesktop() || exclusiveAudio == enabled) return
         exclusiveAudio = enabled
         DesktopSettings.exclusiveAudio = enabled
-        audioPlayer.setExclusiveAudio(enabled)
         val track = nowPlaying ?: return
-        if (isPlaying || streamUrl != null) {
-            bufferedProgress = 0f
-            resolveAndPlay(track, resumeProgress = progress, playWhenReady = isPlaying)
+        val shouldRebuildPlayback = isPlaying || streamUrl != null
+        val resumeProgress = progress
+        val playWhenReady = isPlaying
+        scope.launch {
+            audioPlayer.setExclusiveAudio(enabled)
+            if (shouldRebuildPlayback) {
+                bufferedProgress = 0f
+                resolveAndPlay(track, resumeProgress = resumeProgress, playWhenReady = playWhenReady)
+            }
         }
     }
 
@@ -1752,6 +1788,12 @@ private fun Song.toTrackItem(): TrackItem = TrackItem(
     durationMillis = durationMillis ?: 0L,
     coverUrl = album?.picUrl ?: album?.blurPictureUrl,
     artists = artists.filter { it.id > 0L && it.name.isNotBlank() },
+    translatedTitle = translations
+        .map(String::trim)
+        .filter { it.isNotBlank() && it != name }
+        .distinct()
+        .joinToString(" / ")
+        .takeIf(String::isNotBlank),
 )
 
 private fun Playlist.toPlaylistItem(): PlaylistItem {

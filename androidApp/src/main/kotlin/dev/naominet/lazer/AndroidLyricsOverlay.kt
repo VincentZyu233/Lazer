@@ -36,7 +36,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -314,7 +316,8 @@ private fun AnimatedLyricsViewport(
                 )
             },
     ) {
-        val centerYPx = with(density) { (maxHeight / 2).toPx() }
+        // Keep the active lyric centered in the available lyrics viewport.
+        val centerYPx = with(density) { (maxHeight * 0.5f).toPx() }
         val heightPx = with(density) { maxHeight.toPx() }
         val rowHeightMarginPx = with(density) { 160.dp.toPx() }
         // lyricScroll is written every frame while dragging, flinging, or following. The offset
@@ -354,7 +357,13 @@ private fun AnimatedLyricsViewport(
                 animatedLyricFocus(index == activeIndexValue, animationSpeed)
             }
             val ambient = (1f - distance / 4f).coerceAtLeast(0f)
-            val scale = 0.96f + focus * 0.08f
+            val scale = amllLyricLineScale(focus)
+            val blurRadiusDp = amllLyricBlurRadiusDp(
+                distance = distance,
+                focus = focus,
+                narrowViewport = maxWidth <= 1024.dp,
+                interactionSuspended = !followPlayback,
+            )
             val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
             val hasTranslation = !line.translation.isNullOrBlank()
             val textWidthFraction = 1f / 1.04f
@@ -398,6 +407,13 @@ private fun AnimatedLyricsViewport(
                             scaleX = 0.94f + interludePresence * 0.06f
                             scaleY = 0.92f + interludePresence * 0.08f
                             transformOrigin = TransformOrigin.Center
+                        } else {
+                            val radius = blurRadiusDp.dp.toPx()
+                            renderEffect = if (radius > 0.01f) {
+                                BlurEffect(radius, radius, TileMode.Decal)
+                            } else {
+                                null
+                            }
                         }
                     }
                     .onSizeChanged { size ->
@@ -440,6 +456,7 @@ private fun AnimatedLyricsViewport(
                             },
                             visibility = interludePresence,
                             glowEnabled = lyricGlowEnabled || clickGlowTokens.containsKey(line),
+                            dotDiameter = (lyricFontSizeSp * 0.3f).dp,
                         )
                     } else {
                     androidx.compose.runtime.key(trackId, line) {

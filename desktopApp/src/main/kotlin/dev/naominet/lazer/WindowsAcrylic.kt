@@ -84,6 +84,10 @@ private val user32Accent: User32Accent? by lazy {
     }
 }
 
+/** Keeps part of DWM visible while app-rendered imagery is composited above native acrylic. */
+internal fun windowsVisualBackgroundAlpha(osGlassActive: Boolean, uiAlpha: Float): Float =
+    if (osGlassActive) (1f - uiAlpha.coerceIn(0f, 1f)) * 0.88f else 1f
+
 /** Returns true only when the requested native policy was applied successfully. */
 internal fun applyWindowsAcrylic(
     window: Window,

@@ -44,6 +44,23 @@ class LyricInterludeTest {
         assertTrue(halfway[1] > halfway[2])
     }
 
+    @Test fun amllInterludeChoreographyUsesHoldBreathAndExitPhases() {
+        val hiddenDuringHold = lyricInterludeVisualSnapshot(5_000L, 11_000L, 5_200L)
+        assertEquals(0f, hiddenDuringHold.opacity)
+
+        val entered = lyricInterludeVisualSnapshot(5_000L, 11_000L, 6_500L)
+        assertTrue(entered.opacity > 0.99f)
+        assertTrue(entered.scale >= 1f)
+        assertTrue(entered.dotOpacities[0] > entered.dotOpacities[2])
+
+        val exiting = lyricInterludeVisualSnapshot(5_000L, 11_000L, 10_500L)
+        assertTrue(exiting.scale > 1f)
+        assertTrue(exiting.opacity > 0f)
+
+        val ended = lyricInterludeVisualSnapshot(5_000L, 11_000L, 11_000L)
+        assertEquals(0f, ended.opacity, 0.001f)
+    }
+
     @Test fun exactVocalEndsTakePriority() {
         assertEquals(9_000L, lyricInterludeStart(0, 9_000, 15_000))
         assertNull(lyricInterludeStart(0, 13_000, 15_000))

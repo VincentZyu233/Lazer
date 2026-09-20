@@ -72,6 +72,20 @@ internal object DesktopSettings {
         get() = DesktopStateFile.get("appearance.background_image_enabled")?.toBooleanStrictOrNull() ?: true
         set(value) = DesktopStateFile.set("appearance.background_image_enabled", value.toString())
 
+    /** Background source. Migrates the former image-enabled switch on first read. */
+    var backgroundMode: DesktopBackgroundMode
+        get() {
+            DesktopStateFile.get("appearance.background_mode")?.let {
+                return parseDesktopBackgroundMode(it)
+            }
+            return if (backgroundImagePath != null && backgroundImageEnabled) {
+                DesktopBackgroundMode.IMAGE
+            } else {
+                DesktopBackgroundMode.SOLID
+            }
+        }
+        set(value) = DesktopStateFile.set("appearance.background_mode", value.name)
+
     var backgroundAlpha: Float
         get() = DesktopStateFile.get("appearance.background_alpha")?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.5f
         set(value) = DesktopStateFile.set("appearance.background_alpha", value.coerceIn(0f, 1f).toString())
