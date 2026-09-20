@@ -14,6 +14,8 @@ import java.util.concurrent.Callable
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import javax.sound.sampled.AudioFormat
@@ -157,6 +159,9 @@ internal class WindowsWasapiAudioOutput(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        // Interrupt first so a blocked render loop can leave the single WASAPI worker. Native
+        // release is then dispatched to that worker without waiting forever on the caller.
+        audioThread.get()?.interrupt()
         runCatching { onAudioThread { releaseNativeResources() } }
         executor.shutdownNow()
     }
@@ -285,8 +290,19 @@ internal class WindowsWasapiAudioOutput(
 
     private fun <T> onAudioThread(block: () -> T): T {
         if (Thread.currentThread() === audioThread.get()) return block()
+        val future = executor.submit(Callable { block() })
         return try {
-            executor.submit(Callable { block() }).get()
+            future.get(WasapiCommandTimeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (error: TimeoutException) {
+            future.cancel(true)
+            closed.set(true)
+            audioThread.get()?.interrupt()
+            executor.shutdownNow()
+            throw IOException("Windows 独占音频设备未响应", error)
+        } catch (error: InterruptedException) {
+            future.cancel(true)
+            Thread.currentThread().interrupt()
+            throw IOException("Windows 独占音频操作已取消", error)
         } catch (error: ExecutionException) {
             throw error.cause ?: error
         }
@@ -318,6 +334,7 @@ internal class WindowsWasapiAudioOutput(
         const val IAudioClientGetService = 14
         const val IAudioRenderClientGetBuffer = 3
         const val IAudioRenderClientReleaseBuffer = 4
+        const val WasapiCommandTimeoutMillis = 3_000L
     }
 }
 

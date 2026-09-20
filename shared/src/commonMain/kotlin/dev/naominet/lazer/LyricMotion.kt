@@ -202,20 +202,48 @@ fun lyricWordVisualProgress(
     return rawProgress.pow(speed.highlightExponent).toFloat()
 }
 
-/** Exact AMLL mask geometry: the fade band is half a glyph-height wide. */
-internal fun lyricMaskForegroundAlpha(
+/**
+ * AMLL's word mask moves linearly through the measured word. The smoothing belongs to the
+ * renderer's clock interpolation; the mask itself must stay tied to the source word timing.
+ */
+internal fun lyricWordMaskProgress(
+    word: TimedLyricWord,
+    positionMillis: Long,
+): Float = lyricWordProgress(word, positionMillis)
+
+/** Position of the right edge of a word's moving fade band, in local word pixels. */
+internal fun lyricWordMaskEdge(
     wordProgress: Float,
-    pointInWordPixels: Float,
     wordWidthPixels: Float,
     fadeWidthPixels: Float,
-): Float {
-    val fadeWidth = fadeWidthPixels.coerceAtLeast(0.01f)
-    val transitionEnd =
-        wordProgress.coerceIn(0f, 1f) * (wordWidthPixels.coerceAtLeast(0f) + fadeWidth)
-    return ((transitionEnd - pointInWordPixels) / fadeWidth).coerceIn(0f, 1f)
-}
+): Float = wordProgress.coerceIn(0f, 1f) *
+    (wordWidthPixels.coerceAtLeast(0f) + fadeWidthPixels.coerceAtLeast(0.01f))
+
 
 internal fun lyricBaseMaskAlpha(): Float = AMLL_BASE_MASK_ALPHA
+
+/** A disabled AMLL line pauses its mask clock instead of rewinding to an inactive placeholder. */
+internal fun lyricMaskTargetPositionMillis(
+    active: Boolean,
+    reportedPositionMillis: Long,
+    retainedActivePositionMillis: Long,
+): Long = if (active) reportedPositionMillis else retainedActivePositionMillis
+
+/** AMLL main-line scale spring target: inactive 97%, focused 100%. */
+fun amllLyricLineScale(focus: Float): Float =
+    0.97f + focus.coerceIn(0f, 1f) * 0.03f
+
+/** AMLL's distance-based inactive-line blur, reduced on viewports up to 1024 px. */
+fun amllLyricBlurRadiusDp(
+    distance: Float,
+    focus: Float,
+    narrowViewport: Boolean,
+    interactionSuspended: Boolean,
+): Float {
+    if (interactionSuspended) return 0f
+    val level = (1f + distance.coerceAtLeast(0f)) * if (narrowViewport) 0.8f else 1f
+    return min(5f, level * (1f - focus.coerceIn(0f, 1f)))
+}
 
 fun lyricWordSmoothingMillis(speed: LyricAnimationSpeed): Int =
     (96.0 / speed.scrollMultiplier).roundToInt().coerceIn(56, 180)

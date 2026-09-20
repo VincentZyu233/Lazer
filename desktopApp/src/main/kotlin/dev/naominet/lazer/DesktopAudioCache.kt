@@ -5,15 +5,21 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.io.RandomAccessFile
-import java.net.HttpURLConnection
 import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.time.Duration
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -34,13 +40,24 @@ internal class DesktopAudioCache(
 ) : Closeable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val entries = ConcurrentHashMap<String, AudioCacheEntry>()
+    private val lifecycleLock = Any()
+    private var closed = false
+    private var clearing = false
+
+    // Shared across entries: each download only owns its response and one copy buffer.
+    private val httpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(15))
+        .followRedirects(HttpClient.Redirect.NORMAL)
+        .build()
 
     fun open(
         trackId: Long,
         variantKey: String,
         url: String,
         expectedBytes: Long?,
-    ): InputStream {
+    ): InputStream = synchronized(lifecycleLock) {
+        check(!closed) { "音频缓存已关闭" }
+        check(!clearing) { "音频缓存正在清理" }
         val fileName = audioCacheFileName(trackId, variantKey)
         val entry = entries.computeIfAbsent(fileName) {
             AudioCacheEntry(
@@ -48,30 +65,46 @@ internal class DesktopAudioCache(
                 scope = scope,
                 trackId = trackId,
                 onProgress = onProgress,
+                httpClient = httpClient,
             )
         }
         entry.ensureDownload(url, expectedBytes)
         onProgress(trackId, entry.bufferedFraction())
-        return entry.openInputStream()
+        entry.openInputStream()
     }
 
     override fun close() {
-        scope.cancel()
-        entries.values.forEach(AudioCacheEntry::wakeReaders)
-        entries.clear()
+        synchronized(lifecycleLock) {
+            if (closed) return
+            closed = true
+            entries.values.forEach(AudioCacheEntry::cancel)
+            entries.clear()
+            scope.cancel()
+        }
     }
 
     suspend fun clear(): Int {
-        entries.values.forEach { it.cancel() }
-        entries.clear()
-        return runCatching {
-            if (!Files.isDirectory(cacheDirectory)) return@runCatching 0
-            var removed = 0
-            Files.newDirectoryStream(cacheDirectory).use { paths ->
-                paths.forEach { path -> if (Files.deleteIfExists(path)) removed += 1 }
-            }
-            removed
-        }.getOrDefault(0)
+        val snapshot = synchronized(lifecycleLock) {
+            check(!closed) { "音频缓存已关闭" }
+            check(!clearing) { "音频缓存正在清理" }
+            clearing = true
+            entries.values.toList().also { entries.clear() }
+        }
+        try {
+            // Cancel every request before joining any one of them.
+            snapshot.forEach(AudioCacheEntry::cancel)
+            snapshot.forEach { it.join() }
+            return runCatching {
+                if (!Files.isDirectory(cacheDirectory)) return@runCatching 0
+                var removed = 0
+                Files.newDirectoryStream(cacheDirectory).use { paths ->
+                    paths.forEach { path -> if (Files.deleteIfExists(path)) removed += 1 }
+                }
+                removed
+            }.getOrDefault(0)
+        } finally {
+            synchronized(lifecycleLock) { clearing = false }
+        }
     }
 }
 
@@ -80,6 +113,7 @@ private class AudioCacheEntry(
     private val scope: CoroutineScope,
     private val trackId: Long,
     private val onProgress: (trackId: Long, fraction: Float) -> Unit,
+    private val httpClient: HttpClient,
 ) {
     private val completePath = mediaPath.resolveSibling("${mediaPath.fileName}.complete")
     private val dataLock = ReentrantLock()
@@ -98,7 +132,11 @@ private class AudioCacheEntry(
     @Volatile
     private var failure: Throwable? = null
 
+    @Volatile
+    private var cancelled = false
+
     private var downloadJob: Job? = null
+    private val readers = ConcurrentHashMap.newKeySet<GrowingCacheInputStream>()
 
     fun ensureDownload(url: String, requestedExpectedBytes: Long?) {
         synchronized(stateLock) {
@@ -130,7 +168,11 @@ private class AudioCacheEntry(
         }
     }
 
-    fun openInputStream(): InputStream = GrowingCacheInputStream(this, mediaPath)
+    fun openInputStream(): InputStream = GrowingCacheInputStream(this, mediaPath).also(readers::add)
+
+    fun readerClosed(reader: GrowingCacheInputStream) {
+        readers.remove(reader)
+    }
 
     fun bufferedFraction(): Float = when {
         complete -> 1f
@@ -160,10 +202,30 @@ private class AudioCacheEntry(
         }
     }
 
-    suspend fun cancel() {
-        val job = synchronized(stateLock) { downloadJob }
-        job?.cancelAndJoin()
+    fun cancel() {
+        cancelled = true
+        failure = IOException("音频缓存已关闭")
+        synchronized(stateLock) { downloadJob }?.cancel()
+        readers.forEach { runCatching { it.close() } }
         wakeReaders()
+    }
+
+    suspend fun join() {
+        synchronized(stateLock) { downloadJob }?.join()
+    }
+
+    fun isCancelled(): Boolean = cancelled
+
+    private suspend fun openHttp(request: HttpRequest): HttpResponse<InputStream> {
+        val future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
+        try {
+            return runInterruptible { future.get() }
+        } catch (error: Throwable) {
+            // Covers cancellation racing with response delivery as well as blocked headers.
+            future.whenComplete { response, _ -> response?.body()?.close() }
+            future.cancel(true)
+            throw error
+        }
     }
 
     private suspend fun download(url: String) {
@@ -182,48 +244,69 @@ private class AudioCacheEntry(
                 onProgress(trackId, 1f)
                 return
             }
-            val connection = URI(url).toURL().openConnection().apply {
-                connectTimeout = 15_000
-                readTimeout = 20_000
-                setRequestProperty("User-Agent", "Lazer/1.2")
-                setRequestProperty("Accept-Encoding", "identity")
-                if (start > 0L) setRequestProperty("Range", "bytes=$start-")
-            }
-
-            val append = (connection as? HttpURLConnection)?.let { http ->
-                http.requestMethod = "GET"
-                http.connect()
-                start > 0L && http.responseCode == HttpURLConnection.HTTP_PARTIAL
-            } ?: false
-
-            if (start > 0L && !append) {
-                start = 0L
-                Files.newOutputStream(
-                    mediaPath,
-                    StandardOpenOption.WRITE,
-                    StandardOpenOption.TRUNCATE_EXISTING,
-                ).close()
-                downloadedBytes = 0L
-            }
-
-            val responseBytes = connection.contentLengthLong.coerceAtLeast(0L)
-            if (expectedBytes <= 0L && responseBytes > 0L) expectedBytes = start + responseBytes
-
-            val openOptions = if (append) {
-                arrayOf(StandardOpenOption.WRITE, StandardOpenOption.APPEND)
+            currentCoroutineContext().ensureActive()
+            val uri = URI(url)
+            val input: InputStream
+            val append: Boolean
+            val responseBytes: Long
+            if (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) {
+                val request = HttpRequest.newBuilder(uri)
+                    .timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Lazer/1.2")
+                    .header("Accept-Encoding", "identity")
+                    .apply { if (start > 0L) header("Range", "bytes=$start-") }
+                    .GET()
+                    .build()
+                val response = openHttp(request)
+                input = response.body()
+                if (response.statusCode() !in 200..299) {
+                    input.close()
+                    throw IOException("音频下载失败（HTTP ${response.statusCode()}）")
+                }
+                append = start > 0L && response.statusCode() == 206
+                responseBytes = response.headers().firstValueAsLong("Content-Length").orElse(0L)
             } else {
-                arrayOf(StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+                val connection = uri.toURL().openConnection().apply {
+                    connectTimeout = 15_000
+                    readTimeout = 20_000
+                }
+                input = runInterruptible { connection.getInputStream() }
+                append = false
+                responseBytes = connection.contentLengthLong.coerceAtLeast(0L)
             }
-            connection.getInputStream().buffered(64 * 1024).use { input ->
-                Files.newOutputStream(mediaPath, *openOptions).buffered(64 * 1024).use { output ->
+
+            input.use {
+                currentCoroutineContext().ensureActive()
+                if (start > 0L && !append) {
+                    start = 0L
+                    Files.newOutputStream(
+                        mediaPath,
+                        StandardOpenOption.WRITE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                    ).close()
+                    downloadedBytes = 0L
+                }
+                if (expectedBytes <= 0L && responseBytes > 0L) expectedBytes = start + responseBytes
+
+                val openOptions = if (append) {
+                    arrayOf(StandardOpenOption.WRITE, StandardOpenOption.APPEND)
+                } else {
+                    arrayOf(StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)
+                }
+                Files.newOutputStream(mediaPath, *openOptions).use { output ->
                     val buffer = ByteArray(64 * 1024)
                     var lastUpdateNs = 0L
-                    while (scope.isActive) {
-                        val count = input.read(buffer)
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        // HttpClient's InputStream blocks interruptibly, but its request timeout
+                        // ends at headers. Retain the old 20-second body inactivity timeout.
+                        val count = withTimeout(20_000L) {
+                            runInterruptible { input.read(buffer) }
+                        }
                         if (count < 0) break
                         if (count == 0) continue
+                        currentCoroutineContext().ensureActive()
                         output.write(buffer, 0, count)
-                        output.flush()
                         downloadedBytes += count
                         wakeReaders()
 
@@ -236,7 +319,7 @@ private class AudioCacheEntry(
                 }
             }
 
-            if (!scope.isActive) return
+            currentCoroutineContext().ensureActive()
             val finalSize = Files.size(mediaPath)
             val expected = expectedBytes
             if (expected > 0L && finalSize < expected) {
@@ -253,7 +336,8 @@ private class AudioCacheEntry(
             complete = true
             onProgress(trackId, 1f)
         } catch (error: Throwable) {
-            if (scope.isActive) failure = error
+            if (!cancelled) failure = error
+            if (error is CancellationException) throw error
         } finally {
             wakeReaders()
         }
@@ -276,6 +360,7 @@ private class GrowingCacheInputStream(
 ) : InputStream() {
     private val file = RandomAccessFile(mediaPath.toFile(), "r")
     private var position = 0L
+    private val singleByte = ByteArray(1)
 
     @Volatile
     private var closed = false
@@ -288,7 +373,7 @@ private class GrowingCacheInputStream(
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         while (true) {
-            if (closed) throw IOException("音频缓存读取已关闭")
+            if (closed || entry.isCancelled()) throw IOException("音频缓存读取已关闭")
             val available = entry.availableFrom(position)
             if (available > 0L) {
                 val count = min(length.toLong(), available).toInt()
@@ -317,8 +402,12 @@ private class GrowingCacheInputStream(
     override fun close() {
         if (closed) return
         closed = true
-        file.close()
-        entry.wakeReaders()
+        try {
+            file.close()
+        } finally {
+            entry.readerClosed(this)
+            entry.wakeReaders()
+        }
     }
 }
 

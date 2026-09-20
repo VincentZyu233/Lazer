@@ -9,6 +9,7 @@ data class TimedLyricLine(
     val text: String,
     val translation: String? = null,
     val words: List<TimedLyricWord> = emptyList(),
+    val endTimeMs: Long? = null,
 )
 
 private val LrcStampPattern = Regex("""\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?]""")
@@ -54,8 +55,41 @@ internal fun parseDesktopWordLyrics(yrc: String?): List<TimedLyricLine> =
             timeMs = line.timeMillis,
             text = line.text,
             words = line.words,
+            endTimeMs = line.timeMillis + line.durationMillis,
         )
     }
+
+internal fun desktopLyricsWithInterludes(
+    lines: List<TimedLyricLine>,
+    durationMs: Long,
+): List<TimedLyricLine> = buildList {
+    val first = lines.firstOrNull() ?: return@buildList
+    if (first.timeMs >= 5_000L && first.text.isNotBlank()) {
+        add(TimedLyricLine(0L, "", endTimeMs = first.timeMs))
+    }
+    lines.forEachIndexed { index, line ->
+        val next = lines.getOrNull(index + 1)?.timeMs ?: durationMs
+        add(if (line.text.isBlank()) line.copy(endTimeMs = next) else line)
+        if (line.text.isNotBlank()) {
+            val end = line.endTimeMs ?: line.words.maxOfOrNull { it.startTimeMillis + it.durationMillis }
+            lyricInterludeStart(line.timeMs, end, next)?.let { start ->
+                add(TimedLyricLine(start, "", endTimeMs = next))
+            }
+        }
+    }
+}
+
+internal fun activeDesktopInterlude(
+    lines: List<TimedLyricLine>,
+    positionMs: Long,
+): TimedLyricLine? = lines.getOrNull(findCurrentLyricIndex(lines, positionMs))?.takeIf {
+    it.text.isBlank() && positionMs < (it.endTimeMs ?: Long.MAX_VALUE)
+}
+
+internal fun desktopLyricDisplayLines(
+    timeline: List<TimedLyricLine>,
+    interlude: TimedLyricLine?,
+): List<TimedLyricLine> = timeline.filter { it.text.isNotBlank() || it === interlude }
 
 /**
  * Attaches translated lyric lines to their matching original lines.

@@ -86,9 +86,43 @@ class LyricMotionTest {
 
     @Test
     fun amllMaskMovesOneHalfEmFadeBandAcrossTheMeasuredWord() {
-        assertEquals(0f, lyricMaskForegroundAlpha(0f, 0f, 100f, 20f), 0.0001f)
-        assertEquals(0.5f, lyricMaskForegroundAlpha(0.5f, 50f, 100f, 20f), 0.0001f)
-        assertEquals(1f, lyricMaskForegroundAlpha(1f, 100f, 100f, 20f), 0.0001f)
+        val word = TimedLyricWord(1_000L, 1_000L, "你好")
+        assertEquals(0f, lyricWordMaskProgress(word, 999L), 0.0001f)
+        assertEquals(0.5f, lyricWordMaskProgress(word, 1_500L), 0.0001f)
+        assertEquals(1f, lyricWordMaskProgress(word, 2_001L), 0.0001f)
+        assertEquals(0f, lyricWordMaskEdge(0f, 100f, 20f), 0.0001f)
+        assertEquals(60f, lyricWordMaskEdge(0.5f, 100f, 20f), 0.0001f)
+        assertEquals(120f, lyricWordMaskEdge(1f, 100f, 20f), 0.0001f)
+    }
+
+    @Test
+    fun amllLineFocusUsesExactScaleAndDistanceBlurTargets() {
+        assertEquals(0.97f, amllLyricLineScale(0f), 0.0001f)
+        assertEquals(1f, amllLyricLineScale(1f), 0.0001f)
+        assertEquals(0f, amllLyricBlurRadiusDp(3f, 1f, false, false), 0.0001f)
+        assertEquals(3.2f, amllLyricBlurRadiusDp(3f, 0f, true, false), 0.0001f)
+        assertEquals(5f, amllLyricBlurRadiusDp(12f, 0f, false, false), 0.0001f)
+        assertEquals(0f, amllLyricBlurRadiusDp(3f, 0f, false, true), 0.0001f)
+    }
+
+    @Test
+    fun inactiveWordMaskFreezesInsteadOfRewindingAtALineChange() {
+        assertEquals(
+            1_980L,
+            lyricMaskTargetPositionMillis(
+                active = false,
+                reportedPositionMillis = 1_000L,
+                retainedActivePositionMillis = 1_980L,
+            ),
+        )
+        assertEquals(
+            2_040L,
+            lyricMaskTargetPositionMillis(
+                active = true,
+                reportedPositionMillis = 2_040L,
+                retainedActivePositionMillis = 1_980L,
+            ),
+        )
     }
 
     @Test

@@ -46,11 +46,15 @@ internal fun AlbumFlowBackground(
     modifier: Modifier = Modifier,
     cornerRadius: Dp,
     veil: Color,
+    animated: Boolean = true,
+    solid: Boolean = false,
 ) {
     val palette = remember(colors) { normalizeFlowPalette(colors) }
-    var phaseSeconds by remember { mutableFloatStateOf(0f) }
+    var phaseSeconds by remember(animated) { mutableFloatStateOf(0f) }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(animated) {
+        phaseSeconds = 0f
+        if (!animated) return@LaunchedEffect
         var lastPublishedNs = 0L
         while (isActive) {
             withFrameNanos { now ->
@@ -72,15 +76,19 @@ internal fun AlbumFlowBackground(
             .clip(RoundedCornerShape(cornerRadius))
             .background(palette[4]),
     ) {
-        // Like the reference renderer's album-state stack, retain the outgoing palette
-        // briefly and blend the incoming one with a non-linear curve when a song changes.
         Crossfade(
             targetState = palette,
             animationSpec = tween(durationMillis = 650, easing = FluidPaletteEasing),
-            label = "lyric-flow-palette",
+            label = if (solid) "artwork-solid-palette" else "lyric-flow-palette",
         ) { activePalette ->
-            Box(Modifier.fillMaxSize()) {
-                FlowPaletteLayers(activePalette) { phaseSeconds }
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (solid) Modifier.background(activePalette[4]) else Modifier,
+                    ),
+            ) {
+                if (!solid) FlowPaletteLayers(activePalette) { phaseSeconds }
             }
         }
 
