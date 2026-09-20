@@ -2,6 +2,7 @@ package dev.naominet.lazer
 
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.ScrollableState
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -10,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerInput
 import kotlin.math.abs
 import kotlin.math.pow
 
@@ -103,20 +105,44 @@ fun Modifier.scrollInertia(
     onUserScroll: (() -> Unit)? = null,
 ): Modifier {
     if (!enabled) return this
-    return this.onPointerEvent(PointerEventType.Scroll) { event ->
-        val delta = event.changes.fold(0f) { acc, change ->
-            val scroll = change.scrollDelta
-            acc + when (orientation) {
-                Orientation.Vertical -> scroll.y
-                // Keep a normal vertical wheel moving the surrounding page. Horizontal
-                // trackpad/shift-wheel input belongs to the nested playlist strip.
-                Orientation.Horizontal -> scroll.x
+    return this
+        .pointerInput(scrollState, orientation) {
+            var touchGesture = false
+            detectDragGestures(
+                onDragStart = {
+                    touchGesture = false
+                    controller.stop()
+                },
+                onDrag = { change, dragAmount ->
+                    if (!touchGesture) {
+                        touchGesture = true
+                        onUserScroll?.invoke()
+                    }
+                    val delta = when (orientation) {
+                        Orientation.Vertical -> dragAmount.y
+                        Orientation.Horizontal -> dragAmount.x
+                    }
+                    if (delta != 0f) {
+                        change.consume()
+                        scrollState.dispatchRawDelta(-delta)
+                    }
+                },
+            )
+        }
+        .onPointerEvent(PointerEventType.Scroll) { event ->
+            val delta = event.changes.fold(0f) { acc, change ->
+                val scroll = change.scrollDelta
+                acc + when (orientation) {
+                    Orientation.Vertical -> scroll.y
+                    // Keep a normal vertical wheel moving the surrounding page. Horizontal
+                    // trackpad/shift-wheel input belongs to the nested playlist strip.
+                    Orientation.Horizontal -> scroll.x
+                }
+            }
+            if (delta != 0f) {
+                event.changes.forEach { it.consume() }
+                onUserScroll?.invoke()
+                controller.impulse(scrollState, delta)
             }
         }
-        if (delta != 0f) {
-            event.changes.forEach { it.consume() }
-            onUserScroll?.invoke()
-            controller.impulse(scrollState, delta)
-        }
-    }
 }

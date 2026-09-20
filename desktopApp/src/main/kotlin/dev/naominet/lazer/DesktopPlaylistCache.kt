@@ -192,6 +192,7 @@ internal class DesktopPlaylistCache(
     private fun Properties.writeTrack(prefix: String, item: TrackItem) {
         setProperty("$prefix.id", item.id.toString())
         setProperty("$prefix.title", encode(item.title))
+        setProperty("$prefix.translatedTitle", encode(item.translatedTitle.orEmpty()))
         setProperty("$prefix.artist", encode(item.artist))
         setProperty("$prefix.album", encode(item.album))
         setProperty("$prefix.duration", item.durationMillis.toString())
@@ -214,6 +215,7 @@ internal class DesktopPlaylistCache(
         return TrackItem(
             id = id,
             title = decode(getProperty("$prefix.title")) ?: return null,
+            translatedTitle = decode(getProperty("$prefix.translatedTitle"))?.takeIf(String::isNotBlank),
             artist = decode(getProperty("$prefix.artist")) ?: "",
             album = decode(getProperty("$prefix.album")) ?: "",
             durationMillis = getProperty("$prefix.duration")?.toLongOrNull() ?: 0L,

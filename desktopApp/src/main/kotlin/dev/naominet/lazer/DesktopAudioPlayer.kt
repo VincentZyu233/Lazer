@@ -10,6 +10,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
@@ -118,8 +119,17 @@ internal class DesktopAudioPlayer(
         activeLine?.setVolume(volume)
     }
 
-    fun setExclusiveAudio(enabled: Boolean) {
-        exclusiveAudio = enabled && isWindowsDesktop()
+    suspend fun setExclusiveAudio(enabled: Boolean) {
+        val requested = enabled && isWindowsDesktop()
+        if (exclusiveAudio == requested) return
+        exclusiveAudio = requested
+        // Never close a WASAPI/JavaSound endpoint on the Swing UI thread. Driver stop/reset calls
+        // may block briefly, and reopening in the current stream is simpler and deterministic.
+        generation.incrementAndGet()
+        playbackJob?.cancel()
+        playbackJob = null
+        paused = false
+        runInterruptible(Dispatchers.IO) { releaseActiveResources() }
     }
 
     fun stop() {
@@ -387,8 +397,7 @@ internal class DesktopAudioPlayer(
             delay(12)
         }
         if (line.isOpen && line.availableBytes < line.bufferSizeBytes) {
-            runCatching { line.stop() }
-            runCatching { line.flush() }
+            runCatching { line.close() }
         }
     }
 
@@ -407,9 +416,18 @@ internal class DesktopAudioPlayer(
 
     private fun closeOutputLine(line: DesktopPcmAudioOutput) {
         if (activeLine === line) activeLine = null
-        runCatching { line.stop() }
-        runCatching { line.flush() }
+        // close() is the cancellation primitive for both Java Sound and WASAPI. Calling stop or
+        // flush first can wait on the same blocked driver operation that close must interrupt.
         runCatching { line.close() }
+    }
+
+    private fun releaseActiveResources() {
+        val line = activeLine
+        val input = activeInput
+        activeLine = null
+        activeInput = null
+        runCatching { line?.close() }
+        runCatching { input?.close() }
     }
 
     private fun stopCurrent() {
@@ -420,17 +438,6 @@ internal class DesktopAudioPlayer(
         playbackJob = null
         paused = false
         releaseActiveResources()
-    }
-
-    private fun releaseActiveResources() {
-        val line = activeLine
-        val input = activeInput
-        activeLine = null
-        activeInput = null
-        runCatching { line?.stop() }
-        runCatching { line?.flush() }
-        runCatching { line?.close() }
-        runCatching { input?.close() }
     }
 
     private fun release(line: DesktopPcmAudioOutput, input: Closeable) {

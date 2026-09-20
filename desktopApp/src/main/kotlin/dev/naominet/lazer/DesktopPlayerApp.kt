@@ -2,6 +2,7 @@ package dev.naominet.lazer
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -9,6 +10,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -40,6 +42,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -86,7 +89,6 @@ private enum class DesktopDestination(
     val icon: ImageVector,
 ) {
     HOME("nav.home", Icons.Outlined.Home),
-    DISCOVER("nav.discover", Icons.Outlined.Explore),
     LIBRARY("nav.library", Icons.Outlined.LibraryMusic),
     LIKED("nav.liked", Icons.Outlined.FavoriteBorder);
 
@@ -123,6 +125,7 @@ fun WindowScope.DesktopPlayerApp(
     }
     var destination by remember { mutableStateOf(DesktopDestination.HOME) }
     var settingsVisible by remember { mutableStateOf(false) }
+    var nowPlayingVisible by remember { mutableStateOf(false) }
     var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
     var coverSaveRequest by remember { mutableStateOf<CoverSaveRequest?>(null) }
     val scrollInertia = rememberScrollInertiaController()
@@ -130,20 +133,25 @@ fun WindowScope.DesktopPlayerApp(
         ?.takeIf { controller.isPlaying }
         ?.let { "Lazer - ${it.title}" }
         ?: "Lazer"
-    // Liquid Glass on Windows uses the native DWM acrylic backdrop, which blurs the real desktop
-    // behind the window. Other platforms fall back to the opaque paper surface.
+    // Liquid Glass on Windows keeps the native DWM acrylic backdrop active. App-rendered visual
+    // backgrounds are composited above it with transparency controlled by the content-opacity slider.
     val osGlassRequested = isWindowsDesktop() && controller.style.usesLiquidGlass
 
-    val paletteColorScheme = remember(controller.palette, controller.isDark) {
+    val paletteColorScheme = remember(controller.palette, controller.isDark, controller.nowPlayingArtworkSeed) {
         when (val palette = controller.palette) {
             LazerPalette.Default -> null
             LazerPalette.System -> null
-            LazerPalette.NowPlaying -> null
+            LazerPalette.NowPlaying -> seedColorScheme(controller.nowPlayingArtworkSeed, controller.isDark)
             is LazerPalette.Custom -> seedColorScheme(palette.seed, controller.isDark)
         }
     }
-    val hasWallpaper = controller.backgroundImage != null && controller.backgroundImageEnabled
-    val uiAlpha = resolveLazerUiAlpha(hasWallpaper, controller.backgroundAlpha)
+    val wallpaper = controller.backgroundImage.takeIf {
+        controller.backgroundMode == DesktopBackgroundMode.IMAGE && controller.backgroundImageEnabled
+    }
+    val usesNowPlayingBackground = controller.backgroundMode == DesktopBackgroundMode.NOW_PLAYING_DYNAMIC ||
+        controller.backgroundMode == DesktopBackgroundMode.NOW_PLAYING_STATIC
+    val hasVisualBackground = wallpaper != null || usesNowPlayingBackground
+    val uiAlpha = resolveLazerUiAlpha(hasVisualBackground, controller.backgroundAlpha)
     LazerTheme(
         isDark = controller.isDark,
         colorScheme = paletteColorScheme,
@@ -185,26 +193,41 @@ fun WindowScope.DesktopPlayerApp(
             border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
             Box(Modifier.fillMaxSize()) {
-            val bg = controller.backgroundImage.takeIf { controller.backgroundImageEnabled }
-            if (bg != null) {
-                // Keep the wallpaper plane opaque; only the paper veil follows the UI opacity.
-                // The paper base also fills transparent pixels in PNG wallpapers.
-                Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background))
+            val visualBackgroundAlpha = windowsVisualBackgroundAlpha(osGlassActive, uiAlpha)
+            if (wallpaper != null) {
                 Image(
-                    bitmap = bg,
+                    bitmap = wallpaper,
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { alpha = visualBackgroundAlpha },
                 )
-                // Global scrim over the wallpaper: the main content's paper tone. Without it the
-                // wallpaper would show through the UI at full strength.
+            }
+            if (usesNowPlayingBackground) {
+                AlbumFlowBackground(
+                    colors = controller.lyricFlowColors,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer { alpha = visualBackgroundAlpha },
+                    cornerRadius = 0.dp,
+                    veil = Color.Transparent,
+                    animated = controller.backgroundMode == DesktopBackgroundMode.NOW_PLAYING_DYNAMIC,
+                    solid = controller.backgroundMode == DesktopBackgroundMode.NOW_PLAYING_STATIC,
+                )
+            }
+            if (hasVisualBackground) {
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.background.copy(alpha = uiAlpha)),
+                        .background(
+                            MaterialTheme.colorScheme.background.copy(
+                                alpha = if (osGlassActive) uiAlpha * uiAlpha else uiAlpha,
+                            ),
+                        ),
                 )
             }
-            PaperBackground(transparent = osGlassActive || bg != null) {
+            PaperBackground(transparent = osGlassActive || hasVisualBackground) {
                 Column(Modifier.fillMaxSize()) {
                     WindowTitleBar(
                         title = windowTitle,
@@ -282,7 +305,7 @@ fun WindowScope.DesktopPlayerApp(
                                         )
                                     }
                                 }
-                                PlayerBar(controller)
+                                PlayerBar(controller, onOpenNowPlaying = { nowPlayingVisible = true })
                             }
                         }
                     }
@@ -290,6 +313,30 @@ fun WindowScope.DesktopPlayerApp(
 
                 if (controller.isLoginVisible) {
                     LoginOverlay(controller)
+                }
+                AnimatedVisibility(
+                    visible = nowPlayingVisible && controller.nowPlaying != null,
+                    enter = fadeIn(tween(220)) +
+                        scaleIn(tween(320, easing = FastOutSlowInEasing), initialScale = 0.985f) +
+                        slideInVertically(
+                            animationSpec = tween(320, easing = FastOutSlowInEasing),
+                            initialOffsetY = { height -> height / 18 },
+                        ),
+                    exit = fadeOut(tween(170)) +
+                        scaleOut(tween(220, easing = FastOutSlowInEasing), targetScale = 0.99f) +
+                        slideOutVertically(
+                            animationSpec = tween(220, easing = FastOutSlowInEasing),
+                            targetOffsetY = { height -> height / 24 },
+                        ),
+                    label = "desktop-now-playing-page",
+                ) {
+                    DesktopNowPlayingPage(
+                        controller = controller,
+                        onDismiss = { nowPlayingVisible = false },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(top = 42.dp),
+                    )
                 }
                 ArtistChoiceSheet(
                     artists = artistChoices,
@@ -710,7 +757,6 @@ private fun MainContent(
                 controller.activeArtist != null -> ArtistPage(controller, Modifier.weight(1f))
                 controller.searchQuery.isNotBlank() -> SearchPage(controller, Modifier.weight(1f))
                 destination == DesktopDestination.HOME -> HomePage(controller, Modifier.weight(1f))
-                destination == DesktopDestination.DISCOVER -> DiscoverPage(controller, Modifier.weight(1f))
                 destination == DesktopDestination.LIBRARY -> LibraryPage(controller, Modifier.weight(1f))
                 else -> LikedPage(controller, Modifier.weight(1f))
             }
@@ -790,6 +836,7 @@ private fun DesktopSettingsPage(
                             options = listOf(
                                 LazerPalette.Default,
                                 LazerPalette.System,
+                                LazerPalette.NowPlaying,
                                 LazerPalette.Custom(LazerSeedSwatches.first()),
                             ),
                             selected = controller.palette,
@@ -812,31 +859,48 @@ private fun DesktopSettingsPage(
                         Column(Modifier.weight(1f)) {
                             Text(tr("settings.background"), style = MaterialTheme.typography.bodyMedium)
                             Text(
-                                if (controller.hasBackgroundImage) tr("settings.background.change") else tr("settings.background.none"),
+                                desktopBackgroundModeHint(controller.backgroundMode),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
-                        if (controller.hasBackgroundImage) {
-                            LazerSwitch(
-                                engine = controller.themeEngine,
-                                checked = controller.backgroundImageEnabled,
-                                onCheckedChange = controller::updateBackgroundImageEnabled,
+                        DesktopSettingsDropdown(
+                            options = DesktopBackgroundMode.entries,
+                            selected = controller.backgroundMode,
+                            label = ::desktopBackgroundModeLabel,
+                            onSelected = { mode ->
+                                controller.updateBackgroundMode(mode)
+                                if (mode == DesktopBackgroundMode.IMAGE && !controller.hasBackgroundImage) {
+                                    pickBackgroundImage(controller)
+                                }
+                            },
+                        )
+                    }
+                    if (controller.backgroundMode == DesktopBackgroundMode.IMAGE) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                if (controller.hasBackgroundImage) {
+                                    tr("settings.background.image.ready")
+                                } else {
+                                    tr("settings.background.none")
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
                             )
-                            Spacer(Modifier.width(6.dp))
-                        }
-                        TextButton(onClick = { pickBackgroundImage(controller) }) {
-                            Text(tr("settings.background.pick"))
-                        }
-                        if (controller.hasBackgroundImage) {
-                            TextButton(onClick = controller::clearBackgroundImage) {
-                                Text(tr("settings.background.clear"), color = MaterialTheme.colorScheme.error)
+                            TextButton(onClick = { pickBackgroundImage(controller) }) {
+                                Text(tr("settings.background.pick"))
+                            }
+                            if (controller.hasBackgroundImage) {
+                                TextButton(onClick = controller::clearBackgroundImage) {
+                                    Text(tr("settings.background.clear"), color = MaterialTheme.colorScheme.error)
+                                }
                             }
                         }
                     }
-                    if (controller.hasBackgroundImage) {
+                    if (controller.backgroundMode != DesktopBackgroundMode.SOLID) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(tr("settings.background.alpha"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(tr("settings.background.surface_alpha"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Spacer(Modifier.width(12.dp))
                             Slider(
                                 value = controller.backgroundAlpha,
@@ -1489,24 +1553,6 @@ private fun IntentSuggestions(controller: DesktopPlayerController) {
 }
 
 @Composable
-private fun DiscoverPage(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
-    val listState = rememberLazyListState()
-    val inertia = LocalScrollInertia.current
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxWidth().scrollInertia(listState, inertia),
-        contentPadding = PaddingValues(top = 22.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp),
-    ) {
-        item {
-            PageHeading(tr("discover.title"), tr("discover.sub.desktop"))
-        }
-        item { PlaylistStrip(controller.featuredPlaylists, controller::openPlaylist) }
-        item { TrackSection(tr("discover.flowing"), controller.recentTracks.take(12), controller::playTrack) }
-    }
-}
-
-@Composable
 private fun ArtistPage(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
     val artist = controller.activeArtist ?: return
     val tracks = controller.activeArtistTracks
@@ -1899,6 +1945,20 @@ private fun paletteLabel(palette: LazerPalette): String = when (palette) {
     is LazerPalette.Custom -> tr("settings.palette.custom")
 }
 
+private fun desktopBackgroundModeLabel(mode: DesktopBackgroundMode): String = when (mode) {
+    DesktopBackgroundMode.SOLID -> tr("settings.background.mode.solid")
+    DesktopBackgroundMode.IMAGE -> tr("settings.background.mode.image")
+    DesktopBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.mode.now_playing_dynamic")
+    DesktopBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.mode.now_playing_static")
+}
+
+private fun desktopBackgroundModeHint(mode: DesktopBackgroundMode): String = when (mode) {
+    DesktopBackgroundMode.SOLID -> tr("settings.background.hint.solid")
+    DesktopBackgroundMode.IMAGE -> tr("settings.background.hint.image")
+    DesktopBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.hint.now_playing_dynamic")
+    DesktopBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.hint.now_playing_static")
+}
+
 private fun pickBackgroundImage(controller: DesktopPlayerController) {
     val chooser = javax.swing.JFileChooser().apply {
         dialogTitle = tr("settings.background.pick")
@@ -2083,10 +2143,13 @@ private fun Artwork(
     modifier: Modifier = Modifier,
     cornerRadius: Dp = 18.dp,
     saveOnLongPress: Boolean = false,
+    requestSizePixels: Int = 256,
 ) {
     val gradient = calmArtwork[(id.hashCode().absoluteValue) % calmArtwork.size]
     val shape = RoundedCornerShape(cornerRadius)
-    val sizedUrl = remember(coverUrl) { coverUrl?.toArtworkUrl() }
+    val sizedUrl = remember(coverUrl, requestSizePixels) {
+        coverUrl?.toArtworkUrl(requestSizePixels)
+    }
     val requestSave = LocalRequestCoverSave.current
     // The long press owns the whole gesture: the release has to be consumed, or the clickable
     // around the artwork (the track row, the player bar) reads it as a tap.
@@ -2170,7 +2233,9 @@ private fun AvatarFallback(name: String) {
     }
 }
 
-private fun String.toArtworkUrl(): String {
+private val ArtworkRequestSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
+
+internal fun String.toArtworkUrl(requestSizePixels: Int = 256): String {
     val trimmed = trim()
     if (trimmed.isEmpty()) return trimmed
     val withScheme = when {
@@ -2178,8 +2243,14 @@ private fun String.toArtworkUrl(): String {
         trimmed.startsWith("http://") -> "https://" + trimmed.removePrefix("http://")
         else -> trimmed
     }
-    if ("param=" in withScheme) return withScheme
-    return withScheme + if ('?' in withScheme) "&param=256y256" else "?param=256y256"
+    val size = requestSizePixels.coerceIn(32, 2048)
+    val parameter = "${size}y$size"
+    if (ArtworkRequestSizeParameter.containsMatchIn(withScheme)) {
+        return withScheme.replace(ArtworkRequestSizeParameter) { match ->
+            match.groupValues[1] + parameter
+        }
+    }
+    return withScheme + if ('?' in withScheme) "&param=$parameter" else "?param=$parameter"
 }
 
 @Composable
@@ -2233,6 +2304,7 @@ private fun TrackRow(
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1.2f)) {
             Text(track.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            TranslatedTrackTitle(track.translatedTitle, style = MaterialTheme.typography.labelSmall)
             ArtistNames(
                 artists = track.artists,
                 fallback = track.artist,
@@ -2289,9 +2361,170 @@ private fun QuietEmptyState(title: String, body: String) {
     }
 }
 
+@Composable
+private fun DesktopNowPlayingPage(
+    controller: DesktopPlayerController,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val track = controller.nowPlaying ?: return
+    val colors = MaterialTheme.colorScheme
+    val displayProgress by animateFloatAsState(
+        targetValue = controller.progress.coerceIn(0f, 1f),
+        animationSpec = if (controller.isSeeking || !controller.isPlaying) snap() else spring(stiffness = Spring.StiffnessHigh),
+        label = "now-playing-progress",
+    )
+    val seekProgress = if (controller.isSeeking) controller.progress else displayProgress
+    Box(modifier.background(colors.background)) {
+        AlbumFlowBackground(
+            colors = controller.lyricFlowColors,
+            modifier = Modifier.fillMaxSize(),
+            cornerRadius = 0.dp,
+            veil = colors.background.copy(alpha = 0.38f),
+        )
+        BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp)) {
+            // Preserve the mobile landscape information structure, but scale its hero artwork for
+            // a desktop canvas. Copying the phone's 148 dp ceiling left most of this pane empty.
+            val coverSide = minOf(maxHeight * 0.38f, maxWidth * 0.24f).coerceIn(140.dp, 420.dp)
+            Row(Modifier.fillMaxSize(), verticalAlignment = Alignment.CenterVertically) {
+                Column(
+                    Modifier.weight(0.44f).fillMaxHeight().padding(horizontal = 12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().height(52.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = onDismiss) { Icon(Icons.Filled.Close, tr("player.collapse")) }
+                    }
+                    Box(
+                        Modifier.weight(1f).fillMaxWidth(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Artwork(
+                                track.id,
+                                track.title,
+                                track.coverUrl,
+                                Modifier
+                                    .size(coverSide)
+                                    .shadow(
+                                        elevation = 26.dp,
+                                        shape = RoundedCornerShape(24.dp),
+                                        ambientColor = Color.Black.copy(alpha = 0.34f),
+                                        spotColor = Color.Black.copy(alpha = 0.46f),
+                                    ),
+                                cornerRadius = 24.dp,
+                                saveOnLongPress = true,
+                                requestSizePixels = 1024,
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            Text(
+                                track.title,
+                                style = MaterialTheme.typography.headlineSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center,
+                            )
+                            TranslatedTrackTitle(
+                                title = track.translatedTitle,
+                                modifier = Modifier.widthIn(max = 600.dp),
+                                textAlign = TextAlign.Center,
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            ArtistNames(
+                                track.artists,
+                                track.artist,
+                                MaterialTheme.typography.bodyLarge,
+                                colors.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Box(
+                        Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                    Column(
+                        Modifier.widthIn(max = 600.dp).fillMaxWidth()
+                            .background(colors.surface.copy(alpha = 0.86f), RoundedCornerShape(26.dp))
+                            .padding(horizontal = 18.dp, vertical = 10.dp),
+                    ) {
+                        ThinSeekBar(
+                            progress = seekProgress,
+                            bufferedProgress = controller.bufferedProgress,
+                            onSeek = controller::seekTo,
+                            onSeekFinished = controller::commitSeek,
+                        )
+                        Row(Modifier.fillMaxWidth()) {
+                            Text(formatDuration((track.durationMillis * seekProgress).roundToInt().toLong()), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                            Spacer(Modifier.weight(1f))
+                            Text(track.durationLabel, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(onClick = controller::playPrevious, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(27.dp))
+                            }
+                            IconButton(onClick = controller::togglePlayPause, modifier = Modifier.size(52.dp), colors = IconButtonDefaults.iconButtonColors(containerColor = colors.primary, contentColor = colors.onPrimary)) {
+                                Icon(if (controller.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, tr(if (controller.isPlaying) "player.pause" else "player.play"), Modifier.size(29.dp))
+                            }
+                            IconButton(onClick = controller::playNext, modifier = Modifier.size(44.dp)) {
+                                Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(27.dp))
+                            }
+                            IconButton(onClick = controller::toggleLiked, modifier = Modifier.size(44.dp)) {
+                                Icon(
+                                    if (controller.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                    tr(if (controller.isLiked) "player.like.remove" else "player.like.add"),
+                                    tint = if (controller.isLiked) colors.primary else colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                    }
+                }
+                Spacer(Modifier.width(18.dp))
+                DesktopLyricsViewport(
+                    controller,
+                    Modifier.weight(0.56f).fillMaxHeight().padding(horizontal = 12.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TranslatedTrackTitle(
+    title: String?,
+    modifier: Modifier = Modifier,
+    style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.bodySmall,
+    color: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign: TextAlign? = null,
+) {
+    if (!title.isNullOrBlank()) {
+        Text(
+            text = title,
+            modifier = modifier,
+            style = style,
+            color = color,
+            textAlign = textAlign,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun DesktopLyricsViewport(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
+    LyricsOverlay(controller = controller, modifier = modifier, embedded = true)
+}
+
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun PlayerBar(controller: DesktopPlayerController) {
+private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () -> Unit = {}) {
     val colors = MaterialTheme.colorScheme
     val displayProgress by animateFloatAsState(
         targetValue = controller.progress.coerceIn(0f, 1f),
@@ -2326,7 +2559,7 @@ private fun PlayerBar(controller: DesktopPlayerController) {
                                 Color.Transparent
                             },
                         )
-                        .clickable(onClick = controller::openLyrics)
+                        .clickable(onClick = onOpenNowPlaying)
                         .onPointerEvent(PointerEventType.Enter) { nowPlayingHovered = true }
                         .onPointerEvent(PointerEventType.Exit) { nowPlayingHovered = false }
                         .padding(horizontal = 6.dp, vertical = 4.dp),
@@ -2347,6 +2580,10 @@ private fun PlayerBar(controller: DesktopPlayerController) {
                             style = MaterialTheme.typography.titleSmall,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                        )
+                        TranslatedTrackTitle(
+                            title = controller.nowPlaying?.translatedTitle,
+                            style = MaterialTheme.typography.labelSmall,
                         )
                         ArtistNames(
                             artists = controller.nowPlaying?.artists.orEmpty(),
@@ -2667,14 +2904,35 @@ private fun QualityControl(
 private fun LyricsOverlay(
     controller: DesktopPlayerController,
     modifier: Modifier = Modifier,
+    embedded: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
     val lines = controller.lyrics
-    // The lyric index observes the exact same playback position as the seek bar. derivedStateOf
-    // avoids recomposing the full lyric page for progress ticks that remain within one line.
-    val activeIndex by remember(lines, controller) {
-        derivedStateOf { findCurrentLyricIndex(lines, controller.positionMillis) }
+    val timeline = remember(lines, controller.nowPlaying?.durationMillis) {
+        desktopLyricsWithInterludes(lines, controller.nowPlaying?.durationMillis ?: 0L)
+    }
+    val targetInterlude = activeDesktopInterlude(timeline, controller.positionMillis)
+    var renderedInterlude by remember(controller.nowPlaying?.id, timeline) {
+        mutableStateOf<TimedLyricLine?>(null)
+    }
+    val interludePresence = remember(controller.nowPlaying?.id, timeline) { Animatable(0f) }
+    LaunchedEffect(targetInterlude) {
+        if (targetInterlude == renderedInterlude) return@LaunchedEffect
+        if (renderedInterlude != null) {
+            interludePresence.animateTo(0f, tween(560, easing = FastOutSlowInEasing))
+        }
+        renderedInterlude = targetInterlude
+        if (targetInterlude != null) {
+            interludePresence.snapTo(0f)
+            interludePresence.animateTo(1f, tween(360, easing = FastOutSlowInEasing))
+        }
+    }
+    val displayLines = remember(timeline, renderedInterlude) {
+        desktopLyricDisplayLines(timeline, renderedInterlude)
+    }
+    val activeIndex by remember(displayLines, controller) {
+        derivedStateOf { findCurrentLyricIndex(displayLines, controller.positionMillis) }
     }
 
     val baseFontSp = controller.lyricFontSizeSp.sp
@@ -2683,10 +2941,10 @@ private fun LyricsOverlay(
     val translationLineHeightSp = (translationFontSp.value * 1.36f).sp
     val lyricMaxLines = if (controller.showFullLyrics) Int.MAX_VALUE else 2
     val measuredRowHeightsPx = remember(lines, controller.lyricFontSizeSp, controller.showFullLyrics) {
-        mutableStateMapOf<Int, Int>()
+        mutableStateMapOf<TimedLyricLine, Int>()
     }
     val measuredMainHeightsPx = remember(lines, controller.lyricFontSizeSp, controller.showFullLyrics) {
-        mutableStateMapOf<Int, Int>()
+        mutableStateMapOf<TimedLyricLine, Int>()
     }
     val estimatedMainHeightPx = with(density) { baseLineHeightSp.toPx() }
     val estimatedTranslationHeightPx = with(density) { translationLineHeightSp.toPx() }
@@ -2696,8 +2954,8 @@ private fun LyricsOverlay(
     val maximumRowGapPx = spacing.maximumRowGapPx
     val minimumTranslationGapPx = spacing.minimumTranslationGapPx
     val maximumTranslationGapPx = spacing.maximumTranslationGapPx
-    val rowHeightsPx = lines.mapIndexed { index, line ->
-        measuredRowHeightsPx[index]?.toFloat() ?: (
+    val rowHeightsPx = displayLines.map { line ->
+        measuredRowHeightsPx[line]?.toFloat() ?: (
             estimatedMainHeightPx + if (line.translation.isNullOrBlank()) {
                 0f
             } else {
@@ -2709,14 +2967,18 @@ private fun LyricsOverlay(
             }
         )
     }
-    val lineCentersPx = lyricLineCenters(
+    val transientIndex = displayLines.indexOfFirst { it.text.isBlank() }
+    val lineCentersPx = lyricLineCentersWithTransientRow(
         rowHeightsPx = rowHeightsPx,
+        transientIndex = transientIndex,
+        presence = interludePresence.value,
         minimumGapPx = minimumRowGapPx,
         maximumGapPx = maximumRowGapPx,
     )
     val maxScroll = lineCentersPx.lastOrNull() ?: 0f
     val currentLineCentersPx by rememberUpdatedState(lineCentersPx)
     val currentMaxScroll by rememberUpdatedState(maxScroll)
+    val currentDisplayLines by rememberUpdatedState(displayLines)
 
     var followPlayback by remember { mutableStateOf(true) }
     var manualAtMs by remember { mutableLongStateOf(0L) }
@@ -2727,18 +2989,24 @@ private fun LyricsOverlay(
     var lyricMotionAtNs by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(
-        lines.size,
         controller.nowPlaying?.id,
         controller.lyricFontSizeSp,
         controller.showFullLyrics,
     ) {
         followPlayback = true
         lyricWheelInertia.stop()
-        val idx = findCurrentLyricIndex(controller.lyrics, controller.positionMillis).coerceAtLeast(0)
+        val idx = findCurrentLyricIndex(displayLines, controller.positionMillis).coerceAtLeast(0)
         lyricScroll = lineCentersPx.getOrElse(idx) { 0f }
-        lyricLineMotion.reset(lines.size, lyricScroll)
+        lyricLineMotion.reset(displayLines.size, lyricScroll)
         lyricMotionRevision++
         lyricMotionAtNs = 0L
+    }
+    var previousDisplayLines by remember(controller.nowPlaying?.id) { mutableStateOf(displayLines) }
+    LaunchedEffect(displayLines) {
+        // Hot insertion/removal of the interlude row must preserve every existing row spring.
+        lyricLineMotion.remap(displayLines.map { previousDisplayLines.indexOf(it) }, lyricScroll)
+        previousDisplayLines = displayLines
+        lyricMotionRevision++
     }
 
     // One persistent frame loop handles both follow motion and wheel inertia. Each lyric row keeps
@@ -2760,7 +3028,7 @@ private fun LyricsOverlay(
                 }
 
                 if (followPlayback) {
-                    val liveLines = controller.lyrics
+                    val liveLines = currentDisplayLines
                     val liveIndex = findCurrentLyricIndex(liveLines, controller.positionMillis)
                     if (liveIndex >= 0 && liveLines.isNotEmpty()) {
                         val liveMax = currentMaxScroll
@@ -2783,7 +3051,7 @@ private fun LyricsOverlay(
                     }
                 } else {
                     val movement = lyricWheelInertia.advance(dt)
-                    if (movement != 0f) lyricScroll = (lyricScroll + movement).coerceIn(0f, maxScroll)
+                    if (movement != 0f) lyricScroll = (lyricScroll + movement).coerceIn(0f, currentMaxScroll)
                 }
             }
         }
@@ -2799,28 +3067,31 @@ private fun LyricsOverlay(
     fun onWheel(deltaY: Float) {
         if (lines.isEmpty() || deltaY == 0f) return
         markManualScroll()
-        lyricScroll = (lyricScroll + lyricWheelInertia.impulse(deltaY)).coerceIn(0f, maxScroll)
+        lyricScroll = (lyricScroll + lyricWheelInertia.impulse(deltaY)).coerceIn(0f, currentMaxScroll)
     }
 
     fun onDrag(dy: Float) {
         if (lines.isEmpty()) return
         markManualScroll()
         lyricWheelInertia.stop()
-        lyricScroll = (lyricScroll - dy).coerceIn(0f, maxScroll)
+        lyricScroll = (lyricScroll - dy).coerceIn(0f, currentMaxScroll)
     }
 
-    // Exclusive page: main chrome is not composed while lyrics are open, so nothing
-    // underneath can receive clicks. This is a full page, not a translucent overlay.
+    // The same renderer powers the dedicated lyrics page and the lyrics half of landscape now
+    // playing. Only the dedicated page owns its background/header/footer chrome.
     Box(modifier = modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().background(colors.background))
-        AlbumFlowBackground(
-            colors = controller.lyricFlowColors,
-            modifier = Modifier.fillMaxSize(),
-            cornerRadius = 0.dp,
-            veil = colors.background.copy(alpha = 0.38f),
-        )
+        if (!embedded) {
+            Box(Modifier.fillMaxSize().background(colors.background))
+            AlbumFlowBackground(
+                colors = controller.lyricFlowColors,
+                modifier = Modifier.fillMaxSize(),
+                cornerRadius = 0.dp,
+                veil = colors.background.copy(alpha = 0.38f),
+            )
+        }
 
         Column(Modifier.fillMaxSize()) {
+            if (!embedded) {
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -2875,6 +3146,7 @@ private fun LyricsOverlay(
                         }
                     }
                 }
+            }
 
                 BoxWithConstraints(
                     Modifier
@@ -2888,7 +3160,7 @@ private fun LyricsOverlay(
                                 onWheel(dy)
                             }
                         }
-                        .pointerInput(lines.size, maxScroll) {
+                        .pointerInput(controller.nowPlaying?.id) {
                             detectDragGestures(
                                 onDragStart = { markManualScroll() },
                                 onDrag = { change, dragAmount ->
@@ -2898,7 +3170,8 @@ private fun LyricsOverlay(
                             )
                         },
                 ) {
-                    val centerYPx = with(density) { (maxHeight * 0.46f).toPx() }
+                    // Keep the active lyric centered in the available lyrics viewport.
+                    val centerYPx = with(density) { (maxHeight * 0.5f).toPx() }
                     val heightPx = with(density) { maxHeight.toPx() }
 
                     when {
@@ -2920,7 +3193,7 @@ private fun LyricsOverlay(
                                 Text(tr("lyrics.loading"), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
                             }
                         }
-                        lines.isEmpty() -> {
+                        displayLines.isEmpty() -> {
                             Text(
                                 controller.lyricsError ?: tr("lyrics.none"),
                                 modifier = Modifier.align(Alignment.Center),
@@ -2931,7 +3204,7 @@ private fun LyricsOverlay(
                         else -> {
                             val motionRevision = lyricMotionRevision
                             val visualIndex = lyricVisualIndex(lineCentersPx, lyricScroll)
-                            lines.forEachIndexed { index, line ->
+                            displayLines.forEachIndexed { index, line ->
                                 val lineScroll = if (followPlayback && motionRevision >= 0) {
                                     lyricLineMotion.positionFor(index)
                                 } else {
@@ -2944,16 +3217,25 @@ private fun LyricsOverlay(
                                 }
 
                                 val distance = kotlin.math.abs(index - visualIndex)
-                                val focus = androidx.compose.runtime.key(controller.nowPlaying?.id, index) {
+                                val focus = androidx.compose.runtime.key(controller.nowPlaying?.id, line) {
                                     animatedLyricFocus(index == activeIndex, controller.lyricAnimationSpeed)
                                 }
                                 val ambient = (1f - distance / 4f).coerceAtLeast(0f)
-                                val scale = 0.96f + focus * 0.08f
-                                val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
+                                val scale = amllLyricLineScale(focus)
+                                val blurRadiusDp = amllLyricBlurRadiusDp(
+                                    distance = distance,
+                                    focus = focus,
+                                    narrowViewport = maxWidth <= 1024.dp,
+                                    interactionSuspended = !followPlayback,
+                                )
+                                // Blur supplies depth; keep inactive rows readable instead of
+                                // multiplying a heavy blur by near-transparent text.
+                                val inactiveAlpha = 0.62f + ambient * 0.18f
+                                val alpha = inactiveAlpha * (1f - focus) + focus
                                 val color = lerpColor(colors.onSurfaceVariant, colors.onSurface, focus)
                                 val hasTranslation = !line.translation.isNullOrBlank()
                                 val textWidthFraction = 1f / 1.04f
-                                val mainHeightPx = measuredMainHeightsPx[index]?.toFloat() ?: estimatedMainHeightPx
+                                val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
                                 val translationGap = with(density) {
                                     lyricTranslationGapPx(
                                         mainHeightPx,
@@ -2971,23 +3253,54 @@ private fun LyricsOverlay(
                                             )
                                         }
                                         .padding(horizontal = 20.dp)
+                                        .graphicsLayer {
+                                            if (line.text.isBlank()) {
+                                                scaleX = 0.94f + interludePresence.value * 0.06f
+                                                scaleY = 0.92f + interludePresence.value * 0.08f
+                                                transformOrigin = TransformOrigin.Center
+                                            } else {
+                                                // AMLL's blur values are CSS pixels. They map to
+                                                // Compose render-effect pixels directly on desktop;
+                                                // converting them through dp over-blurred HiDPI text.
+                                                val radius = blurRadiusDp
+                                                renderEffect = if (radius > 0.01f) {
+                                                    androidx.compose.ui.graphics.BlurEffect(
+                                                        radius,
+                                                        radius,
+                                                        androidx.compose.ui.graphics.TileMode.Decal,
+                                                    )
+                                                } else {
+                                                    null
+                                                }
+                                            }
+                                        }
                                         .onSizeChanged { size ->
-                                            if (measuredRowHeightsPx[index] != size.height) {
-                                                measuredRowHeightsPx[index] = size.height
+                                            if (measuredRowHeightsPx[line] != size.height) {
+                                                measuredRowHeightsPx[line] = size.height
                                             }
                                         }
                                         .clickable {
                                             lyricLineMotion.snapTo(lyricScroll)
                                             followPlayback = true
                                             lyricWheelInertia.stop()
-                                            controller.seekToLyric(index)
+                                            controller.seekToLyricTime(line.timeMs)
                                         },
                                     contentAlignment = Alignment.TopCenter,
                                 ) {
                                     Column(
                                         horizontalAlignment = Alignment.CenterHorizontally,
                                     ) {
-                                        androidx.compose.runtime.key(controller.nowPlaying?.id, index) {
+                                        if (line.text.isBlank()) {
+                                            LyricInterludeDots(
+                                                startMillis = line.timeMs,
+                                                endMillis = line.endTimeMs ?: line.timeMs + 5_000L,
+                                                positionMillis = if (index == activeIndex) controller.positionMillis else line.endTimeMs ?: line.timeMs,
+                                                visibility = interludePresence.value,
+                                                glowEnabled = controller.lyricGlowEnabled,
+                                                dotDiameter = (controller.lyricFontSizeSp * 0.3f).dp,
+                                            )
+                                        } else {
+                                            androidx.compose.runtime.key(controller.nowPlaying?.id, line) {
                                             AmllLyricText(
                                                 text = line.text,
                                                 words = line.words,
@@ -3001,8 +3314,8 @@ private fun LyricsOverlay(
                                                 modifier = Modifier
                                                     .fillMaxWidth(textWidthFraction)
                                                     .onSizeChanged { size ->
-                                                        if (measuredMainHeightsPx[index] != size.height) {
-                                                            measuredMainHeightsPx[index] = size.height
+                                                        if (measuredMainHeightsPx[line] != size.height) {
+                                                            measuredMainHeightsPx[line] = size.height
                                                         }
                                                     }
                                                     .graphicsLayer {
@@ -3051,6 +3364,7 @@ private fun LyricsOverlay(
                     }
                 }
 
+            if (!embedded) {
                 Row(
                     Modifier
                         .fillMaxWidth()
@@ -3078,8 +3392,10 @@ private fun LyricsOverlay(
                     CompactIconButton(Icons.Filled.SkipNext, controller::playNext, tr("player.next"))
                 }
             }
+            }
         }
     }
+}
 
 
 private fun lerpColor(from: Color, to: Color, t: Float): Color {

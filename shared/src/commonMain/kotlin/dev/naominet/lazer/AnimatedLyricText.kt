@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -19,12 +21,14 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.BlurEffect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
@@ -37,7 +41,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Constraints
-import kotlin.math.min
 import kotlin.math.roundToLong
 
 private val LyricShaderShadowRadius = 12.dp
@@ -63,7 +66,12 @@ private fun Modifier.expandLayerForGlow(padding: Dp): Modifier = layout { measur
 fun animatedLyricFocus(active: Boolean, speed: LyricAnimationSpeed): Float {
     val focus by animateFloatAsState(
         if (active) 1f else 0f,
-        spring(dampingRatio = 1f, stiffness = (150 * speed.scrollMultiplier).toFloat()),
+        // AMLL: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so divide
+        // stiffness/damping by mass and use the equivalent damping ratio.
+        spring(
+            dampingRatio = 0.884f,
+            stiffness = (50.0 * speed.scrollMultiplier).toFloat(),
+        ),
         label = "lyric focus",
     )
     return focus
@@ -97,8 +105,21 @@ fun AmllLyricText(
         mutableStateOf<TextLayoutResult?>(null)
     }
     val glyphs = remember(text, words) { buildTimedLyricGlyphs(text, words) }
+    // AMLL pauses a line's word/mask animation when that line is disabled. Keep the last active
+    // clock here instead of accepting the placeholder timestamp supplied by inactive rows. Without
+    // this retention the just-finished Android line rewound to its start while effectStrength was
+    // still fading, producing one visibly dark/bright frame at every lyric change.
+    var retainedActivePosition by remember(text, words) { mutableLongStateOf(positionMillis) }
+    SideEffect {
+        if (active) retainedActivePosition = positionMillis
+    }
+    val maskPositionMillis = lyricMaskTargetPositionMillis(
+        active = active,
+        reportedPositionMillis = positionMillis,
+        retainedActivePositionMillis = retainedActivePosition,
+    )
     val animatedPosition by animateFloatAsState(
-        targetValue = positionMillis.toFloat(),
+        targetValue = maskPositionMillis.toFloat(),
         animationSpec = tween(
             durationMillis = lyricWordSmoothingMillis(speed),
             easing = LinearEasing,
@@ -119,27 +140,26 @@ fun AmllLyricText(
         TextStyle(textAlign = textAlign ?: TextAlign.Unspecified),
     )
     val layoutStyle = alignedStyle.merge(TextStyle(color = Color.Transparent))
-    val laidOutGlyphs = remember(layoutResult, glyphs, words) {
-        layoutResult?.let { buildLaidOutGlyphs(it, glyphs, words.size) }.orEmpty()
+    val laidOutGlyphs = remember(layoutResult, glyphs) {
+        layoutResult?.let { buildLaidOutGlyphs(it, glyphs) }.orEmpty()
     }
     val timedGlyphs = remember(laidOutGlyphs) {
         laidOutGlyphs.filter { it.timing.wordIndex >= 0 }
     }
-    // A selected line used to calculate its per-glyph clip geometry twice every frame: once for
-    // the blurred selection layer and once for the foreground. Compute it once and reuse it for
-    // both passes. Inactive rows do not need a mask at all.
-    val maskClips = remember(layoutResult, timedGlyphs, words, speed) {
+    // AMLL gives every timed word its own moving mask. The fade is half a word-height wide and
+    // travels linearly from the word's start to end time, rather than clipping one global line.
+    val maskWords = remember(layoutResult, timedGlyphs, words) {
         var cachedPosition = Long.MIN_VALUE
-        var cachedClips = emptyList<Rect>()
-        val compute: () -> List<Rect> = {
+        var cachedMasks = emptyList<LyricWordMask>()
+        val compute: () -> List<LyricWordMask> = {
             val position = animatedPosition.roundToLong()
             if (position != cachedPosition) {
                 cachedPosition = position
-                cachedClips = layoutResult?.let {
-                    lineScanClips(it, timedGlyphs, words, position, speed)
+                cachedMasks = layoutResult?.let {
+                    buildWordMasks(it, timedGlyphs, words, position)
                 }.orEmpty()
             }
-            cachedClips
+            cachedMasks
         }
         compute
     }
@@ -171,7 +191,7 @@ fun AmllLyricText(
                                 layout = measured,
                                 // Click feedback lights the whole line, including before seek completes.
                                 hasTimedGlyphs = !temporaryGlow && timedGlyphs.isNotEmpty(),
-                                maskClips = if (temporaryGlow) emptyList() else maskClips(),
+                                wordMasks = if (temporaryGlow) emptyList() else maskWords(),
                                 shadowColor = shadowColor,
                             )
                         }
@@ -193,7 +213,7 @@ fun AmllLyricText(
                     drawAmllGlyphs(
                         layout = measured,
                         hasTimedGlyphs = timedGlyphs.isNotEmpty(),
-                        maskClips = maskClips(),
+                        wordMasks = maskWords(),
                         color = color,
                         effectStrength = effectStrength,
                     )
@@ -212,90 +232,71 @@ fun AmllLyricText(
 private data class LaidOutLyricGlyph(
     val timing: TimedLyricGlyph,
     val bounds: Rect,
-    val startInWord: Float,
-    val wordWidth: Float,
+)
+
+private data class LyricWordMask(
+    val bounds: Rect,
+    val edgeX: Float,
+    val fadeStartX: Float,
+    val fullyRevealed: Boolean,
 )
 
 private fun buildLaidOutGlyphs(
     layout: TextLayoutResult,
     glyphs: List<TimedLyricGlyph>,
-    wordCount: Int,
-): List<LaidOutLyricGlyph> {
-    data class Partial(val timing: TimedLyricGlyph, val bounds: Rect, val start: Float)
-
-    val wordWidths = FloatArray(wordCount)
-    val partials = buildList {
-        for (glyph in glyphs) {
-            if (!glyph.isVisible || glyph.startOffset >= layout.layoutInput.text.length) continue
-            val bounds = layout.getBoundingBox(glyph.startOffset)
-            if (bounds.width <= 0.01f || bounds.height <= 0.01f) continue
-            val startInWord = if (glyph.wordIndex >= 0) wordWidths[glyph.wordIndex] else 0f
-            if (glyph.wordIndex >= 0) wordWidths[glyph.wordIndex] += bounds.width
-            add(Partial(timing = glyph, bounds = bounds, start = startInWord))
-        }
-    }
-    return partials.map { partial ->
-        LaidOutLyricGlyph(
-            timing = partial.timing,
-            bounds = partial.bounds,
-            startInWord = partial.start,
-            wordWidth = wordWidths.getOrElse(partial.timing.wordIndex) { 0f },
-        )
+): List<LaidOutLyricGlyph> = buildList {
+    for (glyph in glyphs) {
+        if (!glyph.isVisible || glyph.startOffset >= layout.layoutInput.text.length) continue
+        val bounds = layout.getBoundingBox(glyph.startOffset)
+        if (bounds.width <= 0.01f || bounds.height <= 0.01f) continue
+        add(LaidOutLyricGlyph(timing = glyph, bounds = bounds))
     }
 }
 
 private fun DrawScope.drawLyricShaderShadow(
     layout: TextLayoutResult,
     hasTimedGlyphs: Boolean,
-    maskClips: List<Rect>,
+    wordMasks: List<LyricWordMask>,
     shadowColor: Color,
 ) {
     if (!hasTimedGlyphs) {
         drawText(textLayoutResult = layout, color = shadowColor)
         return
     }
-    drawTextInMask(layout, maskClips, shadowColor)
+    drawTextInWordMasks(layout, wordMasks, shadowColor)
 }
 
-private fun lineScanClips(
+private fun buildWordMasks(
     layout: TextLayoutResult,
     timedGlyphs: List<LaidOutLyricGlyph>,
     words: List<TimedLyricWord>,
     positionMillis: Long,
-    speed: LyricAnimationSpeed,
-): List<Rect> {
+): List<LyricWordMask> {
     if (timedGlyphs.isEmpty()) return emptyList()
-    val current = currentLyricWordIndex(words, positionMillis)
-    if (current < 0) return emptyList()
-    val progress = lyricWordVisualProgress(words[current], positionMillis, speed).coerceIn(0f, 1f)
-    val wordWidths = FloatArray(words.size)
-    for (glyph in timedGlyphs) {
-        val index = glyph.timing.wordIndex
-        if (index in wordWidths.indices) wordWidths[index] = glyph.wordWidth
+    val masks = ArrayList<LyricWordMask>(words.size)
+    for (wordIndex in words.indices) {
+        val glyphs = timedGlyphs.filter { it.timing.wordIndex == wordIndex }
+        if (glyphs.isEmpty()) continue
+        val first = glyphs.first().bounds
+        val last = glyphs.last().bounds
+        val bounds = Rect(
+            left = first.left,
+            top = glyphs.minOf { glyphLineClip(layout, it).top },
+            right = last.right,
+            bottom = glyphs.maxOf { glyphLineClip(layout, it).bottom },
+        )
+        val fadeWidth = bounds.height * 0.5f
+        val progress = lyricWordMaskProgress(words[wordIndex], positionMillis)
+        val edgeX = bounds.left + lyricWordMaskEdge(progress, bounds.width, fadeWidth)
+        val fadeStartX = edgeX - fadeWidth
+        masks += LyricWordMask(
+            bounds = bounds,
+            edgeX = edgeX,
+            fadeStartX = fadeStartX,
+            fullyRevealed = progress >= 1f,
+        )
     }
-    var target = 0f
-    for (index in 0 until current) target += wordWidths[index]
-    target += wordWidths.getOrElse(current) { 0f } * progress
-
-    val clips = ArrayList<Rect>(timedGlyphs.size)
-    var traveled = 0f
-    for (glyph in timedGlyphs) {
-        val clip = glyphLineClip(layout, glyph)
-        val width = clip.width
-        if (width <= 0.01f) continue
-        when {
-            traveled + width <= target + 0.01f -> {
-                clips += clip
-                traveled += width
-            }
-            traveled < target -> {
-                clips += Rect(clip.left, clip.top, min(clip.left + (target - traveled), clip.right), clip.bottom)
-                break
-            }
-            else -> break
-        }
-    }
-    return clips
+    return masks
 }
 
 private fun glyphLineClip(layout: TextLayoutResult, glyph: LaidOutLyricGlyph): Rect {
@@ -311,25 +312,54 @@ private fun glyphLineClip(layout: TextLayoutResult, glyph: LaidOutLyricGlyph): R
 private fun DrawScope.drawAmllGlyphs(
     layout: TextLayoutResult,
     hasTimedGlyphs: Boolean,
-    maskClips: List<Rect>,
+    wordMasks: List<LyricWordMask>,
     color: Color,
     effectStrength: Float,
 ) {
     val effect = effectStrength.coerceIn(0f, 1f)
     val dimColor = color.copy(alpha = color.alpha * (1f - effect * (1f - lyricBaseMaskAlpha())))
     drawText(textLayoutResult = layout, color = dimColor)
-    if (hasTimedGlyphs) drawTextInMask(layout, maskClips, color)
+    if (hasTimedGlyphs) drawTextInWordMasks(layout, wordMasks, color)
 }
 
-/** Draw all selected glyph regions in one text pass instead of redrawing once for every glyph. */
-private fun DrawScope.drawTextInMask(
+/** Paint AMLL's bright side over the dim base text, including the moving half-em fade band. */
+private fun DrawScope.drawTextInWordMasks(
     layout: TextLayoutResult,
-    maskClips: List<Rect>,
+    wordMasks: List<LyricWordMask>,
     color: Color,
 ) {
-    if (maskClips.isEmpty()) return
-    val mask = Path().apply { maskClips.forEach(::addRect) }
-    clipPath(mask) {
-        drawText(textLayoutResult = layout, color = color)
+    if (wordMasks.isEmpty()) return
+    val solidMask = Path().apply {
+        wordMasks.forEach { mask ->
+            val solidRight = if (mask.fullyRevealed) {
+                mask.bounds.right
+            } else {
+                mask.fadeStartX.coerceIn(mask.bounds.left, mask.bounds.right)
+            }
+            if (solidRight > mask.bounds.left) {
+                addRect(Rect(mask.bounds.left, mask.bounds.top, solidRight, mask.bounds.bottom))
+            }
+        }
+    }
+    if (!solidMask.isEmpty) {
+        clipPath(solidMask) {
+            drawText(textLayoutResult = layout, color = color)
+        }
+    }
+    wordMasks.forEach { mask ->
+        if (mask.fullyRevealed) return@forEach
+        val fadeLeft = mask.fadeStartX.coerceAtLeast(mask.bounds.left)
+        val fadeRight = mask.edgeX.coerceAtMost(mask.bounds.right)
+        if (fadeRight <= fadeLeft) return@forEach
+        clipRect(fadeLeft, mask.bounds.top, fadeRight, mask.bounds.bottom) {
+            drawText(
+                textLayoutResult = layout,
+                brush = Brush.horizontalGradient(
+                    colors = listOf(color, color.copy(alpha = 0f)),
+                    startX = mask.fadeStartX,
+                    endX = mask.edgeX,
+                ),
+            )
+        }
     }
 }

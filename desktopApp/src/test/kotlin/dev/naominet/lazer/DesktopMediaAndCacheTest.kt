@@ -32,6 +32,23 @@ class DesktopMediaAndCacheTest {
     }
 
     @Test
+    fun `app visual backgrounds retain native acrylic beneath them`() {
+        assertEquals(1f, windowsVisualBackgroundAlpha(osGlassActive = false, uiAlpha = 0.5f))
+        assertEquals(0.88f, windowsVisualBackgroundAlpha(osGlassActive = true, uiAlpha = 0f))
+        assertEquals(0.44f, windowsVisualBackgroundAlpha(osGlassActive = true, uiAlpha = 0.5f))
+        assertEquals(0f, windowsVisualBackgroundAlpha(osGlassActive = true, uiAlpha = 1f))
+    }
+
+    @Test
+    fun `desktop background mode parser restores every mode and falls back to solid`() {
+        assertEquals(DesktopBackgroundMode.SOLID, parseDesktopBackgroundMode(null))
+        assertEquals(DesktopBackgroundMode.SOLID, parseDesktopBackgroundMode("future-mode"))
+        DesktopBackgroundMode.entries.forEach { mode ->
+            assertEquals(mode, parseDesktopBackgroundMode(mode.name))
+        }
+    }
+
+    @Test
     fun `native accent structures are reflectively writable and use pointer sized SIZE_T`() {
         val accent = AccentPolicy().apply { gradientColor = 0x12345678 }
         accent.write()
@@ -179,6 +196,7 @@ class DesktopMediaAndCacheTest {
                 269_000,
                 "https://img.example/song.jpg",
                 artists = listOf(Artist(id = 6452, name = "周杰伦")),
+                translatedTitle = "Sunny Day",
             )
 
             cache.savePlaylists("user-9", listOf(playlist))
@@ -428,18 +446,18 @@ class DesktopMediaAndCacheTest {
     }
 
     @Test
-    fun `artwork urls upgrade scheme and add size param once`() {
+    fun `artwork urls upgrade scheme and use the requested decode size`() {
         assertEquals(
             "https://p1.music.126.net/cover.jpg?param=256y256",
-            "http://p1.music.126.net/cover.jpg".toArtworkUrlForTest(),
+            "http://p1.music.126.net/cover.jpg".toArtworkUrl(),
         )
         assertEquals(
-            "https://p1.music.126.net/cover.jpg?param=140y140",
-            "https://p1.music.126.net/cover.jpg?param=140y140".toArtworkUrlForTest(),
+            "https://p1.music.126.net/cover.jpg?param=1024y1024",
+            "https://p1.music.126.net/cover.jpg?param=140y140".toArtworkUrl(1024),
         )
         assertEquals(
-            "https://p1.music.126.net/cover.jpg?param=256y256",
-            "//p1.music.126.net/cover.jpg".toArtworkUrlForTest(),
+            "https://p1.music.126.net/cover.jpg?param=1024y1024",
+            "//p1.music.126.net/cover.jpg".toArtworkUrl(1024),
         )
         assertEquals(
             "https://p1.music.126.net/cover.jpg?param=96y96",
@@ -475,17 +493,4 @@ class DesktopMediaAndCacheTest {
         assertEquals(4, findCurrentLyricIndex(lines, 90_000))
         assertEquals(-1, findCurrentLyricIndex(emptyList(), 1_000))
     }
-}
-
-/** Mirrors DesktopPlayerApp.toArtworkUrl for JVM unit coverage without Compose. */
-internal fun String.toArtworkUrlForTest(): String {
-    val trimmed = trim()
-    if (trimmed.isEmpty()) return trimmed
-    val withScheme = when {
-        trimmed.startsWith("//") -> "https:$trimmed"
-        trimmed.startsWith("http://") -> "https://" + trimmed.removePrefix("http://")
-        else -> trimmed
-    }
-    if ("param=" in withScheme) return withScheme
-    return withScheme + if ('?' in withScheme) "&param=256y256" else "?param=256y256"
 }
