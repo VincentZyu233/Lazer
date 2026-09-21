@@ -449,6 +449,55 @@ class NeteaseMusicGateway(
         setSongLiked(songId, userId, liked)
     }
 
+    suspend fun listenTogetherCreateRoom(): JsonObject = postRaw("/listentogether/room/create").jsonObject
+
+    suspend fun listenTogetherAccept(roomId: Long, inviterId: Long): JsonObject = postRaw(
+        "/listentogether/accept",
+        parametersOf("roomId" to roomId, "inviterId" to inviterId),
+    ).jsonObject
+
+    suspend fun listenTogetherRoomCheck(roomId: Long): JsonObject = postRaw(
+        "/listentogether/room/check", parametersOf("roomId" to roomId),
+    ).jsonObject
+
+    suspend fun listenTogetherStatus(): JsonObject = getRaw("/listentogether/status").jsonObject
+
+    suspend fun listenTogetherEnd(roomId: Long): JsonObject = postRaw(
+        "/listentogether/end", parametersOf("roomId" to roomId),
+    ).jsonObject
+
+    suspend fun listenTogetherHeartbeat(roomId: Long, songId: Long, playStatus: String, progress: Long): JsonObject = postRaw(
+        "/listentogether/heartbeat", parametersOf(
+            "roomId" to roomId, "songId" to songId, "playStatus" to playStatus, "progress" to progress,
+        ),
+    ).jsonObject
+
+    suspend fun listenTogetherPlayCommand(
+        roomId: Long,
+        commandType: String,
+        progress: Long,
+        playStatus: String,
+        formerSongId: Long,
+        targetSongId: Long,
+        clientSeq: Long,
+    ): JsonObject = postRaw("/listentogether/play/command", parametersOf(
+        "roomId" to roomId, "commandType" to commandType, "progress" to progress,
+        "playStatus" to playStatus, "formerSongId" to formerSongId, "targetSongId" to targetSongId,
+        "clientSeq" to clientSeq,
+    )).jsonObject
+
+    suspend fun listenTogetherSyncList(
+        roomId: Long, commandType: String, userId: Long, version: Long,
+        randomList: String, displayList: String,
+    ): JsonObject = postRaw("/listentogether/sync/list/command", parametersOf(
+        "roomId" to roomId, "commandType" to commandType, "userId" to userId,
+        "version" to version, "randomList" to randomList, "displayList" to displayList,
+    )).jsonObject
+
+    suspend fun listenTogetherPlaylist(roomId: Long): JsonObject = postRaw(
+        "/listentogether/sync/playlist/get", parametersOf("roomId" to roomId),
+    ).jsonObject
+
     private val transport = NeteaseTransport(config, httpClient, { sessionCookie }, nowMillis)
 
     private suspend fun requestJson(

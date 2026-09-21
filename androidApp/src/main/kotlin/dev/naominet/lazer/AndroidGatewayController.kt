@@ -25,6 +25,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 
 enum class AndroidRootDestination(private val labelKey: String, val motionIndex: Int) {
     HOME("nav.today", 0),
@@ -77,6 +81,14 @@ internal fun nextAndroidLibraryTipIndex(current: Int): Int =
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
  * so composables only receive human-readable loading and failure states.
  */
+data class AndroidListenTogetherState(
+    val roomId: Long,
+    val inviterId: Long? = null,
+    val isHost: Boolean,
+)
+
+private const val LISTEN_TOGETHER_REFRESH_MILLIS = 10_000L
+
 class AndroidGatewayController(context: Context) {
     private val appContext = context.applicationContext
     private val cache = AndroidPlaylistCache(appContext)
@@ -231,6 +243,105 @@ class AndroidGatewayController(context: Context) {
 
     val currentSessionCookie: String?
         get() = gateway.sessionCookie?.takeIf(String::isNotBlank)
+
+    fun openScannedWebPage(url: String) {
+        val parsed = runCatching { android.net.Uri.parse(url.trim()) }.getOrNull()
+        val scheme = parsed?.scheme?.lowercase()
+        if (parsed == null || scheme !in setOf("http", "https") || parsed.host.isNullOrBlank()) {
+            message = tr("scan.invalid_url")
+            return
+        }
+        message = null
+        scannedWebPage = url.trim()
+    }
+
+    fun closeScannedWebPage() {
+        scannedWebPage = null
+    }
+
+    var scannedWebPage by mutableStateOf<String?>(null)
+        private set
+
+    var listenTogether by mutableStateOf<AndroidListenTogetherState?>(null)
+        private set
+    private var listenTogetherJob: Job? = null
+    private var listenTogetherSequence = 1L
+
+    fun createListenTogetherRoom() {
+        listenTogetherJob?.cancel()
+        listenTogetherJob = scope.launch {
+            runCatching {
+                val response = gateway.listenTogetherCreateRoom()
+                val roomId = response["data"]?.jsonObject?.get("roomInfo")?.jsonObject?.get("roomId")?.jsonPrimitive?.longOrNull
+                    ?: error("room id missing")
+                listenTogether = AndroidListenTogetherState(roomId = roomId, isHost = true)
+                gateway.listenTogetherRoomCheck(roomId)
+                startListenTogetherRefresh()
+            }.onFailure { message = tr("listen_together.create_fail") }
+        }
+    }
+
+    fun joinListenTogetherRoom(roomId: Long, inviterId: Long) {
+        listenTogetherJob?.cancel()
+        listenTogetherJob = scope.launch {
+            runCatching {
+                gateway.listenTogetherAccept(roomId, inviterId)
+                listenTogether = AndroidListenTogetherState(roomId = roomId, inviterId = inviterId, isHost = false)
+                gateway.listenTogetherRoomCheck(roomId)
+                startListenTogetherRefresh()
+            }.onFailure { message = tr("listen_together.join_fail") }
+        }
+    }
+
+    fun endListenTogetherRoom() {
+        val roomId = listenTogether?.roomId ?: return
+        listenTogetherJob?.cancel()
+        listenTogetherJob = scope.launch {
+            runCatching { gateway.listenTogetherEnd(roomId) }
+                .onSuccess { listenTogether = null }
+                .onFailure { message = tr("listen_together.end_fail") }
+        }
+    }
+
+    fun sendListenTogetherCommand(commandType: String, snapshot: AndroidPlaybackSnapshot) {
+        val room = listenTogether ?: return
+        val trackId = snapshot.track?.id ?: return
+        val sequence = listenTogetherSequence++
+        scope.launch {
+            runCatching {
+                gateway.listenTogetherPlayCommand(
+                    roomId = room.roomId,
+                    commandType = commandType,
+                    progress = snapshot.positionMillis,
+                    playStatus = if (snapshot.isPlaying) "PLAY" else "PAUSE",
+                    formerSongId = -1L,
+                    targetSongId = trackId,
+                    clientSeq = sequence,
+                )
+            }
+        }
+    }
+
+    private fun startListenTogetherRefresh() {
+        listenTogetherJob?.cancel()
+        listenTogetherJob = scope.launch {
+            while (isActive && listenTogether != null) {
+                val room = listenTogether ?: break
+                runCatching {
+                    gateway.listenTogetherStatus()
+                    AndroidPlaybackConnection.snapshot.value.track?.let { track ->
+                        gateway.listenTogetherHeartbeat(
+                            roomId = room.roomId,
+                            songId = track.id,
+                            playStatus = if (AndroidPlaybackConnection.snapshot.value.isPlaying) "PLAY" else "PAUSE",
+                            progress = AndroidPlaybackConnection.snapshot.value.positionMillis,
+                        )
+                    }
+                }
+                delay(LISTEN_TOGETHER_REFRESH_MILLIS)
+            }
+        }
+    }
 
     init {
         LazerI18n.switchLanguage(language)

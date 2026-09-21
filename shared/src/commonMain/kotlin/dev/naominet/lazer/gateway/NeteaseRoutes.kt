@@ -117,6 +117,44 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
         "/song/like" -> request("/api/song/like") {
             put("trackId", id()); put("userid", id("uid")); put("like", value("like") != "false")
         }
+        "/listentogether/room/create" -> request("/api/listen/together/room/create") {
+            put("refer", "songplay_more")
+        }
+        "/listentogether/accept" -> request("/api/listen/together/play/invitation/accept") {
+            put("refer", "inbox_invite"); put("roomId", value("roomId")); put("inviterId", value("inviterId"))
+        }
+        "/listentogether/room/check" -> request("/api/listen/together/room/check") {
+            put("roomId", value("roomId"))
+        }
+        "/listentogether/status" -> request("/api/listen/together/status/get", web = true)
+        "/listentogether/end" -> request("/api/listen/together/end/v2") {
+            put("roomId", value("roomId"))
+        }
+        "/listentogether/heartbeat" -> request("/api/listen/together/heartbeat") {
+            put("roomId", value("roomId")); put("songId", value("songId"))
+            put("playStatus", value("playStatus")); put("progress", value("progress"))
+        }
+        "/listentogether/play/command" -> request("/api/listen/together/play/command/report") {
+            put("roomId", value("roomId"))
+            put("commandInfo", buildJsonObject {
+                put("commandType", value("commandType")); put("progress", value("progress", "0"))
+                put("playStatus", value("playStatus")); put("formerSongId", value("formerSongId", "-1"))
+                put("targetSongId", value("targetSongId")); put("clientSeq", value("clientSeq"))
+            }.toString())
+        }
+        "/listentogether/sync/list/command" -> request("/api/listen/together/sync/list/command/report") {
+            put("roomId", value("roomId"))
+            put("playlistParam", buildJsonObject {
+                put("commandType", value("commandType"))
+                put("version", buildJsonArray { add(buildJsonObject { put("userId", value("userId")); put("version", value("version")) }) })
+                put("anchorSongId", ""); put("anchorPosition", -1)
+                put("randomList", buildJsonArray { value("randomList").split(',').filter(String::isNotBlank).forEach(::add) })
+                put("displayList", buildJsonArray { value("displayList").split(',').filter(String::isNotBlank).forEach(::add) })
+            }.toString())
+        }
+        "/listentogether/sync/playlist/get" -> request("/api/listen/together/sync/playlist/get") {
+            put("roomId", value("roomId"))
+        }
         "/like" -> request("/api/radio/like", web = true) {
             put("alg", "itembased"); put("trackId", id()); put("like", value("like") != "false"); put("time", "3")
         }
