@@ -2908,6 +2908,10 @@ private fun LyricsOverlay(
 ) {
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
+    val clickGlowScope = rememberCoroutineScope()
+    val clickGlowTokens = remember(controller.nowPlaying?.id) {
+        mutableStateMapOf<TimedLyricLine, Any>()
+    }
     val lines = controller.lyrics
     val timeline = remember(lines, controller.nowPlaying?.durationMillis) {
         desktopLyricsWithInterludes(lines, controller.nowPlaying?.durationMillis ?: 0L)
@@ -2984,6 +2988,7 @@ private fun LyricsOverlay(
     var manualAtMs by remember { mutableLongStateOf(0L) }
     var lyricScroll by remember { mutableFloatStateOf(0f) }
     val lyricWheelInertia = remember { WheelInertiaMotion() }
+    val lyricDragVelocity = remember { DragVelocityTracker() }
     val lyricLineMotion = remember { LyricLineMotionField() }
     var lyricMotionRevision by remember { mutableIntStateOf(0) }
     var lyricMotionAtNs by remember { mutableLongStateOf(0L) }
@@ -3051,7 +3056,12 @@ private fun LyricsOverlay(
                     }
                 } else {
                     val movement = lyricWheelInertia.advance(dt)
-                    if (movement != 0f) lyricScroll = (lyricScroll + movement).coerceIn(0f, currentMaxScroll)
+                    if (movement != 0f) {
+                        val next = lyricScroll + movement
+                        val clamped = next.coerceIn(0f, currentMaxScroll)
+                        lyricScroll = clamped
+                        if (clamped != next) lyricWheelInertia.stop()
+                    }
                 }
             }
         }
@@ -3070,11 +3080,30 @@ private fun LyricsOverlay(
         lyricScroll = (lyricScroll + lyricWheelInertia.impulse(deltaY)).coerceIn(0f, currentMaxScroll)
     }
 
-    fun onDrag(dy: Float) {
+    fun onDragStart() {
         if (lines.isEmpty()) return
         markManualScroll()
         lyricWheelInertia.stop()
-        lyricScroll = (lyricScroll - dy).coerceIn(0f, currentMaxScroll)
+        lyricDragVelocity.reset()
+    }
+
+    fun onDrag(dy: Float, elapsedMillis: Long) {
+        if (lines.isEmpty()) return
+        followPlayback = false
+        manualAtMs = System.currentTimeMillis()
+        val contentDelta = -dy
+        lyricDragVelocity.addDelta(contentDelta, elapsedMillis)
+        lyricScroll = (lyricScroll + contentDelta).coerceIn(0f, currentMaxScroll)
+    }
+
+    fun onDragEnd() {
+        manualAtMs = System.currentTimeMillis()
+        lyricWheelInertia.fling(lyricDragVelocity.releaseVelocity())
+    }
+
+    fun onDragCancel() {
+        lyricDragVelocity.reset()
+        lyricWheelInertia.stop()
     }
 
     // The same renderer powers the dedicated lyrics page and the lyrics half of landscape now
@@ -3162,10 +3191,15 @@ private fun LyricsOverlay(
                         }
                         .pointerInput(controller.nowPlaying?.id) {
                             detectDragGestures(
-                                onDragStart = { markManualScroll() },
+                                onDragStart = { onDragStart() },
+                                onDragEnd = { onDragEnd() },
+                                onDragCancel = { onDragCancel() },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
-                                    onDrag(dragAmount.y)
+                                    onDrag(
+                                        dy = dragAmount.y,
+                                        elapsedMillis = change.uptimeMillis - change.previousUptimeMillis,
+                                    )
                                 },
                             )
                         },
@@ -3233,6 +3267,11 @@ private fun LyricsOverlay(
                                 val inactiveAlpha = 0.62f + ambient * 0.18f
                                 val alpha = inactiveAlpha * (1f - focus) + focus
                                 val color = lerpColor(colors.onSurfaceVariant, colors.onSurface, focus)
+                                val clickGlowActive = clickGlowTokens.containsKey(line)
+                                // Keep glow outside the bounded inactive-line RenderEffect layer.
+                                // clip=false cannot enlarge a RenderEffect's offscreen raster.
+                                val lineGlowActive = clickGlowActive ||
+                                    (controller.lyricGlowEnabled && focus > 0.001f)
                                 val hasTranslation = !line.translation.isNullOrBlank()
                                 val textWidthFraction = 1f / 1.04f
                                 val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
@@ -3262,7 +3301,7 @@ private fun LyricsOverlay(
                                                 // AMLL's blur values are CSS pixels. They map to
                                                 // Compose render-effect pixels directly on desktop;
                                                 // converting them through dp over-blurred HiDPI text.
-                                                val radius = blurRadiusDp
+                                                val radius = if (lineGlowActive) 0f else blurRadiusDp
                                                 renderEffect = if (radius > 0.01f) {
                                                     androidx.compose.ui.graphics.BlurEffect(
                                                         radius,
@@ -3280,6 +3319,14 @@ private fun LyricsOverlay(
                                             }
                                         }
                                         .clickable {
+                                            val token = Any()
+                                            clickGlowTokens[line] = token
+                                            clickGlowScope.launch {
+                                                delay(500L)
+                                                if (clickGlowTokens[line] === token) {
+                                                    clickGlowTokens.remove(line)
+                                                }
+                                            }
                                             lyricLineMotion.snapTo(lyricScroll)
                                             followPlayback = true
                                             lyricWheelInertia.stop()
@@ -3296,7 +3343,7 @@ private fun LyricsOverlay(
                                                 endMillis = line.endTimeMs ?: line.timeMs + 5_000L,
                                                 positionMillis = if (index == activeIndex) controller.positionMillis else line.endTimeMs ?: line.timeMs,
                                                 visibility = interludePresence.value,
-                                                glowEnabled = controller.lyricGlowEnabled,
+                                                glowEnabled = controller.lyricGlowEnabled || clickGlowActive,
                                                 dotDiameter = (controller.lyricFontSizeSp * 0.3f).dp,
                                             )
                                         } else {
@@ -3310,6 +3357,7 @@ private fun LyricsOverlay(
                                                 color = color,
                                                 shadowColor = if (controller.isDark) Color.White else Color.Black,
                                                 glowEnabled = controller.lyricGlowEnabled,
+                                                temporaryGlow = clickGlowActive,
                                                 speed = controller.lyricAnimationSpeed,
                                                 modifier = Modifier
                                                     .fillMaxWidth(textWidthFraction)
@@ -3322,6 +3370,10 @@ private fun LyricsOverlay(
                                                         scaleX = scale
                                                         scaleY = scale
                                                         this.alpha = alpha
+                                                        // Modulate alpha per draw so Compose does not
+                                                        // allocate another exact-bounds clipping layer.
+                                                        compositingStrategy = CompositingStrategy.ModulateAlpha
+                                                        clip = false
                                                         transformOrigin = TransformOrigin.Center
                                                     },
                                                 style = MaterialTheme.typography.bodyLarge.copy(

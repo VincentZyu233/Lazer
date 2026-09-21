@@ -365,6 +365,10 @@ private fun AnimatedLyricsViewport(
                 interactionSuspended = !followPlayback,
             )
             val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
+            val clickGlowActive = clickGlowTokens.containsKey(line)
+            // A RenderEffect always rasterizes to its owner's bounds, even with clip=false. Do not
+            // put a glowing row inside that invisible blur rectangle while focus/click glow exits.
+            val lineGlowActive = clickGlowActive || (lyricGlowEnabled && focus > 0.001f)
             val hasTranslation = !line.translation.isNullOrBlank()
             val textWidthFraction = 1f / 1.04f
             val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
@@ -408,7 +412,7 @@ private fun AnimatedLyricsViewport(
                             scaleY = 0.92f + interludePresence * 0.08f
                             transformOrigin = TransformOrigin.Center
                         } else {
-                            val radius = blurRadiusDp.dp.toPx()
+                            val radius = if (lineGlowActive) 0f else blurRadiusDp.dp.toPx()
                             renderEffect = if (radius > 0.01f) {
                                 BlurEffect(radius, radius, TileMode.Decal)
                             } else {
@@ -422,14 +426,12 @@ private fun AnimatedLyricsViewport(
                         }
                     }
                     .clickable(interactionSource = null, indication = null) {
-                        if (!lyricGlowEnabled) {
-                            val token = Any()
-                            clickGlowTokens[line] = token
-                            clickGlowScope.launch {
-                                delay(500L)
-                                if (clickGlowTokens[line] === token) {
-                                    clickGlowTokens.remove(line)
-                                }
+                        val token = Any()
+                        clickGlowTokens[line] = token
+                        clickGlowScope.launch {
+                            delay(500L)
+                            if (clickGlowTokens[line] === token) {
+                                clickGlowTokens.remove(line)
                             }
                         }
                         lyricLineMotion.snapTo(lyricScroll)
@@ -455,7 +457,7 @@ private fun AnimatedLyricsViewport(
                                 interludeEndMillis
                             },
                             visibility = interludePresence,
-                            glowEnabled = lyricGlowEnabled || clickGlowTokens.containsKey(line),
+                            glowEnabled = lyricGlowEnabled || clickGlowActive,
                             dotDiameter = (lyricFontSizeSp * 0.3f).dp,
                         )
                     } else {
@@ -472,7 +474,7 @@ private fun AnimatedLyricsViewport(
                             color = colors.onBackground,
                             shadowColor = if (isDark) Color.White else Color.Black,
                             glowEnabled = lyricGlowEnabled,
-                            temporaryGlow = !lyricGlowEnabled && clickGlowTokens.containsKey(line),
+                            temporaryGlow = clickGlowActive,
                             speed = animationSpeed,
                             modifier = Modifier
                                 .fillMaxWidth(textWidthFraction)

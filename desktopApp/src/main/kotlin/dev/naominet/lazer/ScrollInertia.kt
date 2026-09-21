@@ -15,9 +15,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import kotlin.math.abs
 import kotlin.math.pow
 
-/**
- * Shared wheel/trackpad inertia used across lyric page and main lists.
- */
+/** Shared wheel, trackpad, and direct-touch inertia used across the desktop app. */
 @Composable
 fun rememberScrollInertiaController(): ScrollInertiaController {
     val controller = remember { ScrollInertiaController() }
@@ -50,9 +48,22 @@ class ScrollInertiaController {
         scrollState.dispatchRawDelta(motion.impulse(delta))
     }
 
+    /** Continue a direct touch/mouse drag with the release velocity, in content pixels/second. */
+    fun fling(scrollState: ScrollableState, velocity: Float) {
+        if (target !== scrollState) {
+            stop()
+            target = scrollState
+        }
+        motion.fling(velocity)
+    }
+
     internal fun advance(dt: Float) {
         val movement = motion.advance(dt)
-        if (movement != 0f) target?.dispatchRawDelta(movement)
+        if (movement == 0f) return
+        val consumed = target?.dispatchRawDelta(movement) ?: 0f
+        // Stop pushing once a list reaches an edge. This also prevents a stale fling from being
+        // resumed if another scroll target is selected immediately afterwards.
+        if (abs(consumed) < abs(movement) * 0.05f) stop()
     }
 
     fun stop() {
@@ -61,7 +72,7 @@ class ScrollInertiaController {
     }
 }
 
-/** The exact wheel motion model shared by lyrics and every scrollable list. */
+/** The motion model shared by wheel input and released direct drags. */
 internal class WheelInertiaMotion {
     private var velocity = 0f
 
@@ -69,6 +80,13 @@ internal class WheelInertiaMotion {
         velocity = (velocity + delta * WheelInertiaDefaults.VelocityMultiplier)
             .coerceIn(-WheelInertiaDefaults.MaximumVelocity, WheelInertiaDefaults.MaximumVelocity)
         return delta * WheelInertiaDefaults.DirectMultiplier
+    }
+
+    /** Adopt direct-manipulation velocity while keeping the same decay curve as wheel input. */
+    fun fling(velocityPixelsPerSecond: Float) {
+        velocity = (velocityPixelsPerSecond / 60f)
+            .coerceIn(-WheelInertiaDefaults.MaximumVelocity, WheelInertiaDefaults.MaximumVelocity)
+        if (abs(velocity) < WheelInertiaDefaults.StopVelocity) velocity = 0f
     }
 
     fun advance(dt: Float): Float {
@@ -84,6 +102,34 @@ internal class WheelInertiaMotion {
 
     fun stop() {
         velocity = 0f
+    }
+}
+
+/** Low-pass velocity estimate from the deltas supplied by Compose's drag detector. */
+internal class DragVelocityTracker {
+    private var velocityPixelsPerSecond = 0f
+    private var hasSample = false
+
+    fun addDelta(delta: Float, elapsedMillis: Long) {
+        val seconds = elapsedMillis.coerceIn(1L, 50L) / 1_000f
+        val instantaneous = delta / seconds
+        velocityPixelsPerSecond = if (hasSample) {
+            velocityPixelsPerSecond * 0.65f + instantaneous * 0.35f
+        } else {
+            instantaneous
+        }
+        hasSample = true
+    }
+
+    fun releaseVelocity(): Float {
+        val result = if (hasSample) velocityPixelsPerSecond else 0f
+        reset()
+        return result
+    }
+
+    fun reset() {
+        velocityPixelsPerSecond = 0f
+        hasSample = false
     }
 }
 
@@ -108,9 +154,18 @@ fun Modifier.scrollInertia(
     return this
         .pointerInput(scrollState, orientation) {
             var touchGesture = false
+            val velocityTracker = DragVelocityTracker()
             detectDragGestures(
                 onDragStart = {
                     touchGesture = false
+                    velocityTracker.reset()
+                    controller.stop()
+                },
+                onDragEnd = {
+                    controller.fling(scrollState, velocityTracker.releaseVelocity())
+                },
+                onDragCancel = {
+                    velocityTracker.reset()
                     controller.stop()
                 },
                 onDrag = { change, dragAmount ->
@@ -124,7 +179,12 @@ fun Modifier.scrollInertia(
                     }
                     if (delta != 0f) {
                         change.consume()
-                        scrollState.dispatchRawDelta(-delta)
+                        val contentDelta = -delta
+                        velocityTracker.addDelta(
+                            delta = contentDelta,
+                            elapsedMillis = change.uptimeMillis - change.previousUptimeMillis,
+                        )
+                        scrollState.dispatchRawDelta(contentDelta)
                     }
                 },
             )
