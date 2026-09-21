@@ -176,6 +176,20 @@ class DesktopMediaAndCacheTest {
     }
 
     @Test
+    fun `direct drag release continues with the shared inertia curve`() {
+        val tracker = DragVelocityTracker()
+        tracker.addDelta(delta = 10f, elapsedMillis = 10L)
+        tracker.addDelta(delta = 20f, elapsedMillis = 10L)
+        assertEquals(1_350f, tracker.releaseVelocity(), 0.0001f)
+        assertEquals(0f, tracker.releaseVelocity(), 0.0001f)
+
+        val motion = WheelInertiaMotion()
+        motion.fling(1_200f)
+        assertEquals(20f, motion.advance(1f / 60f), 0.0001f)
+        assertEquals(18f, motion.advance(1f / 60f), 0.0001f)
+    }
+
+    @Test
     fun `playlist and track cache round trip unicode metadata`() {
         val directory = Files.createTempDirectory("lazer-playlist-cache-test")
         try {

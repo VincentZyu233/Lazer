@@ -365,6 +365,8 @@ private fun AnimatedLyricsViewport(
                 interactionSuspended = !followPlayback,
             )
             val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
+            val clickGlowActive = clickGlowTokens.containsKey(line)
+            val contentBlurRadiusPx = with(density) { blurRadiusDp.dp.toPx() }
             val hasTranslation = !line.translation.isNullOrBlank()
             val textWidthFraction = 1f / 1.04f
             val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
@@ -407,14 +409,8 @@ private fun AnimatedLyricsViewport(
                             scaleX = 0.94f + interludePresence * 0.06f
                             scaleY = 0.92f + interludePresence * 0.08f
                             transformOrigin = TransformOrigin.Center
-                        } else {
-                            val radius = blurRadiusDp.dp.toPx()
-                            renderEffect = if (radius > 0.01f) {
-                                BlurEffect(radius, radius, TileMode.Decal)
-                            } else {
-                                null
-                            }
                         }
+                        clip = false
                     }
                     .onSizeChanged { size ->
                         if (measuredRowHeightsPx[line] != size.height) {
@@ -422,14 +418,12 @@ private fun AnimatedLyricsViewport(
                         }
                     }
                     .clickable(interactionSource = null, indication = null) {
-                        if (!lyricGlowEnabled) {
-                            val token = Any()
-                            clickGlowTokens[line] = token
-                            clickGlowScope.launch {
-                                delay(500L)
-                                if (clickGlowTokens[line] === token) {
-                                    clickGlowTokens.remove(line)
-                                }
+                        val token = Any()
+                        clickGlowTokens[line] = token
+                        clickGlowScope.launch {
+                            delay(500L)
+                            if (clickGlowTokens[line] === token) {
+                                clickGlowTokens.remove(line)
                             }
                         }
                         lyricLineMotion.snapTo(lyricScroll)
@@ -455,7 +449,7 @@ private fun AnimatedLyricsViewport(
                                 interludeEndMillis
                             },
                             visibility = interludePresence,
-                            glowEnabled = lyricGlowEnabled || clickGlowTokens.containsKey(line),
+                            glowEnabled = lyricGlowEnabled || clickGlowActive,
                             dotDiameter = (lyricFontSizeSp * 0.3f).dp,
                         )
                     } else {
@@ -472,7 +466,8 @@ private fun AnimatedLyricsViewport(
                             color = colors.onBackground,
                             shadowColor = if (isDark) Color.White else Color.Black,
                             glowEnabled = lyricGlowEnabled,
-                            temporaryGlow = !lyricGlowEnabled && clickGlowTokens.containsKey(line),
+                            temporaryGlow = clickGlowActive,
+                            contentBlurRadiusPixels = contentBlurRadiusPx,
                             speed = animationSpeed,
                             modifier = Modifier
                                 .fillMaxWidth(textWidthFraction)
@@ -510,6 +505,12 @@ private fun AnimatedLyricsViewport(
                                 scaleX = scale
                                 scaleY = scale
                                 this.alpha = alpha
+                                renderEffect = if (contentBlurRadiusPx > 0.01f) {
+                                    BlurEffect(contentBlurRadiusPx, contentBlurRadiusPx, TileMode.Decal)
+                                } else {
+                                    null
+                                }
+                                clip = false
                                 transformOrigin = TransformOrigin.Center
                             },
                             color = colors.onSurfaceVariant,

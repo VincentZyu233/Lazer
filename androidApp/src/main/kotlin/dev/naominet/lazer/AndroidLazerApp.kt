@@ -717,7 +717,26 @@ fun AndroidLazerApp() {
         // artwork palette itself stays opaque, so navigation transitions never expose another page.
         val uiAlpha = resolveLazerUiAlpha(hasVisualBackground, controller.backgroundAlpha)
         val pageBackgroundBackdrop = rememberLayerBackdrop()
+        val liquidGlass = rememberLazerLiquidGlass(
+            enabled = controller.liquidGlassEnabled,
+            backgroundColor = colors.background,
+            blurIntensity = controller.liquidGlassBlurIntensity,
+        )
+        val landscape = isLandscapeLayout()
+        val floatingControlsInset = if (landscape) {
+            if (playback.track != null) 60.dp + navigationBarBottomInset() else 0.dp
+        } else if (liquidGlass.isEnabled) {
+            navigationBarBottomInset() + if (playback.track != null) 176.dp else 104.dp
+        } else {
+            0.dp
+        }
+        // The Liquid Glass playlist owns the status-bar backdrop. Do not leave the global
+        // wallpaper exposed above its artwork-derived background.
+        val playlistOwnsStatusBarBackdrop = liquidGlass.isEnabled && mainPage.kind == AndroidMainPageKind.PLAYLIST
         Box(Modifier.fillMaxSize().background(colors.background)) {
+            // One opaque, full-window sampling plane: visual background first, page content next.
+            // Floating glass controls stay outside this box, so they never sample themselves.
+            Box(Modifier.fillMaxSize().captureLiquidGlass(liquidGlass)) {
             // Keep the wallpaper and its scrim in one fixed, capturable canvas. Animated pages
             // reuse this exact canvas, so their interiors and any exposed transition gaps match.
             Box(
@@ -770,22 +789,6 @@ fun AndroidLazerApp() {
                         .background(colors.background.copy(alpha = uiAlpha)),
                 )
             }
-            val liquidGlass = rememberLazerLiquidGlass(
-                enabled = controller.liquidGlassEnabled,
-                backgroundColor = colors.background,
-                blurIntensity = controller.liquidGlassBlurIntensity,
-            )
-            val landscape = isLandscapeLayout()
-            val floatingControlsInset = if (landscape) {
-                if (playback.track != null) 60.dp + navigationBarBottomInset() else 0.dp
-            } else if (liquidGlass.isEnabled) {
-                navigationBarBottomInset() + if (playback.track != null) 176.dp else 104.dp
-            } else {
-                0.dp
-            }
-            // The Liquid Glass playlist owns the status-bar backdrop. Do not leave the global
-            // wallpaper exposed above its artwork-derived background.
-            val playlistOwnsStatusBarBackdrop = liquidGlass.isEnabled && mainPage.kind == AndroidMainPageKind.PLAYLIST
             // Android 16 forces edge-to-edge. Keep the visual canvas under the status bar, while
             // placing every interactive root-page element below its dynamic inset.
             CompositionLocalProvider(
@@ -796,8 +799,7 @@ fun AndroidLazerApp() {
                 Modifier
                     .fillMaxSize()
                     .padding(start = if (landscape) 64.dp else 0.dp)
-                    .then(if (landscape) Modifier.safeDrawingPadding() else Modifier)
-                    .captureLiquidGlass(liquidGlass),
+                    .then(if (landscape) Modifier.safeDrawingPadding() else Modifier),
             ) {
                 // Manual status-bar inset. The fixed background canvas already paints this area.
                 Box(
@@ -908,6 +910,7 @@ fun AndroidLazerApp() {
                         onSelect = controller::selectDestination,
                     )
                 }
+            }
             }
             }
 
