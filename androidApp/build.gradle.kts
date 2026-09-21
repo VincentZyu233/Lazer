@@ -76,6 +76,7 @@ dependencies {
     implementation(libs.compose.uiToolingPreview)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.ktor3)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     // Publishes real-time lyrics to the system SuperLyric service.
     implementation("com.github.HChenX:SuperLyricApi:3.4")
     debugImplementation(libs.compose.uiTooling)
