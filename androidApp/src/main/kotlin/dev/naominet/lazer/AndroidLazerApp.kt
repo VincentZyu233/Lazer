@@ -617,7 +617,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     LaunchedEffect(initialListenTogetherInvitation) {
         initialListenTogetherInvitation?.let(controller::joinListenTogether)
     }
-    LaunchedEffect(playback.track?.id) { playback.track?.let(controller::loadLyrics) }
+    LaunchedEffect(playback.track?.id) { playback.track?.id?.let(controller::loadLyrics) }
 
     // The currently visible top layer owns back. Gesture progress drives the same page that a
     // normal back press closes; cancelling the gesture eases that page back into place.

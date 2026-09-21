@@ -109,8 +109,10 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
             put("id", id()); put("tv", -1); put("lv", -1); put("rv", -1); put("kv", -1); put("_nmclfl", 1)
         }
         "/lyric/new" -> request("/api/song/lyric/v1") {
-            // Version counters select a delta, so sending them as zero drops the translated line.
             put("id", id()); put("cp", false)
+            // The version counters are required: without them the service answers with an empty
+            // envelope, and -1 asks for the whole payload including word lyric and translation.
+            listOf("tv", "lv", "rv", "kv", "yv", "ytv", "yrv").forEach { put(it, -1) }
         }
         "/playlist/detail" -> request("/api/v6/playlist/detail") {
             put("id", id()); put("n", 100000); put("s", value("s", "8"))

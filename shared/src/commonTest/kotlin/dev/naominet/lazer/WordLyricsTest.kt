@@ -36,6 +36,27 @@ class WordLyricsTest {
     }
 
     @Test
+    fun bothFractionalSecondSeparatorsParseIntoTimedLines() {
+        val dotted = parseLrcRow("[00:30.542]故事的小黄花")
+        val colon = parseLrcRow("[00:12:95]センチメンタル 嫌になる")
+
+        assertEquals(listOf(30_542L), dotted?.first)
+        assertEquals("故事的小黄花", dotted?.second)
+        assertEquals(listOf(12_950L), colon?.first)
+        assertEquals("センチメンタル 嫌になる", colon?.second)
+    }
+
+    @Test
+    fun repeatedStampsAndUntimedRowsAreHandled() {
+        val repeated = parseLrcRow("[00:01.00][00:02.00]同一句")
+        val credit = parseLrcRow("{\"t\":0,\"c\":[{\"tx\":\"作词: \"}]}")
+
+        assertEquals(listOf(1_000L, 2_000L), repeated?.first)
+        assertEquals("同一句", repeated?.second)
+        assertEquals(null, credit)
+    }
+
+    @Test
     fun animationSpeedKeepsPersistedNamesAndAddsFineGrainedChoices() {
         assertEquals(LyricAnimationSpeed.RELAXED, parseLyricAnimationSpeed("RELAXED"))
         assertEquals(LyricAnimationSpeed.STANDARD, parseLyricAnimationSpeed("STANDARD"))
