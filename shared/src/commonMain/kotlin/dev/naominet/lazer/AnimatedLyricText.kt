@@ -18,7 +18,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.BlurEffect
@@ -26,7 +25,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -453,31 +451,10 @@ private fun DrawScope.drawAmllFragment(
     val offsetY = motion.offsetYEm * emPixels * effect
     val pivot = bounds.center
 
-    if (motion.glowAlpha * effect > 0.001f && motion.glowRadiusEm > 0f) {
-        val blurPixels = motion.glowRadiusEm * emPixels
-        withTransform({
-            translate(offsetX, offsetY)
-            scale(scale, scale, pivot)
-        }) {
-            clipRect(
-                left = bounds.left - blurPixels * 3f,
-                top = bounds.top - blurPixels * 3f,
-                right = bounds.right + blurPixels * 3f,
-                bottom = bounds.bottom + blurPixels * 3f,
-            ) {
-                drawText(
-                    textLayoutResult = layout,
-                    color = Color.Transparent,
-                    shadow = Shadow(
-                        color = color.copy(alpha = color.alpha * motion.glowAlpha * effect),
-                        offset = Offset.Zero,
-                        blurRadius = blurPixels,
-                    ),
-                )
-            }
-        }
-    }
-
+    // Do not emulate AMLL's per-character CSS text-shadow with drawText(shadow = ...): Compose
+    // applies that shadow to the complete TextLayoutResult before clipping. Repeating it for every
+    // glyph accumulates the whole line into opaque blurred blocks on Android. The dedicated,
+    // expanded lyric glow layer above owns glow; this pass only paints the moving glyph itself.
     val leftMask = mask?.foregroundAlphaAt(bounds.left) ?: 1f
     val rightMask = mask?.foregroundAlphaAt(bounds.right) ?: 1f
     val base = lyricBaseMaskAlpha()
