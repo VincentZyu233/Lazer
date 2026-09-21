@@ -32,7 +32,6 @@ API Gateway 已内置于共享模块中，直接与音乐服务通信，无需�
   <img src="./pics/18ec2b5b-5b6d-4e88-af8a-91400e7afefa.png" alt="Lazer 桌面端截图 1" width="420">
   <img src="./pics/ef15be70-f979-4e53-97c1-98135e170e6b.png" alt="Lazer 桌面端截图 2" width="420">
   <img src="./pics/73976c13-a41e-4737-9ed1-7995b852a280.png" alt="Lazer 桌面端截图 3" width="420">
-  <img src="./pics/fd8fbadb-0d38-44e5-a657-325ce6a37acb.png" alt="Lazer 桌面端截图 4" width="420">
 </p>
 
 ## 功能
