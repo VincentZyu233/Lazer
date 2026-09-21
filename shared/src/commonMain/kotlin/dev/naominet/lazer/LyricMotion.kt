@@ -234,16 +234,21 @@ internal fun lyricMaskTargetPositionMillis(
 fun amllLyricLineScale(focus: Float): Float =
     0.97f + focus.coerceIn(0f, 1f) * 0.03f
 
-/** AMLL's distance-based inactive-line blur, reduced on viewports up to 1024 px. */
+/**
+ * AMLL's distance-based inactive-line blur, reduced on viewports up to 1024 px and capped so a
+ * far line never dissolves completely. [maxBlurDp] raises the ceiling where a larger surface can
+ * afford more depth.
+ */
 fun amllLyricBlurRadiusDp(
     distance: Float,
     focus: Float,
     narrowViewport: Boolean,
     interactionSuspended: Boolean,
+    maxBlurDp: Float = 5f,
 ): Float {
     if (interactionSuspended) return 0f
     val level = (1f + distance.coerceAtLeast(0f)) * if (narrowViewport) 0.8f else 1f
-    return min(5f, level * (1f - focus.coerceIn(0f, 1f)))
+    return min(maxBlurDp, level * (1f - focus.coerceIn(0f, 1f)))
 }
 
 fun lyricWordSmoothingMillis(speed: LyricAnimationSpeed): Int =

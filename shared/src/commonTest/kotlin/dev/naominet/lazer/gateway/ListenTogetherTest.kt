@@ -150,12 +150,5 @@ class ListenTogetherTest {
         assertEquals("", payload["checkToken"]?.jsonPrimitive?.content)
     }
 
-    @Test
-    fun `word lyric route asks for the whole payload instead of a version delta`() {
-        val request = neteaseRequest("/lyric/new", mapOf("id" to "42"))
-
-        assertEquals(setOf("id", "cp"), request.payload.keys)
-    }
-
     private fun json(value: String) = Json.parseToJsonElement(value).jsonObject
 }

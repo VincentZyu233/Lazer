@@ -1017,18 +1017,15 @@ class AndroidGatewayController(context: Context) {
         }
     }
 
-    fun loadLyrics(track: AndroidTrack) {
+    fun loadLyrics(trackId: Long) {
         lyricJob?.cancel()
         lyrics = emptyList()
-        SuperLyricPublisher.updateLyrics(track.id, emptyList())
+        SuperLyricPublisher.updateLyrics(trackId, emptyList())
         lyricsMessage = null
         lyricsLoading = true
         lyricJob = scope.launch {
             try {
-                val response = gateway.preferredLyrics(
-                    id = track.id,
-                    translationExpected = !track.translatedTitle.isNullOrBlank(),
-                )
+                val response = gateway.preferredLyrics(trackId)
                 val timedLyrics = parseAndroidWordLyrics(response.yrc?.lyric)
                     .ifEmpty { parseAndroidLrc(response.lrc?.lyric) }
                 val merged = mergeAndroidLyrics(
@@ -1036,11 +1033,11 @@ class AndroidGatewayController(context: Context) {
                     parseAndroidLrc(response.tlyric?.lyric),
                 )
                 lyrics = merged
-                SuperLyricPublisher.updateLyrics(track.id, merged)
+                SuperLyricPublisher.updateLyrics(trackId, merged)
                 lyricsMessage = if (merged.isEmpty()) tr("status.no_lyrics") else null
             } catch (_: Throwable) {
                 lyrics = emptyList()
-                SuperLyricPublisher.updateLyrics(track.id, emptyList())
+                SuperLyricPublisher.updateLyrics(trackId, emptyList())
                 lyricsMessage = tr("status.lyrics_fail")
             } finally {
                 lyricsLoading = false

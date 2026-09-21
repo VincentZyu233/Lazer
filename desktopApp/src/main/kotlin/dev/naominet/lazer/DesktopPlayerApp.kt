@@ -3271,6 +3271,9 @@ private fun LyricsOverlay(
                                     focus = focus,
                                     narrowViewport = maxWidth <= 1024.dp,
                                     interactionSuspended = !followPlayback,
+                                    // The desktop sheet is far larger than the phone one, so the
+                                    // same depth reads as almost no blur at all.
+                                    maxBlurDp = 9f,
                                 )
                                 // Blur supplies depth; keep inactive rows readable instead of
                                 // multiplying a heavy blur by near-transparent text.

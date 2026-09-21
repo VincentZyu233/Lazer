@@ -351,19 +351,14 @@ class NeteaseMusicGateway(
      * Prefers `/lyric/new`, but falls back when that successful response contains no timed lyric.
      * The Gateway documentation explicitly notes that some songs do not provide the `yrc` field;
      * a transport-only fallback misses that normal response shape.
-     *
-     * `translationExpected` marks a song that carries a translated title, so bilingual songs get a
-     * second chance at the translated line without every plain song paying for an extra request.
      */
-    suspend fun preferredLyrics(id: Long, translationExpected: Boolean = false): LyricResponse {
+    suspend fun preferredLyrics(id: Long): LyricResponse {
         val enhanced = runCatching { wordByWordLyrics(id) }.getOrNull()
-        if (enhanced?.pureMusic == true || enhanced?.hasTimedLyricPayload() != true) {
-            return runCatching { lyrics(id) }.getOrElse { regularError -> enhanced ?: throw regularError }
+        if (enhanced?.pureMusic == true || enhanced?.hasTimedLyricPayload() == true) return enhanced
+
+        return runCatching { lyrics(id) }.getOrElse { regularError ->
+            enhanced ?: throw regularError
         }
-        if (!translationExpected || enhanced.tlyric?.lyric?.isNotBlank() == true) return enhanced
-        val regular = runCatching { lyrics(id) }.getOrNull() ?: return enhanced
-        return regular.tlyric?.takeIf { !it.lyric.isNullOrBlank() }?.let { enhanced.copy(tlyric = it) }
-            ?: enhanced
     }
 
     suspend fun playlistDetail(
