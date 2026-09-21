@@ -32,19 +32,20 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnitType
+import androidx.compose.ui.unit.dp
 import kotlin.math.roundToLong
 
-private val LyricShaderShadowRadius = 12.dp
-private val LyricGlowOverflowPadding = 18.dp
+private val MinimumLyricGlowOverflow = 36.dp
 
 /** Enlarges only the render layer; the lyric keeps its original measured row size. */
 private fun Modifier.expandLayerForGlow(padding: Dp): Modifier = layout { measurable, constraints ->
@@ -100,7 +101,22 @@ fun AmllLyricText(
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
     temporaryGlow: Boolean = false,
+    contentBlurRadiusPixels: Float = 0f,
 ) {
+    val density = LocalDensity.current
+    val lyricEm = if (style.fontSize.type == TextUnitType.Sp) {
+        with(density) { style.fontSize.toDp() }
+    } else {
+        MinimumLyricGlowOverflow
+    }
+    // AMLL reserves one em around the main line/word/character. The blur also needs roughly
+    // three radii of transparent pixels or Skia's offscreen layer cuts the Gaussian tail.
+    val shaderShadowRadius = lyricEm.times(0.3f).coerceIn(6.dp, 18.dp)
+    val glowOverflowPadding = maxOf(
+        lyricEm,
+        shaderShadowRadius.times(3f),
+        MinimumLyricGlowOverflow,
+    )
     var layoutResult by remember(text, style, textAlign, maxLines, overflow) {
         mutableStateOf<TextLayoutResult?>(null)
     }
@@ -118,7 +134,9 @@ fun AmllLyricText(
         reportedPositionMillis = positionMillis,
         retainedActivePositionMillis = retainedActivePosition,
     )
-    val animatedPosition by animateFloatAsState(
+    // Keep high-frequency clock/effect reads in draw rather than composition. Playback updates
+    // now invalidate only this lyric's display list, not its BasicText/layout subtree.
+    val animatedPosition = animateFloatAsState(
         targetValue = maskPositionMillis.toFloat(),
         animationSpec = tween(
             durationMillis = lyricWordSmoothingMillis(speed),
@@ -126,7 +144,7 @@ fun AmllLyricText(
         ),
         label = "AMLL lyric clock",
     )
-    val effectStrength by animateFloatAsState(
+    val effectStrength = animateFloatAsState(
         targetValue = if (active) 1f else 0f,
         animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
         label = "AMLL lyric effect",
@@ -146,18 +164,19 @@ fun AmllLyricText(
     val timedGlyphs = remember(laidOutGlyphs) {
         laidOutGlyphs.filter { it.timing.wordIndex >= 0 }
     }
+    val laidOutWords = remember(layoutResult, timedGlyphs, words) {
+        layoutResult?.let { buildLaidOutWords(it, timedGlyphs, words) }.orEmpty()
+    }
     // AMLL gives every timed word its own moving mask. The fade is half a word-height wide and
     // travels linearly from the word's start to end time, rather than clipping one global line.
-    val maskWords = remember(layoutResult, timedGlyphs, words) {
+    val maskWords = remember(laidOutWords) {
         var cachedPosition = Long.MIN_VALUE
         var cachedMasks = emptyList<LyricWordMask>()
         val compute: () -> List<LyricWordMask> = {
-            val position = animatedPosition.roundToLong()
+            val position = animatedPosition.value.roundToLong()
             if (position != cachedPosition) {
                 cachedPosition = position
-                cachedMasks = layoutResult?.let {
-                    buildWordMasks(it, timedGlyphs, words, position)
-                }.orEmpty()
+                cachedMasks = buildWordMasks(laidOutWords, position)
             }
             cachedMasks
         }
@@ -169,9 +188,9 @@ fun AmllLyricText(
             Box(
                 Modifier
                     .matchParentSize()
-                    .expandLayerForGlow(LyricGlowOverflowPadding)
+                    .expandLayerForGlow(glowOverflowPadding)
                     .graphicsLayer {
-                        val radius = LyricShaderShadowRadius.toPx()
+                        val radius = shaderShadowRadius.toPx()
                         compositingStrategy = CompositingStrategy.Offscreen
                         clip = false
                         alpha = 0.5f * if (temporaryGlow) 1f else lineFocus
@@ -185,7 +204,7 @@ fun AmllLyricText(
                         if (!temporaryGlow && lineFocus <= 0.001f) return@drawBehind
                         val measured = layoutResult ?: return@drawBehind
                         drawRect(color = Color.Transparent, blendMode = BlendMode.Clear)
-                        val inset = LyricGlowOverflowPadding.toPx()
+                        val inset = glowOverflowPadding.toPx()
                         translate(left = inset, top = inset) {
                             drawLyricShaderShadow(
                                 layout = measured,
@@ -201,13 +220,26 @@ fun AmllLyricText(
         }
         BasicText(
             text = text,
-            modifier = Modifier.fillMaxWidth().drawWithContent {
+            modifier = Modifier
+                .fillMaxWidth()
+                // Blur only the foreground text. The glow is a sibling layer with its own
+                // overflow gutter, so focus blur can animate continuously without clipping it.
+                .graphicsLayer {
+                    val radius = contentBlurRadiusPixels.coerceAtLeast(0f)
+                    renderEffect = if (radius > 0.01f) {
+                        BlurEffect(radius, radius, TileMode.Decal)
+                    } else {
+                        null
+                    }
+                    clip = false
+                }
+                .drawWithContent {
                 val measured = layoutResult
                 if (measured == null) {
                     drawContent()
                 } else if (words.isEmpty() || laidOutGlyphs.none { it.timing.wordIndex >= 0 }) {
                     drawText(measured, color = color)
-                } else if (!active && effectStrength <= 0.001f) {
+                } else if (!active && effectStrength.value <= 0.001f) {
                     drawText(measured, color = color)
                 } else {
                     drawAmllGlyphs(
@@ -215,7 +247,7 @@ fun AmllLyricText(
                         hasTimedGlyphs = timedGlyphs.isNotEmpty(),
                         wordMasks = maskWords(),
                         color = color,
-                        effectStrength = effectStrength,
+                        effectStrength = effectStrength.value,
                     )
                 }
             },
@@ -234,7 +266,14 @@ private data class LaidOutLyricGlyph(
     val bounds: Rect,
 )
 
+private data class LaidOutLyricWord(
+    val wordIndex: Int,
+    val word: TimedLyricWord,
+    val bounds: Rect,
+)
+
 private data class LyricWordMask(
+    val wordIndex: Int,
     val bounds: Rect,
     val edgeX: Float,
     val fadeStartX: Float,
@@ -253,6 +292,30 @@ private fun buildLaidOutGlyphs(
     }
 }
 
+private fun buildLaidOutWords(
+    layout: TextLayoutResult,
+    timedGlyphs: List<LaidOutLyricGlyph>,
+    words: List<TimedLyricWord>,
+): List<LaidOutLyricWord> = buildList {
+    val groupedGlyphs = timedGlyphs.groupBy { it.timing.wordIndex }
+    for (wordIndex in words.indices) {
+        val glyphs = groupedGlyphs[wordIndex].orEmpty()
+        if (glyphs.isEmpty()) continue
+        add(
+            LaidOutLyricWord(
+                wordIndex = wordIndex,
+                word = words[wordIndex],
+                bounds = Rect(
+                    left = glyphs.minOf { it.bounds.left },
+                    top = glyphs.minOf { glyphLineClip(layout, it).top },
+                    right = glyphs.maxOf { it.bounds.right },
+                    bottom = glyphs.maxOf { glyphLineClip(layout, it).bottom },
+                ),
+            ),
+        )
+    }
+}
+
 private fun DrawScope.drawLyricShaderShadow(
     layout: TextLayoutResult,
     hasTimedGlyphs: Boolean,
@@ -267,29 +330,19 @@ private fun DrawScope.drawLyricShaderShadow(
 }
 
 private fun buildWordMasks(
-    layout: TextLayoutResult,
-    timedGlyphs: List<LaidOutLyricGlyph>,
-    words: List<TimedLyricWord>,
+    laidOutWords: List<LaidOutLyricWord>,
     positionMillis: Long,
 ): List<LyricWordMask> {
-    if (timedGlyphs.isEmpty()) return emptyList()
-    val masks = ArrayList<LyricWordMask>(words.size)
-    for (wordIndex in words.indices) {
-        val glyphs = timedGlyphs.filter { it.timing.wordIndex == wordIndex }
-        if (glyphs.isEmpty()) continue
-        val first = glyphs.first().bounds
-        val last = glyphs.last().bounds
-        val bounds = Rect(
-            left = first.left,
-            top = glyphs.minOf { glyphLineClip(layout, it).top },
-            right = last.right,
-            bottom = glyphs.maxOf { glyphLineClip(layout, it).bottom },
-        )
+    if (laidOutWords.isEmpty()) return emptyList()
+    val masks = ArrayList<LyricWordMask>(laidOutWords.size)
+    for (laidOutWord in laidOutWords) {
+        val bounds = laidOutWord.bounds
         val fadeWidth = bounds.height * 0.5f
-        val progress = lyricWordMaskProgress(words[wordIndex], positionMillis)
+        val progress = lyricWordMaskProgress(laidOutWord.word, positionMillis)
         val edgeX = bounds.left + lyricWordMaskEdge(progress, bounds.width, fadeWidth)
         val fadeStartX = edgeX - fadeWidth
         masks += LyricWordMask(
+            wordIndex = laidOutWord.wordIndex,
             bounds = bounds,
             edgeX = edgeX,
             fadeStartX = fadeStartX,

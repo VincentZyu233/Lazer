@@ -6,6 +6,7 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -286,11 +287,19 @@ internal fun amllCharacterMotion(
     val delay = word.startTimeMillis + (visualDuration / 2.5f / count) * characterIndex
     val phase = ((positionMillis - delay) / visualDuration).coerceIn(0f, 1f)
     val emphasis = amllEmphasisEasing(phase)
+    // AMLL layers a longer sine-shaped character float under the bell-shaped emphasis. It starts
+    // 400 ms early, which makes a held syllable rise into focus instead of popping at its timestamp.
+    val floatPhase = (
+        (positionMillis - (delay - 400f / rate)) /
+            (visualDuration * 1.4f).coerceAtLeast(1f)
+        ).coerceIn(0f, 1f)
+    val characterFloat = -sin(floatPhase * kotlin.math.PI.toFloat()) * 0.05f
 
     return AmllCharacterMotion(
         scale = 1f + emphasis * 0.1f * amount,
         offsetXEm = -emphasis * 0.03f * amount * (count / 2f - characterIndex),
-        offsetYEm = amllWordFloatOffsetEm(word, positionMillis, speed) - emphasis * 0.025f * amount,
+        offsetYEm = amllWordFloatOffsetEm(word, positionMillis, speed) +
+            characterFloat - emphasis * 0.025f * amount,
         glowAlpha = emphasis * blur,
         glowRadiusEm = min(0.3f, blur * 0.3f),
     )
@@ -303,7 +312,7 @@ internal fun amllWordFloatOffsetEm(
 ): Float {
     val floatDuration = max(1_000f, word.durationMillis.toFloat()) / speed.scrollMultiplier.toFloat()
     val floatPhase = ((positionMillis - word.startTimeMillis) / floatDuration).coerceIn(0f, 1f)
-    return -(1f - (1f - floatPhase).pow(3)) * 0.05f
+    return -cubicBezierEasing(floatPhase, 0f, 0f, 0.58f, 1f) * 0.05f
 }
 
 internal fun shouldEmphasizeLyricWord(word: TimedLyricWord): Boolean {
