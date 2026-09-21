@@ -366,9 +366,7 @@ private fun AnimatedLyricsViewport(
             )
             val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
             val clickGlowActive = clickGlowTokens.containsKey(line)
-            // A RenderEffect always rasterizes to its owner's bounds, even with clip=false. Do not
-            // put a glowing row inside that invisible blur rectangle while focus/click glow exits.
-            val lineGlowActive = clickGlowActive || (lyricGlowEnabled && focus > 0.001f)
+            val contentBlurRadiusPx = with(density) { blurRadiusDp.dp.toPx() }
             val hasTranslation = !line.translation.isNullOrBlank()
             val textWidthFraction = 1f / 1.04f
             val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
@@ -411,14 +409,8 @@ private fun AnimatedLyricsViewport(
                             scaleX = 0.94f + interludePresence * 0.06f
                             scaleY = 0.92f + interludePresence * 0.08f
                             transformOrigin = TransformOrigin.Center
-                        } else {
-                            val radius = if (lineGlowActive) 0f else blurRadiusDp.dp.toPx()
-                            renderEffect = if (radius > 0.01f) {
-                                BlurEffect(radius, radius, TileMode.Decal)
-                            } else {
-                                null
-                            }
                         }
+                        clip = false
                     }
                     .onSizeChanged { size ->
                         if (measuredRowHeightsPx[line] != size.height) {
@@ -475,6 +467,7 @@ private fun AnimatedLyricsViewport(
                             shadowColor = if (isDark) Color.White else Color.Black,
                             glowEnabled = lyricGlowEnabled,
                             temporaryGlow = clickGlowActive,
+                            contentBlurRadiusPixels = contentBlurRadiusPx,
                             speed = animationSpeed,
                             modifier = Modifier
                                 .fillMaxWidth(textWidthFraction)
@@ -512,6 +505,12 @@ private fun AnimatedLyricsViewport(
                                 scaleX = scale
                                 scaleY = scale
                                 this.alpha = alpha
+                                renderEffect = if (contentBlurRadiusPx > 0.01f) {
+                                    BlurEffect(contentBlurRadiusPx, contentBlurRadiusPx, TileMode.Decal)
+                                } else {
+                                    null
+                                }
+                                clip = false
                                 transformOrigin = TransformOrigin.Center
                             },
                             color = colors.onSurfaceVariant,

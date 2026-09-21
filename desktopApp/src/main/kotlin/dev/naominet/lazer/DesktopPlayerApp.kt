@@ -3268,10 +3268,10 @@ private fun LyricsOverlay(
                                 val alpha = inactiveAlpha * (1f - focus) + focus
                                 val color = lerpColor(colors.onSurfaceVariant, colors.onSurface, focus)
                                 val clickGlowActive = clickGlowTokens.containsKey(line)
-                                // Keep glow outside the bounded inactive-line RenderEffect layer.
-                                // clip=false cannot enlarge a RenderEffect's offscreen raster.
-                                val lineGlowActive = clickGlowActive ||
-                                    (controller.lyricGlowEnabled && focus > 0.001f)
+                                // AMLL blur values are CSS pixels and map directly to desktop
+                                // render-effect pixels; the foreground owns this effect, not the
+                                // row that also contains the unbounded glow sibling.
+                                val contentBlurRadiusPx = blurRadiusDp
                                 val hasTranslation = !line.translation.isNullOrBlank()
                                 val textWidthFraction = 1f / 1.04f
                                 val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
@@ -3298,19 +3298,7 @@ private fun LyricsOverlay(
                                                 scaleY = 0.92f + interludePresence.value * 0.08f
                                                 transformOrigin = TransformOrigin.Center
                                             } else {
-                                                // AMLL's blur values are CSS pixels. They map to
-                                                // Compose render-effect pixels directly on desktop;
-                                                // converting them through dp over-blurred HiDPI text.
-                                                val radius = if (lineGlowActive) 0f else blurRadiusDp
-                                                renderEffect = if (radius > 0.01f) {
-                                                    androidx.compose.ui.graphics.BlurEffect(
-                                                        radius,
-                                                        radius,
-                                                        androidx.compose.ui.graphics.TileMode.Decal,
-                                                    )
-                                                } else {
-                                                    null
-                                                }
+                                                clip = false
                                             }
                                         }
                                         .onSizeChanged { size ->
@@ -3358,6 +3346,7 @@ private fun LyricsOverlay(
                                                 shadowColor = if (controller.isDark) Color.White else Color.Black,
                                                 glowEnabled = controller.lyricGlowEnabled,
                                                 temporaryGlow = clickGlowActive,
+                                                contentBlurRadiusPixels = contentBlurRadiusPx,
                                                 speed = controller.lyricAnimationSpeed,
                                                 modifier = Modifier
                                                     .fillMaxWidth(textWidthFraction)
@@ -3396,6 +3385,15 @@ private fun LyricsOverlay(
                                                         scaleX = scale
                                                         scaleY = scale
                                                         this.alpha = alpha
+                                                        renderEffect = if (contentBlurRadiusPx > 0.01f) {
+                                                            BlurEffect(
+                                                                contentBlurRadiusPx,
+                                                                contentBlurRadiusPx,
+                                                                TileMode.Decal,
+                                                            )
+                                                        } else {
+                                                            null
+                                                        }
                                                         transformOrigin = TransformOrigin.Center
                                                     },
                                                 style = MaterialTheme.typography.bodyMedium.copy(

@@ -25,13 +25,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalDensity
@@ -45,8 +43,6 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnitType
 import androidx.compose.ui.unit.dp
-import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.roundToLong
 
 private val MinimumLyricGlowOverflow = 36.dp
@@ -105,6 +101,7 @@ fun AmllLyricText(
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
     temporaryGlow: Boolean = false,
+    contentBlurRadiusPixels: Float = 0f,
 ) {
     val density = LocalDensity.current
     val lyricEm = if (style.fontSize.type == TextUnitType.Sp) {
@@ -167,9 +164,6 @@ fun AmllLyricText(
     val timedGlyphs = remember(laidOutGlyphs) {
         laidOutGlyphs.filter { it.timing.wordIndex >= 0 }
     }
-    val untimedGlyphs = remember(laidOutGlyphs) {
-        laidOutGlyphs.filter { it.timing.wordIndex < 0 }
-    }
     val laidOutWords = remember(layoutResult, timedGlyphs, words) {
         layoutResult?.let { buildLaidOutWords(it, timedGlyphs, words) }.orEmpty()
     }
@@ -226,7 +220,20 @@ fun AmllLyricText(
         }
         BasicText(
             text = text,
-            modifier = Modifier.fillMaxWidth().drawWithContent {
+            modifier = Modifier
+                .fillMaxWidth()
+                // Blur only the foreground text. The glow is a sibling layer with its own
+                // overflow gutter, so focus blur can animate continuously without clipping it.
+                .graphicsLayer {
+                    val radius = contentBlurRadiusPixels.coerceAtLeast(0f)
+                    renderEffect = if (radius > 0.01f) {
+                        BlurEffect(radius, radius, TileMode.Decal)
+                    } else {
+                        null
+                    }
+                    clip = false
+                }
+                .drawWithContent {
                 val measured = layoutResult
                 if (measured == null) {
                     drawContent()
@@ -237,13 +244,9 @@ fun AmllLyricText(
                 } else {
                     drawAmllGlyphs(
                         layout = measured,
-                        untimedGlyphs = untimedGlyphs,
-                        laidOutWords = laidOutWords,
-                        words = words,
+                        hasTimedGlyphs = timedGlyphs.isNotEmpty(),
                         wordMasks = maskWords(),
-                        positionMillis = animatedPosition.value.roundToLong(),
                         color = color,
-                        speed = speed,
                         effectStrength = effectStrength.value,
                     )
                 }
@@ -261,15 +264,12 @@ fun AmllLyricText(
 private data class LaidOutLyricGlyph(
     val timing: TimedLyricGlyph,
     val bounds: Rect,
-    val path: Path,
 )
 
 private data class LaidOutLyricWord(
     val wordIndex: Int,
     val word: TimedLyricWord,
     val bounds: Rect,
-    val glyphs: List<LaidOutLyricGlyph>,
-    val path: Path,
 )
 
 private data class LyricWordMask(
@@ -288,13 +288,7 @@ private fun buildLaidOutGlyphs(
         if (!glyph.isVisible || glyph.startOffset >= layout.layoutInput.text.length) continue
         val bounds = layout.getBoundingBox(glyph.startOffset)
         if (bounds.width <= 0.01f || bounds.height <= 0.01f) continue
-        add(
-            LaidOutLyricGlyph(
-                timing = glyph,
-                bounds = bounds,
-                path = layout.getPathForRange(glyph.startOffset, glyph.endOffset),
-            ),
-        )
+        add(LaidOutLyricGlyph(timing = glyph, bounds = bounds))
     }
 }
 
@@ -317,8 +311,6 @@ private fun buildLaidOutWords(
                     right = glyphs.maxOf { it.bounds.right },
                     bottom = glyphs.maxOf { glyphLineClip(layout, it).bottom },
                 ),
-                glyphs = glyphs,
-                path = Path().apply { glyphs.forEach { addPath(it.path) } },
             ),
         )
     }
@@ -372,120 +364,15 @@ private fun glyphLineClip(layout: TextLayoutResult, glyph: LaidOutLyricGlyph): R
 
 private fun DrawScope.drawAmllGlyphs(
     layout: TextLayoutResult,
-    untimedGlyphs: List<LaidOutLyricGlyph>,
-    laidOutWords: List<LaidOutLyricWord>,
-    words: List<TimedLyricWord>,
+    hasTimedGlyphs: Boolean,
     wordMasks: List<LyricWordMask>,
-    positionMillis: Long,
     color: Color,
-    speed: LyricAnimationSpeed,
     effectStrength: Float,
 ) {
     val effect = effectStrength.coerceIn(0f, 1f)
-    val masksByWord = wordMasks.associateBy(LyricWordMask::wordIndex)
-    for (laidOutWord in laidOutWords) {
-        val mask = masksByWord[laidOutWord.wordIndex]
-        if (shouldEmphasizeLyricWord(laidOutWord.word)) {
-            for (laidOutGlyph in laidOutWord.glyphs) {
-                val glyph = laidOutGlyph.timing
-                drawAmllFragment(
-                    layout = layout,
-                    path = laidOutGlyph.path,
-                    bounds = laidOutGlyph.bounds,
-                    motion = amllCharacterMotion(
-                        word = laidOutWord.word,
-                        positionMillis = positionMillis,
-                        characterIndex = glyph.indexInWord,
-                        characterCount = glyph.characterCount,
-                        isLastWord = laidOutWord.wordIndex == words.lastIndex,
-                        speed = speed,
-                    ),
-                    mask = mask,
-                    color = color,
-                    effect = effect,
-                )
-            }
-        } else {
-            drawAmllFragment(
-                layout = layout,
-                path = laidOutWord.path,
-                bounds = laidOutWord.bounds,
-                motion = AmllCharacterMotion(
-                    scale = 1f,
-                    offsetXEm = 0f,
-                    offsetYEm = amllWordFloatOffsetEm(laidOutWord.word, positionMillis, speed),
-                    glowAlpha = 0f,
-                    glowRadiusEm = 0f,
-                ),
-                mask = mask,
-                color = color,
-                effect = effect,
-            )
-        }
-    }
-    for (glyph in untimedGlyphs) {
-        drawAmllFragment(
-            layout = layout,
-            path = glyph.path,
-            bounds = glyph.bounds,
-            motion = AmllCharacterMotion(1f, 0f, 0f, 0f, 0f),
-            mask = null,
-            color = color,
-            effect = effect,
-        )
-    }
-}
-
-private fun DrawScope.drawAmllFragment(
-    layout: TextLayoutResult,
-    path: Path,
-    bounds: Rect,
-    motion: AmllCharacterMotion,
-    mask: LyricWordMask?,
-    color: Color,
-    effect: Float,
-) {
-    val emPixels = max(bounds.height, 1f)
-    val scale = 1f + (motion.scale - 1f) * effect
-    val offsetX = motion.offsetXEm * emPixels * effect
-    val offsetY = motion.offsetYEm * emPixels * effect
-    val pivot = bounds.center
-
-    // Do not emulate AMLL's per-character CSS text-shadow with drawText(shadow = ...): Compose
-    // applies that shadow to the complete TextLayoutResult before clipping. Repeating it for every
-    // glyph accumulates the whole line into opaque blurred blocks on Android. The dedicated,
-    // expanded lyric glow layer above owns glow; this pass only paints the moving glyph itself.
-    val leftMask = mask?.foregroundAlphaAt(bounds.left) ?: 1f
-    val rightMask = mask?.foregroundAlphaAt(bounds.right) ?: 1f
-    val base = lyricBaseMaskAlpha()
-    val leftAlpha = 1f - effect * (1f - (base + (1f - base) * leftMask))
-    val rightAlpha = 1f - effect * (1f - (base + (1f - base) * rightMask))
-    val foreground: Brush = if (abs(leftAlpha - rightAlpha) < 0.001f) {
-        SolidColor(color.copy(alpha = color.alpha * leftAlpha))
-    } else {
-        Brush.horizontalGradient(
-            colors = listOf(
-                color.copy(alpha = color.alpha * leftAlpha),
-                color.copy(alpha = color.alpha * rightAlpha),
-            ),
-            startX = bounds.left,
-            endX = bounds.right,
-        )
-    }
-    withTransform({
-        translate(offsetX, offsetY)
-        scale(scale, scale, pivot)
-    }) {
-        clipPath(path) {
-            drawText(textLayoutResult = layout, brush = foreground)
-        }
-    }
-}
-
-private fun LyricWordMask.foregroundAlphaAt(x: Float): Float = when {
-    fullyRevealed || x <= fadeStartX -> 1f
-    x >= edgeX -> 0f
-    else -> ((edgeX - x) / (edgeX - fadeStartX).coerceAtLeast(0.01f)).coerceIn(0f, 1f)
+    val dimColor = color.copy(alpha = color.alpha * (1f - effect * (1f - lyricBaseMaskAlpha())))
+    drawText(textLayoutResult = layout, color = dimColor)
+    if (hasTimedGlyphs) drawTextInWordMasks(layout, wordMasks, color)
 }
 
 /** Paint AMLL's bright side over the dim base text, including the moving half-em fade band. */
