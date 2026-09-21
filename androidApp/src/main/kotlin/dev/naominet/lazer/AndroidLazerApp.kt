@@ -3812,7 +3812,14 @@ private fun NowPlayingPage(
                                 glass = glass,
                                 size = 40.dp,
                             ) { Icon(Icons.Filled.Close, null, tint = colors.onSurface) }
-                            Spacer(Modifier.width(8.dp))
+                            Spacer(Modifier.weight(1f))
+                            IconButton(onClick = onToggleLiked, modifier = Modifier.size(44.dp)) {
+                                Icon(
+                                    if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                    if (isLiked) tr("player.like.remove") else tr("player.like.add"),
+                                    tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
+                                )
+                            }
                         }
                         MobileArtwork(
                             track.coverUrl,
@@ -3851,7 +3858,10 @@ private fun NowPlayingPage(
                             }
                             Row(
                                 Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                horizontalArrangement = Arrangement.spacedBy(
+                                    14.dp,
+                                    Alignment.CenterHorizontally,
+                                ),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 IconButton(onClick = onPrevious, modifier = Modifier.size(44.dp)) {
@@ -3870,13 +3880,6 @@ private fun NowPlayingPage(
                                 }
                                 IconButton(onClick = onNext, modifier = Modifier.size(44.dp)) {
                                     Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(27.dp))
-                                }
-                                IconButton(onClick = onToggleLiked, modifier = Modifier.size(44.dp)) {
-                                    Icon(
-                                        if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                                        if (isLiked) tr("player.like.remove") else tr("player.like.add"),
-                                        tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
-                                    )
                                 }
                             }
                         }
@@ -3970,6 +3973,15 @@ private fun NowPlayingPage(
                                 MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
                             )
                         }
+                        // The liked state belongs to the song, so it stays beside its title
+                        // instead of travelling with the transport controls below.
+                        IconButton(onClick = onToggleLiked, modifier = Modifier.size(44.dp)) {
+                            Icon(
+                                if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                if (isLiked) tr("player.like.remove") else tr("player.like.add"),
+                                tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
+                            )
+                        }
                     }
                     // Both modes share this entire content area; no invisible cover spacer steals
                     // lyric height. The target slot is measured independently of animation progress.
@@ -4034,7 +4046,10 @@ private fun NowPlayingPage(
                         Spacer(Modifier.height(8.dp))
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            horizontalArrangement = Arrangement.spacedBy(
+                                18.dp,
+                                Alignment.CenterHorizontally,
+                            ),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             IconButton(onClick = onPrevious, modifier = Modifier.size(48.dp)) {
@@ -4056,13 +4071,6 @@ private fun NowPlayingPage(
                             }
                             IconButton(onClick = onNext, modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(30.dp))
-                            }
-                            IconButton(onClick = onToggleLiked, modifier = Modifier.size(48.dp)) {
-                                Icon(
-                                    if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                                    if (isLiked) tr("player.like.remove") else tr("player.like.add"),
-                                    tint = if (isLiked) colors.primary else colors.onSurfaceVariant,
-                                )
                             }
                         }
                         snapshot.message?.let { message ->
