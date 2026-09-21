@@ -11,11 +11,25 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.model.Artist
+import dev.naominet.lazer.gateway.model.LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
+import dev.naominet.lazer.gateway.model.ListenTogetherInvite
+import dev.naominet.lazer.gateway.model.ListenTogetherParticipant
+import dev.naominet.lazer.gateway.model.ListenTogetherPlaybackState
+import dev.naominet.lazer.gateway.model.ListenTogetherPlaylistVersion
+import dev.naominet.lazer.gateway.model.ListenTogetherRoomKind
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.QrCheckResponse
 import dev.naominet.lazer.gateway.model.Song
 import dev.naominet.lazer.gateway.model.SongUrl
 import dev.naominet.lazer.gateway.model.UserProfile
+import dev.naominet.lazer.gateway.model.incrementListenTogetherVersion
+import dev.naominet.lazer.gateway.model.isListenTogetherClosed
+import dev.naominet.lazer.gateway.model.listenTogetherCreatedRoomId
+import dev.naominet.lazer.gateway.model.listenTogetherPlaybackState
+import dev.naominet.lazer.gateway.model.listenTogetherRoomStatus
+import dev.naominet.lazer.gateway.model.mergeListenTogetherVersions
+import dev.naominet.lazer.gateway.model.parseListenTogetherInvite
+import dev.naominet.lazer.gateway.model.requireListenTogetherSuccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,7 +46,9 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 data class TrackItem(
@@ -101,6 +117,31 @@ private data class DesktopCachedBootstrap(
     val recentTracks: List<TrackItem>,
     val library: DesktopCachedLibrary?,
 )
+
+enum class DesktopListenTogetherConnection {
+    CONNECTING,
+    CONNECTED,
+    RECONNECTING,
+}
+
+data class DesktopListenTogetherState(
+    val roomId: String,
+    val inviterId: Long,
+    val isHost: Boolean,
+    val connection: DesktopListenTogetherConnection = DesktopListenTogetherConnection.CONNECTING,
+    val participants: List<ListenTogetherParticipant> = emptyList(),
+    val remoteTrackId: Long? = null,
+)
+
+private data class DesktopListenTogetherPlaybackKey(
+    val trackId: Long?,
+    val isPlaying: Boolean,
+)
+
+private const val LISTEN_TOGETHER_REFRESH_MILLIS = 3_000L
+private const val LISTEN_TOGETHER_WATCH_MILLIS = 700L
+private const val LISTEN_TOGETHER_HEARTBEAT_MILLIS = 10_000L
+private const val LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS = 4_000L
 
 class DesktopPlayerController(
     private val gateway: NeteaseMusicGateway = createDesktopGateway(),
@@ -347,6 +388,34 @@ class DesktopPlayerController(
         private set
     private var activeRequests by mutableIntStateOf(0)
 
+    var isListenTogetherVisible by mutableStateOf(false)
+        private set
+    var listenTogether by mutableStateOf<DesktopListenTogetherState?>(null)
+        private set
+    var isListenTogetherBusy by mutableStateOf(false)
+        private set
+    var listenTogetherError by mutableStateOf<String?>(null)
+        private set
+    private var listenTogetherActionJob: Job? = null
+    private var listenTogetherRefreshJob: Job? = null
+    private var listenTogetherWatchJob: Job? = null
+    private var listenTogetherSequence = 1L
+    private var listenTogetherPlaylistState: ListenTogetherPlaybackState? = null
+    private var listenTogetherVersions: List<ListenTogetherPlaylistVersion> = emptyList()
+    private var lastReportedQueueIds: List<Long> = emptyList()
+    private var lastAppliedRemoteSequence = -1L
+    private var pendingRemotePlayback: DesktopListenTogetherPlaybackKey? = null
+    private var lastStablePlayback: DesktopListenTogetherPlaybackKey? = null
+    private var lastHeartbeatMillis = 0L
+
+    /** Room link friends open in the official app; a fresh room still has no song of its own. */
+    val listenTogetherShareUrl: String?
+        get() {
+            val room = listenTogether ?: return null
+            val songId = nowPlaying?.id ?: room.remoteTrackId ?: LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
+            return ListenTogetherInvite(roomId = room.roomId, inviterId = room.inviterId).shareUrl(songId)
+        }
+
     fun start() {
         if (started) return
         started = true
@@ -542,6 +611,9 @@ class DesktopPlayerController(
         paletteJob?.cancel()
         qrLoginJob?.cancel()
         maintenanceJob?.cancel()
+        listenTogetherActionJob?.cancel()
+        listenTogetherRefreshJob?.cancel()
+        listenTogetherWatchJob?.cancel()
         activePlaybackToken.set(0L)
         progressEvents.close()
         progressCollectorJob.cancel()
@@ -628,7 +700,10 @@ class DesktopPlayerController(
         updateSearchQuery(suggestion)
     }
 
-    fun playTrack(track: TrackItem) {
+    fun playTrack(track: TrackItem) = playTrackAt(track, positionMillis = 0L, shouldPlay = true)
+
+    /** Starts a track at an absolute position, which is how a room hands playback over. */
+    fun playTrackAt(track: TrackItem, positionMillis: Long, shouldPlay: Boolean) {
         nowPlaying = track
         progress = 0f
         bufferedProgress = 0f
@@ -646,7 +721,12 @@ class DesktopPlayerController(
             statusOverride = SystemMediaPlaybackStatus.STOPPED,
             forcePosition = true,
         )
-        resolveAndPlay(track)
+        val resumeProgress = if (track.durationMillis > 0L) {
+            positionMillis.toFloat() / track.durationMillis.toFloat()
+        } else {
+            0f
+        }
+        resolveAndPlay(track, resumeProgress = resumeProgress, playWhenReady = shouldPlay)
     }
 
     fun openLyrics() {
@@ -848,6 +928,9 @@ class DesktopPlayerController(
             startAudioPlayback(url, track, targetProgress, playWhenReady = playWhenReady)
         }
         publishSystemMedia(forcePosition = true)
+        if (listenTogether != null) {
+            scope.launch { runCatching { reportPlaybackToRoom("SEEK") } }
+        }
     }
 
     /** Browse playlists shown in the library strip / sidebar, without the dedicated liked entry. */
@@ -1320,6 +1403,317 @@ class DesktopPlayerController(
                 endRequest()
             }
         }
+    }
+
+    fun openListenTogether() {
+        listenTogetherError = null
+        isListenTogetherVisible = true
+    }
+
+    fun closeListenTogether() {
+        isListenTogetherVisible = false
+        listenTogetherError = null
+    }
+
+    fun createListenTogetherRoom(kind: ListenTogetherRoomKind) {
+        val user = currentUser
+        if (user == null) {
+            openLogin()
+            return
+        }
+        listenTogetherActionJob?.cancel()
+        listenTogetherActionJob = scope.launch {
+            isListenTogetherBusy = true
+            listenTogetherError = null
+            runCatching {
+                val response = when (kind) {
+                    ListenTogetherRoomKind.Duo -> gateway.listenTogetherCreateRoom()
+                    ListenTogetherRoomKind.Multi -> gateway.listenTogetherCreateMultiRoom(
+                        songId = nowPlaying?.id ?: error("no track to share"),
+                        nextSongIds = upcomingRoomTrackIds(),
+                        playedTimeMillis = positionMillis,
+                    )
+                }
+                requireListenTogetherSuccess(response)
+                val roomId = listenTogetherCreatedRoomId(response) ?: error("room id missing")
+                requireListenTogetherSuccess(gateway.listenTogetherRoomCheck(roomId))
+                listenTogether = DesktopListenTogetherState(
+                    roomId = roomId,
+                    inviterId = user.userId,
+                    isHost = true,
+                )
+                resetListenTogetherSession()
+                runCatching { reportPlaybackToRoom("GOTO", forceQueue = true) }
+                startListenTogetherRefresh()
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                listenTogetherError = tr("listen_together.create_fail")
+            }
+            isListenTogetherBusy = false
+        }
+    }
+
+    /** Joins from a pasted share link, a copied message, or a bare "roomId inviterId" pair. */
+    fun joinListenTogether(invitation: String) {
+        if (currentUser == null) {
+            openLogin()
+            return
+        }
+        val invite = parseListenTogetherInvite(invitation)
+        if (invite == null) {
+            listenTogetherError = tr("listen_together.invalid_invite")
+            return
+        }
+        isListenTogetherVisible = true
+        listenTogetherActionJob?.cancel()
+        listenTogetherActionJob = scope.launch {
+            isListenTogetherBusy = true
+            listenTogetherError = null
+            runCatching {
+                requireListenTogetherSuccess(gateway.listenTogetherAccept(invite.roomId, invite.inviterId))
+                requireListenTogetherSuccess(gateway.listenTogetherRoomCheck(invite.roomId))
+                listenTogether = DesktopListenTogetherState(
+                    roomId = invite.roomId,
+                    inviterId = invite.inviterId,
+                    isHost = false,
+                )
+                resetListenTogetherSession()
+                startListenTogetherRefresh()
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                listenTogetherError = tr("listen_together.join_fail")
+            }
+            isListenTogetherBusy = false
+        }
+    }
+
+    fun endListenTogetherRoom() {
+        val roomId = listenTogether?.roomId ?: return
+        listenTogetherActionJob?.cancel()
+        listenTogetherActionJob = scope.launch {
+            isListenTogetherBusy = true
+            runCatching { requireListenTogetherSuccess(gateway.listenTogetherEnd(roomId)) }
+                .onSuccess {
+                    clearListenTogetherSession()
+                    isListenTogetherVisible = false
+                    statusMessage = tr("listen_together.ended")
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    listenTogetherError = tr("listen_together.end_fail")
+                }
+            isListenTogetherBusy = false
+        }
+    }
+
+    /**
+     * Polls the room for its people, playlist and play command, and keeps the upstream informed of
+     * this client's own position so late joiners can catch up.
+     */
+    private fun startListenTogetherRefresh() {
+        listenTogetherRefreshJob?.cancel()
+        listenTogetherRefreshJob = scope.launch {
+            var missingRoomCount = 0
+            while (isActive && listenTogether != null) {
+                val room = listenTogether ?: break
+                try {
+                    val statusResponse = gateway.listenTogetherStatus()
+                    if (isListenTogetherClosed(statusResponse)) {
+                        closeRoomRemotely()
+                        break
+                    }
+                    requireListenTogetherSuccess(statusResponse)
+                    val status = listenTogetherRoomStatus(statusResponse)
+                    if (status?.inRoom == false) {
+                        missingRoomCount += 1
+                        if (missingRoomCount >= 2) {
+                            closeRoomRemotely()
+                            break
+                        }
+                    } else {
+                        missingRoomCount = 0
+                    }
+                    val playlistResponse = gateway.listenTogetherPlaylist(room.roomId)
+                    if (isListenTogetherClosed(playlistResponse)) {
+                        closeRoomRemotely()
+                        break
+                    }
+                    requireListenTogetherSuccess(playlistResponse)
+                    val remote = listenTogetherPlaybackState(playlistResponse)
+                    if (remote != null) {
+                        listenTogetherPlaylistState = remote
+                        listenTogetherVersions = mergeListenTogetherVersions(
+                            listenTogetherVersions,
+                            remote.versions,
+                        )
+                        listenTogetherSequence = maxOf(listenTogetherSequence, remote.clientSequence + 1L)
+                        applyRemotePlayback(remote)
+                    }
+                    listenTogether = room.copy(
+                        connection = DesktopListenTogetherConnection.CONNECTED,
+                        participants = status?.participants ?: room.participants,
+                        remoteTrackId = remote?.targetSongId?.takeIf { it > 0L } ?: room.remoteTrackId,
+                    )
+
+                    val track = nowPlaying
+                    val now = System.currentTimeMillis()
+                    if (track != null && now - lastHeartbeatMillis >= LISTEN_TOGETHER_HEARTBEAT_MILLIS) {
+                        val heartbeat = gateway.listenTogetherHeartbeat(
+                            roomId = room.roomId,
+                            songId = track.id,
+                            playStatus = if (isPlaying) "PLAY" else "PAUSE",
+                            progress = positionMillis,
+                        )
+                        if (isListenTogetherClosed(heartbeat)) {
+                            closeRoomRemotely()
+                            break
+                        }
+                        requireListenTogetherSuccess(heartbeat)
+                        lastHeartbeatMillis = now
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    listenTogether = room.copy(connection = DesktopListenTogetherConnection.RECONNECTING)
+                }
+                delay(LISTEN_TOGETHER_REFRESH_MILLIS)
+            }
+        }
+        watchListenTogetherPlayback()
+    }
+
+    private fun closeRoomRemotely() {
+        clearListenTogetherSession()
+        statusMessage = tr("listen_together.closed_remote")
+    }
+
+    /** Reports local play state changes the room has to hear about, without echoing remote ones. */
+    private fun watchListenTogetherPlayback() {
+        listenTogetherWatchJob?.cancel()
+        listenTogetherWatchJob = scope.launch {
+            while (isActive) {
+                val key = DesktopListenTogetherPlaybackKey(nowPlaying?.id, isPlaying)
+                val previous = lastStablePlayback
+                lastStablePlayback = key
+                if (pendingRemotePlayback == key) {
+                    pendingRemotePlayback = null
+                } else if (listenTogether != null && key.trackId != null && playJob?.isActive != true) {
+                    when {
+                        previous != null && previous.trackId != key.trackId ->
+                            runCatching { reportPlaybackToRoom("GOTO", forceQueue = true) }
+                        previous != null && previous.isPlaying != key.isPlaying ->
+                            runCatching { reportPlaybackToRoom(if (key.isPlaying) "PLAY" else "PAUSE") }
+                    }
+                }
+                delay(LISTEN_TOGETHER_WATCH_MILLIS)
+            }
+        }
+    }
+
+    private suspend fun reportPlaybackToRoom(commandType: String, forceQueue: Boolean = false) {
+        val room = listenTogether ?: return
+        val track = nowPlaying ?: return
+        val queue = effectiveQueue().ifEmpty { listOf(track) }
+        val queueIds = queue.map(TrackItem::id).distinct()
+        if (forceQueue || queueIds != lastReportedQueueIds) {
+            val userId = currentUser?.userId ?: return
+            val versions = incrementListenTogetherVersion(listenTogetherVersions, userId)
+            requireListenTogetherSuccess(
+                gateway.listenTogetherSyncList(
+                    roomId = room.roomId,
+                    commandType = "REPLACE",
+                    versions = versions,
+                    playMode = listenTogetherPlaylistState?.playMode ?: "ORDER_LOOP",
+                    anchorSongId = null,
+                    anchorPosition = -1,
+                    randomList = queueIds,
+                    displayList = queueIds,
+                ),
+            )
+            listenTogetherVersions = versions
+            lastReportedQueueIds = queueIds
+            delay(400L)
+        }
+        requireListenTogetherSuccess(
+            gateway.listenTogetherPlayCommand(
+                roomId = room.roomId,
+                commandType = commandType,
+                progress = positionMillis,
+                playStatus = if (isPlaying) "PLAY" else "PAUSE",
+                formerSongId = listenTogetherPlaylistState?.targetSongId?.takeIf { it > 0L } ?: -1L,
+                targetSongId = track.id,
+                clientSeq = listenTogetherSequence++,
+            ),
+        )
+    }
+
+    private suspend fun applyRemotePlayback(remote: ListenTogetherPlaybackState) {
+        val targetId = remote.targetSongId.takeIf { it > 0L } ?: return
+        if (remote.clientSequence <= lastAppliedRemoteSequence) return
+        lastAppliedRemoteSequence = remote.clientSequence
+        val shouldPlay = remote.playStatus.equals("PLAY", ignoreCase = true)
+        val local = nowPlaying
+        if (local?.id == targetId && isPlaying == shouldPlay &&
+            abs(positionMillis - remote.progressMillis) < LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS
+        ) {
+            return
+        }
+        pendingRemotePlayback = DesktopListenTogetherPlaybackKey(targetId, shouldPlay)
+        if (local?.id != targetId) {
+            val ids = remote.trackIds.ifEmpty { listOf(targetId) }
+            val tracks = loadRoomTracks(ids)
+            val target = tracks.firstOrNull { it.id == targetId } ?: return
+            playTrackAt(target, remote.progressMillis, shouldPlay)
+            return
+        }
+        if (abs(positionMillis - remote.progressMillis) >= LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS &&
+            remote.commandType.uppercase() in setOf("GOTO", "SEEK")
+        ) {
+            seekToLyricTime(remote.progressMillis)
+        }
+        when {
+            shouldPlay != isPlaying -> togglePlayPause()
+            else -> pendingRemotePlayback = null
+        }
+    }
+
+    private suspend fun loadRoomTracks(ids: List<Long>): List<TrackItem> {
+        val known = (activePlaylistTracks + activeArtistTracks + recentTracks + likedTracks + searchResults)
+            .associateBy(TrackItem::id)
+            .toMutableMap()
+        known[nowPlaying?.id]?.let { known[it.id] = it }
+        ids.filterNot(known::containsKey).chunked(200).forEach { missing ->
+            gateway.songDetails(missing).songs.map { it.toTrackItem() }.forEach { known[it.id] = it }
+        }
+        return ids.mapNotNull(known::get).distinctBy(TrackItem::id)
+    }
+
+    private fun upcomingRoomTrackIds(): List<Long> {
+        val currentId = nowPlaying?.id ?: return emptyList()
+        val queue = effectiveQueue()
+        val index = queue.indexOfFirst { it.id == currentId }
+        if (index < 0) return emptyList()
+        return queue.drop(index + 1).map(TrackItem::id).distinct()
+    }
+
+    private fun resetListenTogetherSession() {
+        listenTogetherSequence = 1L
+        listenTogetherPlaylistState = null
+        listenTogetherVersions = emptyList()
+        lastReportedQueueIds = emptyList()
+        lastAppliedRemoteSequence = -1L
+        pendingRemotePlayback = null
+        lastStablePlayback = DesktopListenTogetherPlaybackKey(nowPlaying?.id, isPlaying)
+        lastHeartbeatMillis = 0L
+    }
+
+    private fun clearListenTogetherSession() {
+        listenTogetherRefreshJob?.cancel()
+        listenTogetherRefreshJob = null
+        listenTogetherWatchJob?.cancel()
+        listenTogetherWatchJob = null
+        listenTogether = null
+        resetListenTogetherSession()
     }
 
     /**

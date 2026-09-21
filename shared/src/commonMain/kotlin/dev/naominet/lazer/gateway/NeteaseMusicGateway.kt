@@ -7,6 +7,7 @@ import dev.naominet.lazer.gateway.model.BannerResponse
 import dev.naominet.lazer.gateway.model.DailyPlaylistsResponse
 import dev.naominet.lazer.gateway.model.DailySongsResponse
 import dev.naominet.lazer.gateway.model.LikedSongIdsResponse
+import dev.naominet.lazer.gateway.model.ListenTogetherPlaylistVersion
 import dev.naominet.lazer.gateway.model.LoginResponse
 import dev.naominet.lazer.gateway.model.LoginStatusResponse
 import dev.naominet.lazer.gateway.model.LyricResponse
@@ -350,14 +351,19 @@ class NeteaseMusicGateway(
      * Prefers `/lyric/new`, but falls back when that successful response contains no timed lyric.
      * The Gateway documentation explicitly notes that some songs do not provide the `yrc` field;
      * a transport-only fallback misses that normal response shape.
+     *
+     * `translationExpected` marks a song that carries a translated title, so bilingual songs get a
+     * second chance at the translated line without every plain song paying for an extra request.
      */
-    suspend fun preferredLyrics(id: Long): LyricResponse {
+    suspend fun preferredLyrics(id: Long, translationExpected: Boolean = false): LyricResponse {
         val enhanced = runCatching { wordByWordLyrics(id) }.getOrNull()
-        if (enhanced?.pureMusic == true || enhanced?.hasTimedLyricPayload() == true) return enhanced
-
-        return runCatching { lyrics(id) }.getOrElse { regularError ->
-            enhanced ?: throw regularError
+        if (enhanced?.pureMusic == true || enhanced?.hasTimedLyricPayload() != true) {
+            return runCatching { lyrics(id) }.getOrElse { regularError -> enhanced ?: throw regularError }
         }
+        if (!translationExpected || enhanced.tlyric?.lyric?.isNotBlank() == true) return enhanced
+        val regular = runCatching { lyrics(id) }.getOrNull() ?: return enhanced
+        return regular.tlyric?.takeIf { !it.lyric.isNullOrBlank() }?.let { enhanced.copy(tlyric = it) }
+            ?: enhanced
     }
 
     suspend fun playlistDetail(
@@ -451,50 +457,101 @@ class NeteaseMusicGateway(
 
     suspend fun listenTogetherCreateRoom(): JsonObject = postRaw("/listentogether/room/create").jsonObject
 
-    suspend fun listenTogetherAccept(roomId: Long, inviterId: Long): JsonObject = postRaw(
+    /** Opens a room that accepts more than one participant, seeded with the current queue. */
+    suspend fun listenTogetherCreateMultiRoom(
+        songId: Long,
+        nextSongIds: List<Long> = emptyList(),
+        playedTimeMillis: Long = 0L,
+    ): JsonObject = postRaw(
+        "/listentogether/multi/room/create",
+        parametersOf(
+            "id" to songId,
+            "playedTime" to playedTimeMillis.coerceAtLeast(0L),
+            "nextSongIds" to nextSongIds.joinToString(","),
+        ),
+    ).jsonObject
+
+    suspend fun listenTogetherAccept(roomId: String, inviterId: Long): JsonObject = postRaw(
         "/listentogether/accept",
         parametersOf("roomId" to roomId, "inviterId" to inviterId),
     ).jsonObject
 
-    suspend fun listenTogetherRoomCheck(roomId: Long): JsonObject = postRaw(
+    suspend fun listenTogetherRoomCheck(roomId: String): JsonObject = postRaw(
         "/listentogether/room/check", parametersOf("roomId" to roomId),
     ).jsonObject
 
     suspend fun listenTogetherStatus(): JsonObject = getRaw("/listentogether/status").jsonObject
 
-    suspend fun listenTogetherEnd(roomId: Long): JsonObject = postRaw(
+    suspend fun listenTogetherEnd(roomId: String): JsonObject = postRaw(
         "/listentogether/end", parametersOf("roomId" to roomId),
     ).jsonObject
 
-    suspend fun listenTogetherHeartbeat(roomId: Long, songId: Long, playStatus: String, progress: Long): JsonObject = postRaw(
+    suspend fun listenTogetherHeartbeat(roomId: String, songId: Long, playStatus: String, progress: Long): JsonObject = postRaw(
         "/listentogether/heartbeat", parametersOf(
             "roomId" to roomId, "songId" to songId, "playStatus" to playStatus, "progress" to progress,
         ),
     ).jsonObject
 
     suspend fun listenTogetherPlayCommand(
-        roomId: Long,
+        roomId: String,
         commandType: String,
         progress: Long,
         playStatus: String,
         formerSongId: Long,
         targetSongId: Long,
         clientSeq: Long,
-    ): JsonObject = postRaw("/listentogether/play/command", parametersOf(
-        "roomId" to roomId, "commandType" to commandType, "progress" to progress,
-        "playStatus" to playStatus, "formerSongId" to formerSongId, "targetSongId" to targetSongId,
-        "clientSeq" to clientSeq,
-    )).jsonObject
+    ): JsonObject {
+        val commandInfo = buildJsonObject {
+            put("commandType", commandType)
+            put("progress", progress.coerceAtLeast(0L))
+            put("playStatus", playStatus)
+            put("formerSongId", formerSongId)
+            put("targetSongId", targetSongId)
+            put("clientSeq", clientSeq.coerceAtLeast(1L))
+        }.toString()
+        return postRaw(
+            "/listentogether/play/command",
+            parametersOf("roomId" to roomId, "commandInfo" to commandInfo),
+        ).jsonObject
+    }
 
     suspend fun listenTogetherSyncList(
-        roomId: Long, commandType: String, userId: Long, version: Long,
-        randomList: String, displayList: String,
-    ): JsonObject = postRaw("/listentogether/sync/list/command", parametersOf(
-        "roomId" to roomId, "commandType" to commandType, "userId" to userId,
-        "version" to version, "randomList" to randomList, "displayList" to displayList,
-    )).jsonObject
+        roomId: String,
+        commandType: String,
+        versions: List<ListenTogetherPlaylistVersion>,
+        playMode: String,
+        anchorSongId: Long?,
+        anchorPosition: Int,
+        randomList: List<Long>,
+        displayList: List<Long>,
+    ): JsonObject {
+        val playlistParam = buildJsonObject {
+            put("commandType", commandType)
+            put("version", kotlinx.serialization.json.buildJsonArray {
+                versions.forEach { item ->
+                    add(buildJsonObject {
+                        put("userId", item.userId)
+                        put("version", item.version)
+                    })
+                }
+            })
+            put("playMode", playMode)
+            put("anchorSongId", anchorSongId?.toString().orEmpty())
+            put("anchorPosition", anchorPosition)
+            put("randomList", kotlinx.serialization.json.buildJsonArray {
+                randomList.forEach { add(kotlinx.serialization.json.JsonPrimitive(it.toString())) }
+            })
+            put("displayList", kotlinx.serialization.json.buildJsonArray {
+                displayList.forEach { add(kotlinx.serialization.json.JsonPrimitive(it.toString())) }
+            })
+        }.toString()
+        return postRaw(
+            "/listentogether/sync/list/command",
+            parametersOf("roomId" to roomId, "playlistParam" to playlistParam),
+        ).jsonObject
+    }
 
-    suspend fun listenTogetherPlaylist(roomId: Long): JsonObject = postRaw(
+    suspend fun listenTogetherPlaylist(roomId: String): JsonObject = postRaw(
         "/listentogether/sync/playlist/get", parametersOf("roomId" to roomId),
     ).jsonObject
 

@@ -347,6 +347,56 @@ class NeteaseMusicGatewayTest {
     }
 
     @Test
+    fun `preferred lyrics borrow the translated line for a bilingual song`() = runTest {
+        val requestedPaths = mutableListOf<String>()
+        val client = HttpClient(MockEngine { request ->
+            requestedPaths += request.url.encodedPath
+            when (request.url.encodedPath) {
+                "/eapi/song/lyric/v1" -> respond(
+                    content = """{"code":200,"yrc":{"lyric":"[1000,500](1000,500,0)一句"}}""",
+                    headers = jsonHeaders(),
+                )
+                "/eapi/song/lyric" -> respond(
+                    content = """{"code":200,"tlyric":{"lyric":"[00:01.00]one line"}}""",
+                    headers = jsonHeaders(),
+                )
+                else -> error("Unexpected route: ${request.url.encodedPath}")
+            }
+        })
+
+        val response = gateway(client).preferredLyrics(42, translationExpected = true)
+
+        assertEquals("[1000,500](1000,500,0)一句", response.yrc?.lyric)
+        assertEquals("[00:01.00]one line", response.tlyric?.lyric)
+        assertEquals(listOf("/eapi/song/lyric/v1", "/eapi/song/lyric"), requestedPaths)
+    }
+
+    @Test
+    fun `preferred lyrics ask twice only when a translation is expected`() = runTest {
+        val requestedPaths = mutableListOf<String>()
+        val client = HttpClient(MockEngine { request ->
+            requestedPaths += request.url.encodedPath
+            when (request.url.encodedPath) {
+                "/eapi/song/lyric/v1" -> respond(
+                    content = """{"code":200,"lrc":{"lyric":"[00:01.00]一句"}}""",
+                    headers = jsonHeaders(),
+                )
+                "/eapi/song/lyric" -> respond(
+                    content = """{"code":200,"tlyric":{"lyric":"[00:01.00]one line"}}""",
+                    headers = jsonHeaders(),
+                )
+                else -> error("Unexpected route: ${request.url.encodedPath}")
+            }
+        })
+
+        val response = gateway(client).preferredLyrics(42)
+
+        assertEquals("[00:01.00]一句", response.lrc?.lyric)
+        assertEquals(null, response.tlyric)
+        assertEquals(listOf("/eapi/song/lyric/v1"), requestedPaths)
+    }
+
+    @Test
     fun `raw routes reject absolute URLs`() = runTest {
         val gateway = gateway(HttpClient(MockEngine { error("request should not be reached") }))
 
