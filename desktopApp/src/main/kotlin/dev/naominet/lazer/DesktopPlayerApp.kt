@@ -123,6 +123,25 @@ fun WindowScope.DesktopPlayerApp(
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
     }
+    // 系统托盘图标 + 右键媒体控制菜单(跨平台)。生命周期跟随本组件。
+    val mediaTray = remember {
+        DesktopMediaTray(
+            onAction = controller::dispatchMediaControlAction,
+            onShowWindow = {
+                window.isVisible = true
+                window.toFront()
+                window.requestFocus()
+            },
+            onQuit = onCloseWindow,
+        )
+    }
+    DisposableEffect(mediaTray) {
+        mediaTray.start()
+        onDispose { mediaTray.close() }
+    }
+    LaunchedEffect(controller.isPlaying) {
+        mediaTray.update(controller.isPlaying)
+    }
     var destination by remember { mutableStateOf(DesktopDestination.HOME) }
     var settingsVisible by remember { mutableStateOf(false) }
     var nowPlayingVisible by remember { mutableStateOf(false) }
@@ -166,6 +185,15 @@ fun WindowScope.DesktopPlayerApp(
             // Retry once after the initial frame has created the native handle.
             delay(300)
             nativeGlassApplied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
+        }
+        // Windows 任务栏缩略图工具栏(上一首/播放暂停/下一首)。安装在原生窗口句柄就绪后。
+        val thumbar = remember { WindowsThumbar(onAction = controller::dispatchMediaControlAction) }
+        LaunchedEffect(window) {
+            delay(300)
+            thumbar.install(window, controller.isPlaying)
+        }
+        LaunchedEffect(window, controller.isPlaying) {
+            thumbar.updatePlayState(controller.isPlaying)
         }
         val osGlassActive = osGlassRequested && nativeGlassApplied
         val frameShape = RoundedCornerShape(0.dp)
