@@ -4,18 +4,14 @@ import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
-import android.net.Uri
 import android.os.Build
 import android.util.Base64
-import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.BackEventCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.PredictiveBackHandler
-import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -203,7 +199,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import coil3.compose.AsyncImage
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
@@ -219,7 +214,7 @@ import com.kashif_e.backdrop.highlight.Highlight
 import com.kashif_e.backdrop.shadow.InnerShadow
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
-import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.Headphones
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.isActive
@@ -571,11 +566,11 @@ private fun ExperimentalBadge() {
 }
 
 @Composable
-fun AndroidLazerApp() {
+fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     val context = LocalContext.current
     val controller = remember(context.applicationContext) { AndroidGatewayController(context.applicationContext) }
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let(controller::openScannedWebPage)
+        result.contents?.let(controller::joinListenTogether)
     }
     // Library/navigation only need transport changes; position ticks belong to the visible player.
     val playback by remember {
@@ -619,7 +614,10 @@ fun AndroidLazerApp() {
     DisposableEffect(controller) {
         onDispose { controller.close() }
     }
-    LaunchedEffect(playback.track?.id) { playback.track?.id?.let(controller::loadLyrics) }
+    LaunchedEffect(initialListenTogetherInvitation) {
+        initialListenTogetherInvitation?.let(controller::joinListenTogether)
+    }
+    LaunchedEffect(playback.track?.id) { playback.track?.let(controller::loadLyrics) }
 
     // The currently visible top layer owns back. Gesture progress drives the same page that a
     // normal back press closes; cancelling the gesture eases that page back into place.
@@ -706,8 +704,19 @@ fun AndroidLazerApp() {
         val colors = MaterialTheme.colorScheme
         val view = LocalView.current
         val playFromQueue: (List<AndroidTrack>, AndroidTrack) -> Unit = { queue, track ->
-            AndroidPlaybackConnection.play(context, queue, track)
+            controller.play(queue, track)
             playerVisible = true
+        }
+        val shareListenTogether: (String) -> Unit = { url ->
+            context.startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, url)
+                    },
+                    tr("listen_together.share"),
+                ),
+            )
         }
         if (!view.isInEditMode) {
             SideEffect {
@@ -826,7 +835,7 @@ fun AndroidLazerApp() {
                         controller = controller,
                         currentTrackId = playback.track?.id,
                         onPlay = playFromQueue,
-                        onScan = { scanLauncher.launch(ScanOptions().apply { setBeepEnabled(false); setPrompt(tr("scan.prompt")) }) },
+                        onListenTogether = controller::openListenTogether,
                         showHeaderControls = !liquidGlass.isEnabled || landscape,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -936,6 +945,14 @@ fun AndroidLazerApp() {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     LiquidGlassIconButton(
+                        onClick = controller::openListenTogether,
+                        contentDescription = tr("listen_together.open"),
+                        glass = liquidGlass,
+                        tint = if (controller.listenTogether != null) colors.primary else Color.Unspecified,
+                    ) {
+                        Icon(Icons.Outlined.Headphones, null)
+                    }
+                    LiquidGlassIconButton(
                         onClick = controller::toggleTheme,
                         contentDescription = tr("player.toggle_theme"),
                         glass = liquidGlass,
@@ -1025,7 +1042,7 @@ fun AndroidLazerApp() {
                     onToggle = { AndroidPlaybackConnection.toggle(context) },
                     onPrevious = { AndroidPlaybackConnection.previous(context) },
                     onNext = { AndroidPlaybackConnection.next(context) },
-                    onSeek = { AndroidPlaybackConnection.seekTo(context, it) },
+                    onSeek = controller::seekTo,
                     modifier = Modifier
                         .fillMaxSize()
                         .predictiveBackTransform(
@@ -1035,11 +1052,18 @@ fun AndroidLazerApp() {
                         ),
                 )
             }
-            if (controller.scannedWebPage != null) {
-                ScannedWebPage(
-                    url = controller.scannedWebPage!!,
-                    cookie = controller.currentSessionCookie,
-                    onClose = controller::closeScannedWebPage,
+            if (controller.isListenTogetherVisible) {
+                ListenTogetherSheet(
+                    controller = controller,
+                    onScan = {
+                        scanLauncher.launch(
+                            ScanOptions().apply {
+                                setBeepEnabled(false)
+                                setPrompt(tr("listen_together.scan_prompt"))
+                            },
+                        )
+                    },
+                    onShare = shareListenTogether,
                 )
             }
             if (controller.isLoginVisible) LoginSheet(controller, liquidGlass)
@@ -1119,7 +1143,7 @@ private fun AndroidRootContent(
     controller: AndroidGatewayController,
     currentTrackId: Long?,
     onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
-    onScan: () -> Unit,
+    onListenTogether: () -> Unit,
     showHeaderControls: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1128,7 +1152,7 @@ private fun AndroidRootContent(
             MobileHeader(
                 controller = controller,
                 showControls = showHeaderControls,
-                onScan = onScan,
+                onListenTogether = onListenTogether,
                 modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 4.dp),
             )
         }
@@ -1199,6 +1223,13 @@ private fun LandscapeNavigationRail(
                     ) { Icon(destination.icon(), destination.label) }
                 }
             }
+            IconButton(
+                onClick = controller::openListenTogether,
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.iconButtonColors(
+                    contentColor = if (controller.listenTogether != null) colors.primary else colors.onSurfaceVariant,
+                ),
+            ) { Icon(Icons.Outlined.Headphones, tr("listen_together.open")) }
             IconButton(
                 onClick = controller::openSettings,
                 modifier = Modifier.size(48.dp),
@@ -2956,7 +2987,7 @@ private fun synthesizedLevel(index: Int, seconds: Float): Float {
 private fun MobileHeader(
     controller: AndroidGatewayController,
     showControls: Boolean,
-    onScan: () -> Unit,
+    onListenTogether: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2964,8 +2995,16 @@ private fun MobileHeader(
             Text("Lazer", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
         if (showControls) {
-            IconButton(onClick = onScan) {
-                Icon(Icons.Outlined.QrCodeScanner, tr("scan.open"))
+            IconButton(onClick = onListenTogether) {
+                Icon(
+                    Icons.Outlined.Headphones,
+                    tr("listen_together.open"),
+                    tint = if (controller.listenTogether != null) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        LocalContentColor.current
+                    },
+                )
             }
             IconButton(onClick = controller::toggleTheme) {
                 Icon(
@@ -4234,59 +4273,6 @@ private fun androidCoverFileName(title: String): String {
 
 private fun Context.hasRecordAudioPermission(): Boolean =
     checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-
-@Composable
-private fun ScannedWebPage(
-    url: String,
-    cookie: String?,
-    onClose: () -> Unit,
-) {
-    val context = LocalContext.current
-    BackHandler(onBack = onClose)
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        Row(
-            Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onClose) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back"))
-            }
-            Text(
-                Uri.parse(url).host.orEmpty(),
-                modifier = Modifier.weight(1f),
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = {
-                WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    webViewClient = WebViewClient()
-                    val host = Uri.parse(url).host.orEmpty().lowercase()
-                    val canUseMusicSession = host == "music.163.com" ||
-                        host.endsWith(".music.163.com") ||
-                        host == "music.126.net" ||
-                        host.endsWith(".music.126.net")
-                    if (canUseMusicSession) {
-                        cookie?.split(';')
-                            ?.map(String::trim)
-                            ?.filter(String::isNotBlank)
-                            ?.forEach { item -> CookieManager.getInstance().setCookie(url, item) }
-                        CookieManager.getInstance().flush()
-                    }
-                    loadUrl(url)
-                }
-            },
-            update = { webView ->
-                if (webView.url != url) webView.loadUrl(url)
-            },
-        )
-    }
-}
 
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)

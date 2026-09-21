@@ -4,10 +4,21 @@ import kotlinx.serialization.json.*
 
 internal enum class NeteaseEncoding { EAPI, WEAPI }
 
+/**
+ * Client identity the upstream request declares. Listen-together rooms remember the creator's
+ * client version and the official app refuses a participant it reads as outdated, so those
+ * routes present the current mobile release instead of the desktop one.
+ */
+internal enum class NeteaseClient(val os: String, val appver: String, val versioncode: String?) {
+    Desktop("pc", "3.1.17.204416", null),
+    Mobile("android", "9.5.95", "9005095"),
+}
+
 internal data class NeteaseRequest(
     val path: String,
     val payload: JsonObject,
     val encoding: NeteaseEncoding = NeteaseEncoding.EAPI,
+    val client: NeteaseClient = NeteaseClient.Desktop,
 )
 
 /** The finite set of wrapper aliases supported in-process. Never accepts an upstream URL. */
@@ -16,8 +27,18 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
     fun id(key: String = "id"): String = value(key).also {
         require(it.toLongOrNull()?.let { number -> number > 0 } == true) { "$key must be a positive ID." }
     }
+    fun roomId(): String = value("roomId").trim().also {
+        require(it.length in 1..256 && it.all { char -> char.isLetterOrDigit() || char == '_' || char == '-' }) {
+            "roomId must be a non-empty opaque room identifier."
+        }
+    }
     fun request(path: String, web: Boolean = false, body: JsonObjectBuilder.() -> Unit = {}) =
-        NeteaseRequest(path, buildJsonObject(body), if (web) NeteaseEncoding.WEAPI else NeteaseEncoding.EAPI)
+        NeteaseRequest(
+            path,
+            buildJsonObject(body),
+            if (web) NeteaseEncoding.WEAPI else NeteaseEncoding.EAPI,
+            if (alias.startsWith("/listentogether/")) NeteaseClient.Mobile else NeteaseClient.Desktop,
+        )
     fun JsonObjectBuilder.page(defaultLimit: Int = 30) {
         put("limit", value("limit", defaultLimit.toString()))
         put("offset", value("offset", "0"))
@@ -88,8 +109,8 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
             put("id", id()); put("tv", -1); put("lv", -1); put("rv", -1); put("kv", -1); put("_nmclfl", 1)
         }
         "/lyric/new" -> request("/api/song/lyric/v1") {
+            // Version counters select a delta, so sending them as zero drops the translated line.
             put("id", id()); put("cp", false)
-            listOf("tv", "lv", "rv", "kv", "yv", "ytv", "yrv").forEach { put(it, 0) }
         }
         "/playlist/detail" -> request("/api/v6/playlist/detail") {
             put("id", id()); put("n", 100000); put("s", value("s", "8"))
@@ -120,40 +141,39 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
         "/listentogether/room/create" -> request("/api/listen/together/room/create") {
             put("refer", "songplay_more")
         }
+        "/listentogether/multi/room/create" -> request("/api/listen/together/multi/room/create") {
+            put("type", value("type", "0"))
+            put("songId", id())
+            put("from", "CREATE")
+            put("playedTime", value("playedTime", "0"))
+            put("groupIds", idArray(value("groupIds")))
+            put("inviteUids", idArray(value("inviteUids")))
+            put("nextSongIds", idArray(value("nextSongIds")))
+            // The upstream issues this device token; an absent one is sent empty, never forged.
+            put("checkToken", "")
+        }
         "/listentogether/accept" -> request("/api/listen/together/play/invitation/accept") {
-            put("refer", "inbox_invite"); put("roomId", value("roomId")); put("inviterId", value("inviterId"))
+            put("refer", "inbox_invite"); put("roomId", roomId()); put("inviterId", id("inviterId"))
         }
         "/listentogether/room/check" -> request("/api/listen/together/room/check") {
-            put("roomId", value("roomId"))
+            put("roomId", roomId())
         }
         "/listentogether/status" -> request("/api/listen/together/status/get", web = true)
         "/listentogether/end" -> request("/api/listen/together/end/v2") {
-            put("roomId", value("roomId"))
+            put("roomId", roomId())
         }
         "/listentogether/heartbeat" -> request("/api/listen/together/heartbeat") {
-            put("roomId", value("roomId")); put("songId", value("songId"))
+            put("roomId", roomId()); put("songId", value("songId", "0"))
             put("playStatus", value("playStatus")); put("progress", value("progress"))
         }
         "/listentogether/play/command" -> request("/api/listen/together/play/command/report") {
-            put("roomId", value("roomId"))
-            put("commandInfo", buildJsonObject {
-                put("commandType", value("commandType")); put("progress", value("progress", "0"))
-                put("playStatus", value("playStatus")); put("formerSongId", value("formerSongId", "-1"))
-                put("targetSongId", value("targetSongId")); put("clientSeq", value("clientSeq"))
-            }.toString())
+            put("roomId", roomId()); put("commandInfo", value("commandInfo"))
         }
         "/listentogether/sync/list/command" -> request("/api/listen/together/sync/list/command/report") {
-            put("roomId", value("roomId"))
-            put("playlistParam", buildJsonObject {
-                put("commandType", value("commandType"))
-                put("version", buildJsonArray { add(buildJsonObject { put("userId", value("userId")); put("version", value("version")) }) })
-                put("anchorSongId", ""); put("anchorPosition", -1)
-                put("randomList", buildJsonArray { value("randomList").split(',').filter(String::isNotBlank).forEach(::add) })
-                put("displayList", buildJsonArray { value("displayList").split(',').filter(String::isNotBlank).forEach(::add) })
-            }.toString())
+            put("roomId", roomId()); put("playlistParam", value("playlistParam"))
         }
         "/listentogether/sync/playlist/get" -> request("/api/listen/together/sync/playlist/get") {
-            put("roomId", value("roomId"))
+            put("roomId", roomId())
         }
         "/like" -> request("/api/radio/like", web = true) {
             put("alg", "itembased"); put("trackId", id()); put("like", value("like") != "false"); put("time", "3")
@@ -171,3 +191,7 @@ internal fun songIds(value: String): JsonArray = JsonArray(value.split(',').map 
 internal fun songIdPayload(value: String): String = JsonArray(songIds(value).map {
     buildJsonObject { put("id", it) }
 }).toString()
+
+/** Renders a comma-separated ID list as the JSON array the listen-together routes expect. */
+private fun idArray(value: String): String =
+    JsonArray(if (value.isBlank()) emptyList() else songIds(value)).toString()

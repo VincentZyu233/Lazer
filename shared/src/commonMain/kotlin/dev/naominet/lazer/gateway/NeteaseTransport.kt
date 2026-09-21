@@ -93,12 +93,14 @@ internal class NeteaseTransport(
         }.toMap()
         val csrf = cookies["__csrf"].orEmpty()
         val web = route.encoding == NeteaseEncoding.WEAPI
+        val profile = route.client
         val payload = buildJsonObject {
             route.payload.forEach { (key, value) -> put(key, value) }
             put("e_r", false)
             if (web) put("csrf_token", csrf)
             else putJsonObject("header") {
-                put("os", "pc"); put("appver", "3.1.17.204416")
+                put("os", profile.os); put("appver", profile.appver)
+                profile.versioncode?.let { put("versioncode", it) }
                 put("__csrf", csrf)
                 put("requestId", "${nowMillis()}_${NeteaseCrypto.secureRandom(4).hex()}")
                 // Only carry server-issued identity fields, never synthesize anti-cheat tokens.
@@ -115,7 +117,7 @@ internal class NeteaseTransport(
             header(HttpHeaders.UserAgent, config.userAgent ?: "Lazer")
             header("Referer", "https://music.163.com/")
             header(HttpHeaders.CacheControl, "no-cache")
-            currentCookie?.let { header(HttpHeaders.Cookie, it) }
+            requestCookie(profile, currentCookie)?.let { header(HttpHeaders.Cookie, it) }
             setBody(FormDataContent(Parameters.build { form.forEach { (key, value) -> append(key, value) } }))
         }
         // Never retain a potentially credential-bearing upstream error body in an exception.
@@ -141,6 +143,21 @@ internal class NeteaseTransport(
 private val transportOverrides = setOf(
     "cookie", "domain", "crypto", "proxy", "headers", "realIP", "randomCNIP", "ua", "checkToken", "e_r",
 )
+
+/**
+ * The mobile app mirrors its own client version into plain cookies next to the encrypted header,
+ * and the upstream keeps the room creator's version from either channel. Only the outgoing request
+ * carries these; the signed-in session never absorbs them.
+ */
+private fun requestCookie(profile: NeteaseClient, session: String?): String? {
+    if (profile !== NeteaseClient.Mobile) return session
+    val identity = buildList {
+        add("os=${profile.os}")
+        add("appver=${profile.appver}")
+        profile.versioncode?.let { add("versioncode=$it") }
+    }.joinToString("; ")
+    return session?.plus("; $identity") ?: identity
+}
 
 private fun normalizeFields(element: JsonElement): JsonElement = when (element) {
     is JsonObject -> JsonObject(element.map { (key, value) ->

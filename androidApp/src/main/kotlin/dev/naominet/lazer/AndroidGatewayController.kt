@@ -7,11 +7,25 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asImageBitmap
 import dev.naominet.lazer.gateway.AudioQuality
+import dev.naominet.lazer.gateway.GatewayHttpException
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.model.Artist
+import dev.naominet.lazer.gateway.model.LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
+import dev.naominet.lazer.gateway.model.ListenTogetherParticipant
+import dev.naominet.lazer.gateway.model.ListenTogetherPlaybackState
+import dev.naominet.lazer.gateway.model.ListenTogetherPlaylistVersion
+import dev.naominet.lazer.gateway.model.ListenTogetherRoomKind
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.Song
 import dev.naominet.lazer.gateway.model.UserProfile
+import dev.naominet.lazer.gateway.model.incrementListenTogetherVersion
+import dev.naominet.lazer.gateway.model.isListenTogetherClosed
+import dev.naominet.lazer.gateway.model.listenTogetherCreatedRoomId
+import dev.naominet.lazer.gateway.model.listenTogetherPlaybackState
+import dev.naominet.lazer.gateway.model.listenTogetherRoomStatus
+import dev.naominet.lazer.gateway.model.mergeListenTogetherVersions
+import dev.naominet.lazer.gateway.model.parseListenTogetherInvite
+import dev.naominet.lazer.gateway.model.requireListenTogetherSuccess
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,10 +39,11 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonObject
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
+import kotlin.math.abs
 
 enum class AndroidRootDestination(private val labelKey: String, val motionIndex: Int) {
     HOME("nav.today", 0),
@@ -81,13 +96,29 @@ internal fun nextAndroidLibraryTipIndex(current: Int): Int =
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
  * so composables only receive human-readable loading and failure states.
  */
+enum class AndroidListenTogetherConnection {
+    CONNECTING,
+    CONNECTED,
+    RECONNECTING,
+}
+
 data class AndroidListenTogetherState(
-    val roomId: Long,
-    val inviterId: Long? = null,
+    val roomId: String,
+    val inviterId: Long,
     val isHost: Boolean,
+    val connection: AndroidListenTogetherConnection = AndroidListenTogetherConnection.CONNECTING,
+    val participants: List<ListenTogetherParticipant> = emptyList(),
+    val remoteTrackId: Long? = null,
 )
 
-private const val LISTEN_TOGETHER_REFRESH_MILLIS = 10_000L
+private data class AndroidListenTogetherPlaybackKey(
+    val trackId: Long?,
+    val isPlaying: Boolean,
+)
+
+private const val LISTEN_TOGETHER_REFRESH_MILLIS = 3_000L
+private const val LISTEN_TOGETHER_HEARTBEAT_MILLIS = 10_000L
+private const val LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS = 4_000L
 
 class AndroidGatewayController(context: Context) {
     private val appContext = context.applicationContext
@@ -107,6 +138,7 @@ class AndroidGatewayController(context: Context) {
     private var postLoginSyncJob: Job? = null
     private var maintenanceJob: Job? = null
     private var playlistRequestGeneration = 0L
+    private var hasCompletedBootstrap = false
 
     var destination by mutableStateOf(AndroidRootDestination.HOME)
         private set
@@ -244,107 +276,414 @@ class AndroidGatewayController(context: Context) {
     val currentSessionCookie: String?
         get() = gateway.sessionCookie?.takeIf(String::isNotBlank)
 
-    fun openScannedWebPage(url: String) {
-        val parsed = runCatching { android.net.Uri.parse(url.trim()) }.getOrNull()
-        val scheme = parsed?.scheme?.lowercase()
-        if (parsed == null || scheme !in setOf("http", "https") || parsed.host.isNullOrBlank()) {
-            message = tr("scan.invalid_url")
-            return
-        }
-        message = null
-        scannedWebPage = url.trim()
-    }
-
-    fun closeScannedWebPage() {
-        scannedWebPage = null
-    }
-
-    var scannedWebPage by mutableStateOf<String?>(null)
+    var isListenTogetherVisible by mutableStateOf(false)
         private set
-
     var listenTogether by mutableStateOf<AndroidListenTogetherState?>(null)
         private set
-    private var listenTogetherJob: Job? = null
-    private var listenTogetherSequence = 1L
+    var isListenTogetherBusy by mutableStateOf(false)
+        private set
+    var listenTogetherError by mutableStateOf<String?>(null)
+        private set
 
-    fun createListenTogetherRoom() {
-        listenTogetherJob?.cancel()
-        listenTogetherJob = scope.launch {
+    private var listenTogetherActionJob: Job? = null
+    private var listenTogetherRefreshJob: Job? = null
+    private var listenTogetherSequence = 1L
+    private var listenTogetherPlaylistState: ListenTogetherPlaybackState? = null
+    private var listenTogetherVersions: List<ListenTogetherPlaylistVersion> = emptyList()
+    private var listenTogetherQueue: List<AndroidTrack> = emptyList()
+    private var lastReportedQueueIds: List<Long> = emptyList()
+    private var lastAppliedRemoteSequence = -1L
+    private var lastStablePlayback: AndroidListenTogetherPlaybackKey? = null
+    private var pendingRemotePlayback: AndroidListenTogetherPlaybackKey? = null
+    private var pendingListenTogetherInvitation: String? = null
+    private var lastHeartbeatMillis = 0L
+
+    val listenTogetherShareUrl: String?
+        get() {
+            val room = listenTogether ?: return null
+            val songId = AndroidPlaybackConnection.snapshot.value.track?.id
+                ?: room.remoteTrackId
+                ?: LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
+            return dev.naominet.lazer.gateway.model.ListenTogetherInvite(
+                roomId = room.roomId,
+                inviterId = room.inviterId,
+            ).shareUrl(songId)
+        }
+
+    fun openListenTogether() {
+        isListenTogetherVisible = true
+        listenTogetherError = null
+    }
+
+    fun closeListenTogether() {
+        isListenTogetherVisible = false
+        listenTogetherError = null
+        pendingListenTogetherInvitation = null
+    }
+
+    fun createListenTogetherRoom(kind: ListenTogetherRoomKind) {
+        val user = currentUser
+        if (user == null) {
+            openLogin()
+            return
+        }
+        listenTogetherActionJob?.cancel()
+        listenTogetherActionJob = scope.launch {
+            isListenTogetherBusy = true
+            listenTogetherError = null
             runCatching {
-                val response = gateway.listenTogetherCreateRoom()
-                val roomId = response["data"]?.jsonObject?.get("roomInfo")?.jsonObject?.get("roomId")?.jsonPrimitive?.longOrNull
-                    ?: error("room id missing")
-                listenTogether = AndroidListenTogetherState(roomId = roomId, isHost = true)
-                gateway.listenTogetherRoomCheck(roomId)
+                val response = when (kind) {
+                    ListenTogetherRoomKind.Duo -> gateway.listenTogetherCreateRoom()
+                    ListenTogetherRoomKind.Multi -> gateway.listenTogetherCreateMultiRoom(
+                        songId = currentPlaybackTrack()?.id ?: error("no track to share"),
+                        nextSongIds = upcomingTrackIds(),
+                        playedTimeMillis = AndroidPlaybackConnection.snapshot.value.positionMillis,
+                    )
+                }
+                requireListenTogetherSuccess(response)
+                val roomId = listenTogetherCreatedRoomId(response) ?: error("room id missing")
+                requireListenTogetherSuccess(gateway.listenTogetherRoomCheck(roomId))
+                listenTogether = AndroidListenTogetherState(
+                    roomId = roomId,
+                    inviterId = user.userId,
+                    isHost = true,
+                )
+                resetListenTogetherSession()
+                runCatching { reportCurrentPlaybackToRoom(forceQueue = true) }
                 startListenTogetherRefresh()
-            }.onFailure { message = tr("listen_together.create_fail") }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                listenTogetherError = tr("listen_together.create_fail")
+            }
+            isListenTogetherBusy = false
         }
     }
 
-    fun joinListenTogetherRoom(roomId: Long, inviterId: Long) {
-        listenTogetherJob?.cancel()
-        listenTogetherJob = scope.launch {
+    private fun currentPlaybackTrack(): AndroidTrack? = AndroidPlaybackConnection.snapshot.value.track
+
+    /** Songs after the current one, which is what a multi-person room seeds its queue with. */
+    private fun upcomingTrackIds(): List<Long> {
+        val currentId = currentPlaybackTrack()?.id ?: return emptyList()
+        val queue = listenTogetherQueue.ifEmpty { return emptyList() }
+        val index = queue.indexOfFirst { it.id == currentId }
+        if (index < 0) return emptyList()
+        return queue.drop(index + 1).map(AndroidTrack::id).distinct()
+    }
+
+    fun joinListenTogetherRoom(roomId: String, inviterId: Long) {
+        joinListenTogether("$roomId $inviterId")
+    }
+
+    fun joinListenTogether(invitation: String) {
+        pendingListenTogetherInvitation = invitation
+        isListenTogetherVisible = true
+        if (!hasCompletedBootstrap) return
+        if (currentUser == null) {
+            openLogin()
+            return
+        }
+        pendingListenTogetherInvitation = null
+        val invite = parseListenTogetherInvite(invitation)
+        if (invite == null) {
+            listenTogetherError = tr("listen_together.invalid_invite")
+            return
+        }
+        isListenTogetherVisible = true
+        listenTogetherActionJob?.cancel()
+        listenTogetherActionJob = scope.launch {
+            isListenTogetherBusy = true
+            listenTogetherError = null
             runCatching {
-                gateway.listenTogetherAccept(roomId, inviterId)
-                listenTogether = AndroidListenTogetherState(roomId = roomId, inviterId = inviterId, isHost = false)
-                gateway.listenTogetherRoomCheck(roomId)
+                requireListenTogetherSuccess(gateway.listenTogetherAccept(invite.roomId, invite.inviterId))
+                requireListenTogetherSuccess(gateway.listenTogetherRoomCheck(invite.roomId))
+                listenTogether = AndroidListenTogetherState(
+                    roomId = invite.roomId,
+                    inviterId = invite.inviterId,
+                    isHost = false,
+                )
+                resetListenTogetherSession()
                 startListenTogetherRefresh()
-            }.onFailure { message = tr("listen_together.join_fail") }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                listenTogetherError = tr("listen_together.join_fail")
+            }
+            isListenTogetherBusy = false
         }
     }
 
     fun endListenTogetherRoom() {
         val roomId = listenTogether?.roomId ?: return
-        listenTogetherJob?.cancel()
-        listenTogetherJob = scope.launch {
-            runCatching { gateway.listenTogetherEnd(roomId) }
-                .onSuccess { listenTogether = null }
-                .onFailure { message = tr("listen_together.end_fail") }
+        listenTogetherActionJob?.cancel()
+        listenTogetherActionJob = scope.launch {
+            isListenTogetherBusy = true
+            listenTogetherError = null
+            runCatching {
+                requireListenTogetherSuccess(gateway.listenTogetherEnd(roomId))
+            }.onSuccess {
+                clearListenTogetherSession()
+                isListenTogetherVisible = false
+                message = tr("listen_together.ended")
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                listenTogetherError = tr("listen_together.end_fail")
+            }
+            isListenTogetherBusy = false
         }
     }
 
-    fun sendListenTogetherCommand(commandType: String, snapshot: AndroidPlaybackSnapshot) {
-        val room = listenTogether ?: return
-        val trackId = snapshot.track?.id ?: return
-        val sequence = listenTogetherSequence++
+    /** Starts local playback and remembers its queue so room participants receive the same order. */
+    fun play(queue: List<AndroidTrack>, track: AndroidTrack) {
+        listenTogetherQueue = queue.ifEmpty { listOf(track) }.distinctBy(AndroidTrack::id)
+        AndroidPlaybackConnection.play(appContext, listenTogetherQueue, track)
+    }
+
+    fun seekTo(positionMillis: Long) {
+        AndroidPlaybackConnection.seekTo(appContext, positionMillis)
+        val snapshot = AndroidPlaybackConnection.snapshot.value
         scope.launch {
-            runCatching {
-                gateway.listenTogetherPlayCommand(
-                    roomId = room.roomId,
-                    commandType = commandType,
-                    progress = snapshot.positionMillis,
-                    playStatus = if (snapshot.isPlaying) "PLAY" else "PAUSE",
-                    formerSongId = -1L,
-                    targetSongId = trackId,
-                    clientSeq = sequence,
-                )
+            if (listenTogether != null) {
+                runCatching { reportPlaybackCommand("SEEK", snapshot.copy(positionMillis = positionMillis)) }
             }
         }
     }
 
     private fun startListenTogetherRefresh() {
-        listenTogetherJob?.cancel()
-        listenTogetherJob = scope.launch {
+        listenTogetherRefreshJob?.cancel()
+        listenTogetherRefreshJob = scope.launch {
+            var missingRoomCount = 0
             while (isActive && listenTogether != null) {
                 val room = listenTogether ?: break
-                runCatching {
-                    gateway.listenTogetherStatus()
-                    AndroidPlaybackConnection.snapshot.value.track?.let { track ->
-                        gateway.listenTogetherHeartbeat(
-                            roomId = room.roomId,
-                            songId = track.id,
-                            playStatus = if (AndroidPlaybackConnection.snapshot.value.isPlaying) "PLAY" else "PAUSE",
-                            progress = AndroidPlaybackConnection.snapshot.value.positionMillis,
-                        )
+                try {
+                    val statusResponse = gateway.listenTogetherStatus()
+                    if (isListenTogetherClosed(statusResponse)) {
+                        clearListenTogetherSession()
+                        message = tr("listen_together.closed_remote")
+                        break
                     }
+                    requireListenTogetherSuccess(statusResponse)
+                    val status = listenTogetherRoomStatus(statusResponse)
+                    if (status?.inRoom == false) {
+                        missingRoomCount += 1
+                        if (missingRoomCount >= 2) {
+                            clearListenTogetherSession()
+                            message = tr("listen_together.closed_remote")
+                            break
+                        }
+                    } else {
+                        missingRoomCount = 0
+                    }
+                    val playlistResponse = gateway.listenTogetherPlaylist(room.roomId)
+                    if (isListenTogetherClosed(playlistResponse)) {
+                        clearListenTogetherSession()
+                        message = tr("listen_together.closed_remote")
+                        break
+                    }
+                    requireListenTogetherSuccess(playlistResponse)
+                    val remote = listenTogetherPlaybackState(playlistResponse)
+                    if (remote != null) {
+                        listenTogetherPlaylistState = remote
+                        listenTogetherVersions = mergeListenTogetherVersions(
+                            listenTogetherVersions,
+                            remote.versions,
+                        )
+                        listenTogetherSequence = maxOf(listenTogetherSequence, remote.clientSequence + 1L)
+                        applyRemotePlayback(remote)
+                    }
+                    listenTogether = room.copy(
+                        connection = AndroidListenTogetherConnection.CONNECTED,
+                        participants = status?.participants ?: room.participants,
+                        remoteTrackId = remote?.targetSongId?.takeIf { it > 0L } ?: room.remoteTrackId,
+                    )
+
+                    val now = System.currentTimeMillis()
+                    val snapshot = AndroidPlaybackConnection.snapshot.value
+                    val heartbeatTrack = snapshot.track
+                    if (heartbeatTrack != null && now - lastHeartbeatMillis >= LISTEN_TOGETHER_HEARTBEAT_MILLIS) {
+                        val heartbeat = gateway.listenTogetherHeartbeat(
+                            roomId = room.roomId,
+                            songId = heartbeatTrack.id,
+                            playStatus = if (snapshot.isPlaying) "PLAY" else "PAUSE",
+                            progress = snapshot.positionMillis,
+                        )
+                        if (isListenTogetherClosed(heartbeat)) {
+                            clearListenTogetherSession()
+                            message = tr("listen_together.closed_remote")
+                            break
+                        }
+                        requireListenTogetherSuccess(heartbeat)
+                        lastHeartbeatMillis = now
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (error is GatewayHttpException && error.statusCode == 488) {
+                        clearListenTogetherSession()
+                        message = tr("listen_together.closed_remote")
+                        break
+                    }
+                    listenTogether = room.copy(connection = AndroidListenTogetherConnection.RECONNECTING)
                 }
                 delay(LISTEN_TOGETHER_REFRESH_MILLIS)
             }
         }
     }
 
+    private fun resetListenTogetherSession() {
+        listenTogetherSequence = 1L
+        listenTogetherPlaylistState = null
+        listenTogetherVersions = emptyList()
+        listenTogetherQueue = AndroidPlaybackConnection.currentQueue()
+        lastReportedQueueIds = emptyList()
+        lastAppliedRemoteSequence = -1L
+        pendingRemotePlayback = null
+        lastHeartbeatMillis = 0L
+    }
+
+    private fun clearListenTogetherSession() {
+        listenTogetherRefreshJob?.cancel()
+        listenTogetherRefreshJob = null
+        listenTogether = null
+        resetListenTogetherSession()
+    }
+
+    private fun observeListenTogetherPlayback() {
+        scope.launch {
+            AndroidPlaybackConnection.snapshot
+                .map { snapshot ->
+                    Triple(
+                        AndroidListenTogetherPlaybackKey(snapshot.track?.id, snapshot.isPlaying),
+                        snapshot.isPreparing,
+                        snapshot,
+                    )
+                }
+                .distinctUntilChanged { old, new -> old.first == new.first && old.second == new.second }
+                .collect { (key, preparing, snapshot) ->
+                    if (preparing) return@collect
+                    val previous = lastStablePlayback
+                    lastStablePlayback = key
+                    pendingRemotePlayback?.let { expected ->
+                        if (expected == key) {
+                            pendingRemotePlayback = null
+                            return@collect
+                        }
+                    }
+                    if (listenTogether == null || key.trackId == null) return@collect
+                    when {
+                        previous?.trackId != key.trackId -> runCatching {
+                            reportPlaybackCommand("GOTO", snapshot, forceQueue = true)
+                        }
+                        previous.isPlaying != key.isPlaying -> runCatching {
+                            reportPlaybackCommand(
+                                if (key.isPlaying) "PLAY" else "PAUSE",
+                                snapshot,
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    private suspend fun reportCurrentPlaybackToRoom(forceQueue: Boolean) {
+        val snapshot = AndroidPlaybackConnection.snapshot.value
+        if (snapshot.track != null) reportPlaybackCommand("GOTO", snapshot, forceQueue)
+    }
+
+    private suspend fun reportPlaybackCommand(
+        commandType: String,
+        snapshot: AndroidPlaybackSnapshot,
+        forceQueue: Boolean = false,
+    ) {
+        val room = listenTogether ?: return
+        val track = snapshot.track ?: return
+        val queue = listenTogetherQueue.ifEmpty { listOf(track) }
+        val queueIds = queue.map(AndroidTrack::id).distinct()
+        if (forceQueue || queueIds != lastReportedQueueIds) {
+            val userId = currentUser?.userId ?: return
+            val remoteState = listenTogetherPlaylistState
+            val versions = incrementListenTogetherVersion(listenTogetherVersions, userId)
+            requireListenTogetherSuccess(
+                gateway.listenTogetherSyncList(
+                    roomId = room.roomId,
+                    commandType = "REPLACE",
+                    versions = versions,
+                    playMode = remoteState?.playMode ?: "ORDER_LOOP",
+                    anchorSongId = null,
+                    anchorPosition = -1,
+                    randomList = queueIds,
+                    displayList = queueIds,
+                ),
+            )
+            listenTogetherVersions = versions
+            lastReportedQueueIds = queueIds
+            delay(400L)
+        }
+        val formerSongId = listenTogetherPlaylistState?.targetSongId?.takeIf { it > 0L } ?: -1L
+        requireListenTogetherSuccess(
+            gateway.listenTogetherPlayCommand(
+                roomId = room.roomId,
+                commandType = commandType,
+                progress = snapshot.positionMillis,
+                playStatus = if (snapshot.isPlaying) "PLAY" else "PAUSE",
+                formerSongId = formerSongId,
+                targetSongId = track.id,
+                clientSeq = listenTogetherSequence++,
+            ),
+        )
+    }
+
+    private suspend fun applyRemotePlayback(remote: ListenTogetherPlaybackState) {
+        val targetId = remote.targetSongId.takeIf { it > 0L } ?: return
+        if (remote.clientSequence <= lastAppliedRemoteSequence) return
+        val shouldPlay = remote.playStatus.equals("PLAY", ignoreCase = true)
+        val local = AndroidPlaybackConnection.snapshot.value
+        val alreadyAligned = local.track?.id == targetId &&
+            local.isPlaying == shouldPlay &&
+            abs(local.positionMillis - remote.progressMillis) < LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS
+        lastAppliedRemoteSequence = remote.clientSequence
+        if (alreadyAligned) return
+
+        pendingRemotePlayback = AndroidListenTogetherPlaybackKey(targetId, shouldPlay)
+        if (local.track?.id != targetId) {
+            val ids = remote.trackIds.ifEmpty { listOf(targetId) }
+            val tracks = loadListenTogetherTracks(ids)
+            val target = tracks.firstOrNull { it.id == targetId } ?: return
+            listenTogetherQueue = tracks
+            lastReportedQueueIds = ids
+            AndroidPlaybackConnection.play(
+                context = appContext,
+                queue = tracks,
+                track = target,
+                startPlaying = shouldPlay,
+                positionMillis = remote.progressMillis,
+            )
+            return
+        }
+
+        if (abs(local.positionMillis - remote.progressMillis) >= LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS &&
+            remote.commandType.uppercase() in setOf("GOTO", "SEEK")
+        ) {
+            AndroidPlaybackConnection.seekTo(appContext, remote.progressMillis)
+        }
+        when {
+            shouldPlay && !local.isPlaying -> AndroidPlaybackConnection.resume(appContext)
+            !shouldPlay && local.isPlaying -> AndroidPlaybackConnection.pause(appContext)
+            else -> pendingRemotePlayback = null
+        }
+    }
+
+    private suspend fun loadListenTogetherTracks(ids: List<Long>): List<AndroidTrack> {
+        val known = (listenTogetherQueue + homeTracks + activePlaylistTracks + activeArtistTracks)
+            .associateBy(AndroidTrack::id)
+            .toMutableMap()
+        ids.filterNot(known::containsKey).chunked(200).forEach { missing ->
+            gateway.songDetails(missing).songs.map(::toAndroidTrack).forEach { known[it.id] = it }
+        }
+        return ids.mapNotNull(known::get).distinctBy(AndroidTrack::id)
+    }
+
     init {
         LazerI18n.switchLanguage(language)
+        observeListenTogetherPlayback()
         scope.launch {
             loadLazerTranslations()
             loadBackgroundImage()
@@ -678,15 +1017,18 @@ class AndroidGatewayController(context: Context) {
         }
     }
 
-    fun loadLyrics(trackId: Long) {
+    fun loadLyrics(track: AndroidTrack) {
         lyricJob?.cancel()
         lyrics = emptyList()
-        SuperLyricPublisher.updateLyrics(trackId, emptyList())
+        SuperLyricPublisher.updateLyrics(track.id, emptyList())
         lyricsMessage = null
         lyricsLoading = true
         lyricJob = scope.launch {
             try {
-                val response = gateway.preferredLyrics(trackId)
+                val response = gateway.preferredLyrics(
+                    id = track.id,
+                    translationExpected = !track.translatedTitle.isNullOrBlank(),
+                )
                 val timedLyrics = parseAndroidWordLyrics(response.yrc?.lyric)
                     .ifEmpty { parseAndroidLrc(response.lrc?.lyric) }
                 val merged = mergeAndroidLyrics(
@@ -694,11 +1036,11 @@ class AndroidGatewayController(context: Context) {
                     parseAndroidLrc(response.tlyric?.lyric),
                 )
                 lyrics = merged
-                SuperLyricPublisher.updateLyrics(trackId, merged)
+                SuperLyricPublisher.updateLyrics(track.id, merged)
                 lyricsMessage = if (merged.isEmpty()) tr("status.no_lyrics") else null
             } catch (_: Throwable) {
                 lyrics = emptyList()
-                SuperLyricPublisher.updateLyrics(trackId, emptyList())
+                SuperLyricPublisher.updateLyrics(track.id, emptyList())
                 lyricsMessage = tr("status.lyrics_fail")
             } finally {
                 lyricsLoading = false
@@ -889,6 +1231,9 @@ class AndroidGatewayController(context: Context) {
 
     fun logout() {
         postLoginSyncJob?.cancel()
+        listenTogetherActionJob?.cancel()
+        clearListenTogetherSession()
+        isListenTogetherVisible = false
         scope.launch {
             AndroidPlaybackConnection.stopAndClearSession(appContext)
             try {
@@ -909,6 +1254,8 @@ class AndroidGatewayController(context: Context) {
     fun close() {
         postLoginSyncJob?.cancel()
         maintenanceJob?.cancel()
+        listenTogetherActionJob?.cancel()
+        listenTogetherRefreshJob?.cancel()
         scope.cancel()
         cache.close()
         gateway.close()
@@ -1011,6 +1358,8 @@ class AndroidGatewayController(context: Context) {
                 }
             } finally {
                 isLoading = false
+                hasCompletedBootstrap = true
+                if (isActive) pendingListenTogetherInvitation?.let(::joinListenTogether)
             }
         }
     }
@@ -1164,6 +1513,7 @@ class AndroidGatewayController(context: Context) {
         check(profile != null && profile.userId > 0) { tr("login.no_profile") }
         bootstrapJob?.cancelAndJoin()
         bootstrapJob = null
+        hasCompletedBootstrap = true
         currentUser = profile
         cache.saveCurrentUser(profile)
         restoreCachedSignedInContent(profile)
@@ -1175,6 +1525,10 @@ class AndroidGatewayController(context: Context) {
         qrState = AndroidQrLoginState.IDLE
         qrImageData = null
         message = tr("status.login_success_syncing")
+        pendingListenTogetherInvitation?.let { invitation ->
+            pendingListenTogetherInvitation = null
+            joinListenTogether(invitation)
+        }
         postLoginSyncJob?.cancel()
         postLoginSyncJob = scope.launch {
             isLoading = true

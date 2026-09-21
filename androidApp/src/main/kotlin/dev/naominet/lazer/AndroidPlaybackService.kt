@@ -107,15 +107,38 @@ private object AndroidPlaybackQueue {
 object AndroidPlaybackConnection {
     val snapshot: StateFlow<AndroidPlaybackSnapshot> = AndroidPlaybackStateStore.snapshot
 
-    fun play(context: Context, queue: List<AndroidTrack>, track: AndroidTrack) {
+    fun currentQueue(): List<AndroidTrack> = AndroidPlaybackQueue.tracks.toList()
+
+    fun play(
+        context: Context,
+        queue: List<AndroidTrack>,
+        track: AndroidTrack,
+        startPlaying: Boolean = true,
+        positionMillis: Long = 0L,
+    ) {
         AndroidPlaybackQueue.replace(queue.ifEmpty { listOf(track) }, track)
         AndroidPlaybackStateStore.update(
-            AndroidPlaybackSnapshot(track = track, isPreparing = true, durationMillis = track.durationMillis),
+            AndroidPlaybackSnapshot(
+                track = track,
+                isPreparing = true,
+                positionMillis = positionMillis.coerceAtLeast(0L),
+                durationMillis = track.durationMillis,
+            ),
         )
-        dispatch(context, AndroidPlaybackService.ACTION_PLAY_TRACK)
+        dispatch(
+            context,
+            Intent(context, AndroidPlaybackService::class.java)
+                .setAction(AndroidPlaybackService.ACTION_PLAY_TRACK)
+                .putExtra(AndroidPlaybackService.EXTRA_AUTOPLAY, startPlaying)
+                .putExtra(AndroidPlaybackService.EXTRA_POSITION, positionMillis.coerceAtLeast(0L)),
+        )
     }
 
     fun toggle(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_TOGGLE)
+
+    fun resume(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_RESUME)
+
+    fun pause(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_PAUSE)
 
     fun next(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_NEXT)
 
@@ -145,9 +168,14 @@ object AndroidPlaybackConnection {
 
     fun stopAndClearSession(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_STOP_AND_CLEAR_SESSION)
 
-    private fun dispatch(context: Context, action: String, extra: Pair<String, Long>? = null) {
-        val intent = Intent(context, AndroidPlaybackService::class.java).setAction(action)
-        extra?.let { intent.putExtra(it.first, it.second) }
+    private fun dispatch(context: Context, action: String, extra: Pair<String, Long>? = null) = dispatch(
+        context,
+        Intent(context, AndroidPlaybackService::class.java).setAction(action).apply {
+            extra?.let { putExtra(it.first, it.second) }
+        },
+    )
+
+    private fun dispatch(context: Context, intent: Intent) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent)
         } else {
@@ -235,10 +263,18 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_PLAY_TRACK -> {
-                AndroidPlaybackQueue.current()?.let(::resolveAndPlay)
+                AndroidPlaybackQueue.current()?.let { track ->
+                    resolveAndPlay(
+                        track = track,
+                        autoplay = intent.getBooleanExtra(EXTRA_AUTOPLAY, true),
+                        startPositionMillis = intent.getLongExtra(EXTRA_POSITION, 0L),
+                    )
+                }
                     ?: publishError(tr("status.audio_queue_end"))
             }
             ACTION_TOGGLE -> if (player?.isPlaying == true) pauseCurrent() else resumeCurrent()
+            ACTION_RESUME -> resumeCurrent()
+            ACTION_PAUSE -> pauseCurrent()
             ACTION_NEXT -> playNext()
             ACTION_PREVIOUS -> playPrevious()
             ACTION_SEEK -> seekTo(intent.getLongExtra(EXTRA_POSITION, 0L))
@@ -269,7 +305,11 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         }
     }
 
-    private fun resolveAndPlay(track: AndroidTrack) {
+    private fun resolveAndPlay(
+        track: AndroidTrack,
+        autoplay: Boolean = true,
+        startPositionMillis: Long = 0L,
+    ) {
         val generation = ++loadingGeneration
         acquirePreparationWakeLock(generation)
         releasePlayer()
@@ -280,10 +320,16 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             AndroidPlaybackSnapshot(
                 track = track,
                 isPreparing = true,
+                positionMillis = startPositionMillis.coerceAtLeast(0L),
                 durationMillis = track.durationMillis,
             ),
         )
-        updateSession(track, isPlaying = false, positionMillis = 0L, isPreparing = true)
+        updateSession(
+            track,
+            isPlaying = false,
+            positionMillis = startPositionMillis.coerceAtLeast(0L),
+            isPreparing = true,
+        )
         scope.launch {
             val url = runCatching {
                 resolveStreamUrl(track.id)
@@ -295,12 +341,18 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 publishError(tr("status.track_unplayable"))
                 return@launch
             }
-            preparePlayer(track, url, generation)
+            preparePlayer(track, url, generation, autoplay, startPositionMillis)
             prefetchAdjacentStreamUrls()
         }
     }
 
-    private fun preparePlayer(track: AndroidTrack, url: String, generation: Long) {
+    private fun preparePlayer(
+        track: AndroidTrack,
+        url: String,
+        generation: Long,
+        autoplay: Boolean,
+        startPositionMillis: Long,
+    ) {
         val newPlayer = MediaPlayer().apply {
             setAudioAttributes(playbackAudioAttributes())
             setOnPreparedListener { readyPlayer ->
@@ -308,7 +360,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                     readyPlayer.release()
                     return@setOnPreparedListener
                 }
-                if (!requestAudioFocus()) {
+                if (autoplay && !requestAudioFocus()) {
                     publishError(audioFocusFailureMessage())
                     return@setOnPreparedListener
                 }
@@ -316,11 +368,16 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 // to own playback, so the hand-off wake lock is no longer needed.
                 releasePreparationWakeLock(generation)
                 retargetAudioLevelCapture(readyPlayer.audioSessionId)
-                readyPlayer.start()
-                publishCurrentState(isPreparing = false, isPlaying = true)
+                val boundedStart = startPositionMillis.coerceIn(
+                    0L,
+                    readyPlayer.duration.coerceAtLeast(0).toLong(),
+                )
+                if (boundedStart > 0L) readyPlayer.seekTo(boundedStart.toInt())
+                if (autoplay) readyPlayer.start()
+                publishCurrentState(isPreparing = false, isPlaying = autoplay)
                 ensureForeground(track, preparing = false)
                 handler.removeCallbacks(progressReporter)
-                handler.post(progressReporter)
+                if (autoplay) handler.post(progressReporter)
             }
             setOnCompletionListener { playNext() }
             setOnBufferingUpdateListener { _, percent ->
@@ -402,7 +459,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private fun resumeCurrent(requestFocus: Boolean = true) {
         val currentPlayer = player
         if (currentPlayer == null) {
-            AndroidPlaybackQueue.current()?.let(::resolveAndPlay)
+            AndroidPlaybackQueue.current()?.let { resolveAndPlay(it) }
             return
         }
         if (requestFocus && !requestAudioFocus()) {
@@ -436,11 +493,11 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun playNext() {
-        AndroidPlaybackQueue.next()?.let(::resolveAndPlay)
+        AndroidPlaybackQueue.next()?.let { resolveAndPlay(it) }
     }
 
     private fun playPrevious() {
-        AndroidPlaybackQueue.previous()?.let(::resolveAndPlay)
+        AndroidPlaybackQueue.previous()?.let { resolveAndPlay(it) }
     }
 
     private fun stopPlayback(clearSession: Boolean = false) {
@@ -878,6 +935,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     companion object {
         const val ACTION_PLAY_TRACK = "dev.naominet.lazer.action.PLAY_TRACK"
         const val ACTION_TOGGLE = "dev.naominet.lazer.action.TOGGLE"
+        const val ACTION_RESUME = "dev.naominet.lazer.action.RESUME"
+        const val ACTION_PAUSE = "dev.naominet.lazer.action.PAUSE"
         const val ACTION_NEXT = "dev.naominet.lazer.action.NEXT"
         const val ACTION_PREVIOUS = "dev.naominet.lazer.action.PREVIOUS"
         const val ACTION_SEEK = "dev.naominet.lazer.action.SEEK"
@@ -887,6 +946,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val ACTION_STOP = "dev.naominet.lazer.action.STOP"
         const val ACTION_STOP_AND_CLEAR_SESSION = "dev.naominet.lazer.action.STOP_AND_CLEAR_SESSION"
         const val EXTRA_POSITION = "position_millis"
+        const val EXTRA_AUTOPLAY = "autoplay"
 
         private const val CHANNEL_ID = "lazer.playback"
         private const val NOTIFICATION_ID = 2036

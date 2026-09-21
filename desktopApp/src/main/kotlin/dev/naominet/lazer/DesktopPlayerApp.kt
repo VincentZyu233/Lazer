@@ -314,6 +314,9 @@ fun WindowScope.DesktopPlayerApp(
                 if (controller.isLoginVisible) {
                     LoginOverlay(controller)
                 }
+                if (controller.isListenTogetherVisible) {
+                    ListenTogetherOverlay(controller)
+                }
                 AnimatedVisibility(
                     visible = nowPlayingVisible && controller.nowPlaying != null,
                     enter = fadeIn(tween(220)) +
@@ -2652,6 +2655,13 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                     controller::openLyrics,
                     tr("player.lyrics"),
                     selected = controller.isLyricsVisible,
+                )
+                Spacer(Modifier.width(2.dp))
+                CompactIconButton(
+                    Icons.Outlined.Headphones,
+                    controller::openListenTogether,
+                    tr("listen_together.open"),
+                    selected = controller.listenTogether != null,
                 )
                 Spacer(Modifier.width(2.dp))
                 CompactIconButton(Icons.AutoMirrored.Outlined.QueueMusic, {}, tr("player.queue"))
