@@ -2,7 +2,6 @@ package dev.naominet.lazer
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -69,7 +68,10 @@ import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.model.Artist
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.awt.Frame
 import java.awt.datatransfer.StringSelection
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import java.util.*
 import kotlin.math.absoluteValue
 import kotlin.math.pow
@@ -83,6 +85,9 @@ private val LocalScrollInertia = compositionLocalOf<ScrollInertiaController> {
 
 /** True while the native Windows acrylic backdrop is showing, so chrome can go translucent. */
 private val LocalOsGlassActive = androidx.compose.runtime.staticCompositionLocalOf { false }
+
+/** Expensive decorative frame loops sleep while the window is minimized or behind another app. */
+internal val LocalDesktopWindowForeground = staticCompositionLocalOf { true }
 
 private enum class DesktopDestination(
     private val labelKey: String,
@@ -122,6 +127,31 @@ fun WindowScope.DesktopPlayerApp(
 ) {
     DisposableEffect(controller) {
         onDispose { controller.dispose() }
+    }
+    var windowForeground by remember(window) { mutableStateOf(window.isDesktopForeground()) }
+    DisposableEffect(window, controller) {
+        fun updateForegroundState() {
+            windowForeground = window.isDesktopForeground()
+            controller.setUiForeground(windowForeground)
+        }
+        val listener = object : WindowAdapter() {
+            override fun windowOpened(event: WindowEvent) = updateForegroundState()
+            override fun windowGainedFocus(event: WindowEvent) = updateForegroundState()
+            override fun windowLostFocus(event: WindowEvent) = updateForegroundState()
+            override fun windowIconified(event: WindowEvent) = updateForegroundState()
+            override fun windowDeiconified(event: WindowEvent) = updateForegroundState()
+            override fun windowStateChanged(event: WindowEvent) = updateForegroundState()
+        }
+        window.addWindowListener(listener)
+        window.addWindowFocusListener(listener)
+        window.addWindowStateListener(listener)
+        updateForegroundState()
+        onDispose {
+            window.removeWindowStateListener(listener)
+            window.removeWindowFocusListener(listener)
+            window.removeWindowListener(listener)
+            controller.setUiForeground(false)
+        }
     }
     var destination by remember { mutableStateOf(DesktopDestination.HOME) }
     var settingsVisible by remember { mutableStateOf(false) }
@@ -172,6 +202,7 @@ fun WindowScope.DesktopPlayerApp(
         CompositionLocalProvider(
             LocalScrollInertia provides scrollInertia,
             LocalOsGlassActive provides osGlassActive,
+            LocalDesktopWindowForeground provides windowForeground,
             LocalLazerUiAlpha provides uiAlpha,
             LocalOpenArtists provides { artists ->
                 val available = artists.filter { it.id > 0L && it.name.isNotBlank() }.distinctBy(Artist::id)
@@ -3026,7 +3057,9 @@ private fun LyricsOverlay(
 
     // One persistent frame loop handles both follow motion and wheel inertia. Each lyric row keeps
     // its own velocity and short cascade delay, matching AMLL's non-linear landing.
-    LaunchedEffect(Unit) {
+    val windowForeground = LocalDesktopWindowForeground.current
+    LaunchedEffect(windowForeground) {
+        if (!windowForeground) return@LaunchedEffect
         while (true) {
             withFrameNanos { now ->
                 val dt = if (lyricMotionAtNs == 0L) {
@@ -3459,6 +3492,9 @@ private fun LyricsOverlay(
         }
     }
 }
+
+private fun java.awt.Window.isDesktopForeground(): Boolean =
+    isShowing && isActive && (this !is Frame || extendedState and Frame.ICONIFIED == 0)
 
 
 private fun lerpColor(from: Color, to: Color, t: Float): Color {

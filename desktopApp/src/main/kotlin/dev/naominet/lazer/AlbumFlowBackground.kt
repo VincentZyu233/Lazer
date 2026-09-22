@@ -2,6 +2,7 @@ package dev.naominet.lazer
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -50,11 +51,12 @@ internal fun AlbumFlowBackground(
     solid: Boolean = false,
 ) {
     val palette = remember(colors) { normalizeFlowPalette(colors) }
-    var phaseSeconds by remember(animated) { mutableFloatStateOf(0f) }
+    val windowForeground = LocalDesktopWindowForeground.current
+    val shouldAnimate = animated && windowForeground
+    var phaseSeconds by remember { mutableFloatStateOf(0f) }
 
-    LaunchedEffect(animated) {
-        phaseSeconds = 0f
-        if (!animated) return@LaunchedEffect
+    LaunchedEffect(shouldAnimate) {
+        if (!shouldAnimate) return@LaunchedEffect
         var lastPublishedNs = 0L
         while (isActive) {
             withFrameNanos { now ->
@@ -78,7 +80,11 @@ internal fun AlbumFlowBackground(
     ) {
         Crossfade(
             targetState = palette,
-            animationSpec = tween(durationMillis = 650, easing = FluidPaletteEasing),
+            animationSpec = if (windowForeground) {
+                tween(durationMillis = 650, easing = FluidPaletteEasing)
+            } else {
+                snap()
+            },
             label = if (solid) "artwork-solid-palette" else "lyric-flow-palette",
         ) { activePalette ->
             Box(

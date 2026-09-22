@@ -5,7 +5,10 @@ import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -19,9 +22,10 @@ import kotlin.math.pow
 @Composable
 fun rememberScrollInertiaController(): ScrollInertiaController {
     val controller = remember { ScrollInertiaController() }
-    LaunchedEffect(controller) {
+    val motionRequest = controller.motionRequest
+    LaunchedEffect(controller, motionRequest) {
         var previousFrameNs = 0L
-        while (true) {
+        while (controller.isMoving) {
             withFrameNanos { now ->
                 val dt = if (previousFrameNs == 0L) {
                     1f / 60f
@@ -39,6 +43,9 @@ fun rememberScrollInertiaController(): ScrollInertiaController {
 class ScrollInertiaController {
     private val motion = WheelInertiaMotion()
     private var target: ScrollableState? = null
+    internal var motionRequest by mutableIntStateOf(0)
+        private set
+    internal val isMoving: Boolean get() = motion.isMoving
 
     fun impulse(scrollState: ScrollableState, delta: Float) {
         if (target !== scrollState) {
@@ -46,6 +53,7 @@ class ScrollInertiaController {
             target = scrollState
         }
         scrollState.dispatchRawDelta(motion.impulse(delta))
+        motionRequest++
     }
 
     /** Continue a direct touch/mouse drag with the release velocity, in content pixels/second. */
@@ -55,6 +63,7 @@ class ScrollInertiaController {
             target = scrollState
         }
         motion.fling(velocity)
+        if (motion.isMoving) motionRequest++
     }
 
     internal fun advance(dt: Float) {
@@ -75,6 +84,7 @@ class ScrollInertiaController {
 /** The motion model shared by wheel input and released direct drags. */
 internal class WheelInertiaMotion {
     private var velocity = 0f
+    val isMoving: Boolean get() = abs(velocity) > WheelInertiaDefaults.StopVelocity
 
     fun impulse(delta: Float): Float {
         velocity = (velocity + delta * WheelInertiaDefaults.VelocityMultiplier)
