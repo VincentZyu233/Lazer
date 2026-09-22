@@ -323,6 +323,10 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private var artworkGeneration = 0L
     private var artworkTrackId: Long? = null
     private var artworkBitmap: Bitmap? = null
+    /** What the media session already holds, so a progress tick does not re-send unchanged state. */
+    private var sessionMetadataKey: String? = null
+    private var sessionStateValue: Int? = null
+    private var sessionStatePositionMillis = -1L
     private var wasPlayingBeforeFocusLoss = false
     private var foregroundStarted = false
     private var audioVisualizer: Visualizer? = null
@@ -666,6 +670,9 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         mediaSession?.setPlaybackState(
             PlaybackState.Builder().setState(PlaybackState.STATE_STOPPED, 0L, 0f).build(),
         )
+        // Published outside the throttled path, so the cache must not remember the old state.
+        sessionStateValue = null
+        sessionStatePositionMillis = -1L
         stopForeground(STOP_FOREGROUND_REMOVE)
         foregroundStarted = false
         stopSelf()
@@ -713,6 +720,21 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     ) {
         if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) return
         val session = ensureMediaSession()
+        publishSessionMetadata(session, track)
+        publishSessionState(session, isPlaying, positionMillis, isPreparing)
+    }
+
+    /**
+     * Metadata only moves with the track, and again when its artwork arrives some ticks later.
+     * Rebuilding it on every progress tick parcelled the album bitmap across binder about 31 times
+     * a second, which is the kind of work that heats a phone without ever dropping a frame.
+     */
+    private fun publishSessionMetadata(session: MediaSession, track: AndroidTrack) {
+        val hasArtwork = artworkBitmap != null && artworkTrackId == track.id
+        val key = "${track.id}|${if (hasArtwork) "art" else "plain"}"
+        if (key == sessionMetadataKey) return
+        sessionMetadataKey = key
+
         val metadata = MediaMetadata.Builder()
             .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
             .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, track.title)
@@ -721,16 +743,35 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             .putString(MediaMetadata.METADATA_KEY_ALBUM, track.album)
             .putString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, track.coverUrl)
             .putLong(MediaMetadata.METADATA_KEY_DURATION, track.durationMillis)
-        artworkBitmap.takeIf { artworkTrackId == track.id }?.let { bitmap ->
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bitmap)
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, bitmap)
+        if (hasArtwork) {
+            val bitmap = artworkBitmap
+            if (bitmap != null) {
+                metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, bitmap)
+                metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, bitmap)
+            }
         }
         session.setMetadata(metadata.build())
+    }
+
+    /** Controllers poll position far more slowly than the UI needs it; 250 ms keeps the lock
+     * screen smooth without a binder call every 32 ms. State changes always go through. */
+    private fun publishSessionState(
+        session: MediaSession,
+        isPlaying: Boolean,
+        positionMillis: Long,
+        isPreparing: Boolean,
+    ) {
         val state = when {
             isPreparing -> PlaybackState.STATE_BUFFERING
             isPlaying -> PlaybackState.STATE_PLAYING
             else -> PlaybackState.STATE_PAUSED
         }
+        val position = positionMillis.coerceAtLeast(0L)
+        val moved = kotlin.math.abs(position - sessionStatePositionMillis)
+        if (state == sessionStateValue && moved < SESSION_STATE_MIN_STEP_MILLIS) return
+        sessionStateValue = state
+        sessionStatePositionMillis = position
+
         session.setPlaybackState(
             PlaybackState.Builder()
                 .setActions(
@@ -742,7 +783,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                         PlaybackState.ACTION_SEEK_TO or
                         PlaybackState.ACTION_STOP,
                 )
-                .setState(state, positionMillis.coerceAtLeast(0L), if (isPlaying) 1f else 0f)
+                .setState(state, position, if (isPlaying) 1f else 0f)
                 .build(),
         )
     }
@@ -968,6 +1009,10 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             session.release()
         }
         mediaSession = null
+        // A replacement session starts empty, so nothing may be assumed already published.
+        sessionMetadataKey = null
+        sessionStateValue = null
+        sessionStatePositionMillis = -1L
     }
 
     private fun playbackAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
@@ -1101,6 +1146,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         private const val CHANNEL_ID = "lazer.playback"
         private const val NOTIFICATION_ID = 2036
         private const val PROGRESS_UPDATE_MILLIS = 32L
+        private const val SESSION_STATE_MIN_STEP_MILLIS = 250L
         private const val NETWORK_TIMEOUT_MILLIS = 10_000
         private const val PREPARATION_WAKE_LOCK_TIMEOUT_MILLIS = 45_000L
         private const val STREAM_URL_CACHE_SIZE = 6
