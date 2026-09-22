@@ -64,7 +64,7 @@ jobs:
         run: |
           $app = Get-ChildItem 'desktopApp/build/compose/binaries/main-release/app' -Directory | Select-Object -First 1
           if ($null -eq $app) { throw 'Compose app image was not created.' }
-          Compress-Archive -Path $app.FullName -DestinationPath 'desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64-portable.zip' -Force
+          tar.exe -a -c -f 'desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64-portable.zip' -C $app.Parent.FullName $app.Name
       # Separate artifacts so each downloads as its own zip in Actions.
       - uses: actions/upload-artifact@v4
         with:
