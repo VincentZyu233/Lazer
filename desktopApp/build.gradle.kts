@@ -50,7 +50,7 @@ compose.desktop {
         jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "dev.naominet.lazer"
             packageVersion = "1.2.0"
             windows {
@@ -59,6 +59,11 @@ compose.desktop {
             macOS {
                 bundleID = "dev.naominet.lazer"
                 appCategory = "public.app-category.music"
+            }
+            linux {
+                shortcut = true
+                appCategory = "AudioVideo"
+                menuGroup = "AudioVideo"
             }
         }
     }

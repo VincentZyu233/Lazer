@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, "ci/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
           path: androidApp/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-  # Desktop MSI + runnable fat jar (x64 runner).
+  # Windows x64 MSI, portable app image, and runnable fat jar.
   desktop:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -56,7 +56,16 @@ jobs:
       - name: Build runnable jar
         shell: pwsh
         run: .\gradlew.bat :desktopApp:packageUberJarForCurrentOS --stacktrace
-      # Separate artifacts so each downloads as its own zip (msi.zip, jar.zip).
+      - name: Build portable Windows app
+        shell: pwsh
+        run: .\gradlew.bat :desktopApp:createReleaseDistributable --stacktrace
+      - name: Archive portable Windows app
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem 'desktopApp/build/compose/binaries/main-release/app' -Directory | Select-Object -First 1
+          if ($null -eq $app) { throw 'Compose app image was not created.' }
+          Compress-Archive -Path $app.FullName -DestinationPath 'desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64-portable.zip' -Force
+      # Separate artifacts so each downloads as its own zip in Actions.
       - uses: actions/upload-artifact@v4
         with:
           name: lazer-msi
@@ -68,11 +77,87 @@ jobs:
           path: desktopApp/build/compose/jars/*.jar
           if-no-files-found: error
 
-  # Version tags publish the three deliverables uncompressed as release assets. A build without a
-  # tag only leaves the Actions artifacts (lazer-apk-arm64.zip, msi.zip, jar.zip).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-windows-x64-portable
+          path: desktopApp/build/compose/binaries/*-windows-x64-portable.zip
+          if-no-files-found: error
+
+  # Linux x64 packages plus a real single-file AppImage. Ubuntu 22.04 provides a conservative
+  # glibc baseline for the AppImage while jpackage produces the native deb/rpm packages.
+  linux-desktop:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Linux packaging tools
+        run: sudo apt-get update && sudo apt-get install -y fakeroot rpm
+      - name: Build deb and rpm packages
+        run: ./gradlew :desktopApp:packageReleaseDeb :desktopApp:packageReleaseRpm --stacktrace
+      - name: Build Linux app image
+        run: ./gradlew :desktopApp:createReleaseDistributable --stacktrace
+      - name: Assemble AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$(find desktopApp/build/compose/binaries/main-release/app -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -n "$bundle_dir"
+          app_dir="desktopApp/build/appimage/Lazer.AppDir"
+          rm -rf "$app_dir"
+          mkdir -p "$app_dir/usr/lib/lazer" "$app_dir/usr/bin" \
+            "$app_dir/usr/share/applications" "$app_dir/usr/share/icons/hicolor/256x256/apps"
+          cp -a "$bundle_dir/." "$app_dir/usr/lib/lazer/"
+          ln -s ../lib/lazer/bin/dev.naominet.lazer "$app_dir/usr/bin/dev.naominet.lazer"
+          cp desktopApp/src/main/resources/icon.png "$app_dir/usr/share/icons/hicolor/256x256/apps/dev.naominet.lazer.png"
+          cat > "$app_dir/usr/share/applications/dev.naominet.lazer.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Lazer
+          Comment=Music player
+          Exec=dev.naominet.lazer
+          Icon=dev.naominet.lazer
+          Categories=AudioVideo;Audio;Player;
+          Terminal=false
+          EOF
+          ln -s usr/share/applications/dev.naominet.lazer.desktop "$app_dir/dev.naominet.lazer.desktop"
+          ln -s usr/share/icons/hicolor/256x256/apps/dev.naominet.lazer.png "$app_dir/dev.naominet.lazer.png"
+          cat > "$app_dir/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/dev.naominet.lazer" "$@"
+          EOF
+          chmod +x "$app_dir/AppRun"
+          curl -fsSL -o appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run "$app_dir" \
+            "desktopApp/build/compose/binaries/Lazer-1.2.0-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-deb-x64
+          path: desktopApp/build/compose/binaries/**/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-rpm-x64
+          path: desktopApp/build/compose/binaries/**/*.rpm
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-appimage-x64
+          path: desktopApp/build/compose/binaries/*.AppImage
+          if-no-files-found: error
+
+  # Version tags publish all deliverables uncompressed as release assets. Untagged builds leave
+  # the corresponding Actions artifacts for platform testing.
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [android, desktop]
+    needs: [android, desktop, linux-desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -80,10 +165,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Collect the three deliverables
+      - name: Collect release deliverables
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.apk' -o -name '*.msi' -o -name '*.jar' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.apk' -o -name '*.msi' -o -name '*.jar' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*-portable.zip' \) -exec cp {} release/ \;
           ls -l release
       # Release titles use "Release X.Y", dropping the leading "v" from the tag.
       - name: Resolve release title
@@ -97,3 +182,7 @@ jobs:
             release/*.apk
             release/*.msi
             release/*.jar
+            release/*.deb
+            release/*.rpm
+            release/*.AppImage
+            release/*-portable.zip
