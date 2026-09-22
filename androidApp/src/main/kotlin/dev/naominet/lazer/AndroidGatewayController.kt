@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.GatewayHttpException
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
+import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
 import dev.naominet.lazer.gateway.model.ListenTogetherParticipant
@@ -17,6 +18,7 @@ import dev.naominet.lazer.gateway.model.ListenTogetherPlaylistVersion
 import dev.naominet.lazer.gateway.model.ListenTogetherRoomKind
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.Song
+import dev.naominet.lazer.gateway.model.SongComment
 import dev.naominet.lazer.gateway.model.UserProfile
 import dev.naominet.lazer.gateway.model.incrementListenTogetherVersion
 import dev.naominet.lazer.gateway.model.isListenTogetherClosed
@@ -111,6 +113,18 @@ data class AndroidListenTogetherState(
     val remoteTrackId: Long? = null,
 )
 
+/** One page of song comments, accumulated so the sheet can keep its scroll position. */
+data class AndroidSongCommentState(
+    val songId: Long = 0,
+    val loading: Boolean = false,
+    val loadingMore: Boolean = false,
+    val failed: Boolean = false,
+    val total: Int = 0,
+    val hasMore: Boolean = false,
+    val hotComments: List<SongComment> = emptyList(),
+    val comments: List<SongComment> = emptyList(),
+)
+
 private data class AndroidListenTogetherPlaybackKey(
     val trackId: Long?,
     val isPlaying: Boolean,
@@ -119,6 +133,7 @@ private data class AndroidListenTogetherPlaybackKey(
 private const val LISTEN_TOGETHER_REFRESH_MILLIS = 3_000L
 private const val LISTEN_TOGETHER_HEARTBEAT_MILLIS = 10_000L
 private const val LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS = 4_000L
+private const val COMMENT_PAGE_SIZE = 20
 
 class AndroidGatewayController(context: Context) {
     private val appContext = context.applicationContext
@@ -291,6 +306,7 @@ class AndroidGatewayController(context: Context) {
     private var listenTogetherPlaylistState: ListenTogetherPlaybackState? = null
     private var listenTogetherVersions: List<ListenTogetherPlaylistVersion> = emptyList()
     private var listenTogetherQueue: List<AndroidTrack> = emptyList()
+    private var lastListenTogetherRoomQueueIds: List<Long> = emptyList()
     private var lastReportedQueueIds: List<Long> = emptyList()
     private var lastAppliedRemoteSequence = -1L
     private var lastStablePlayback: AndroidListenTogetherPlaybackKey? = null
@@ -319,6 +335,187 @@ class AndroidGatewayController(context: Context) {
         isListenTogetherVisible = false
         listenTogetherError = null
         pendingListenTogetherInvitation = null
+    }
+
+    var isQueueSheetVisible by mutableStateOf(false)
+        private set
+
+    /**
+     * The room's shared order. A room decides what everyone hears, so while one is open the queue
+     * card reads this list instead of the local one and offers no edits.
+     */
+    var listenTogetherRoomQueue by mutableStateOf<List<AndroidTrack>>(emptyList())
+        private set
+
+    fun openQueueSheet() {
+        isQueueSheetVisible = true
+    }
+
+    fun closeQueueSheet() {
+        isQueueSheetVisible = false
+    }
+
+    fun setPlayMode(mode: AndroidPlayMode) = AndroidPlaybackConnection.setPlayMode(appContext, mode)
+
+    fun playQueueAt(position: Int) = AndroidPlaybackConnection.playAt(appContext, position)
+
+    fun removeFromQueue(position: Int) = AndroidPlaybackConnection.removeAt(appContext, position)
+
+    fun moveInQueue(from: Int, to: Int) = AndroidPlaybackConnection.moveTrack(from, to)
+
+    var isCommentSheetVisible by mutableStateOf(false)
+        private set
+    var comments by mutableStateOf(AndroidSongCommentState())
+        private set
+
+    private var commentJob: Job? = null
+    private val commentPages = mutableMapOf<Long, AndroidSongCommentState>()
+
+    /** Paints the cached page first, then asks the service for the same page again. */
+    fun openSongComments() {
+        val songId = AndroidPlaybackConnection.snapshot.value.track?.id ?: return
+        isCommentSheetVisible = true
+        val cached = commentPages[songId]
+        comments = cached ?: AndroidSongCommentState(songId = songId, loading = true)
+        requestSongComments(songId, offset = 0, append = false)
+    }
+
+    fun closeSongComments() {
+        isCommentSheetVisible = false
+        commentJob?.cancel()
+        cancelReply()
+    }
+
+    fun loadMoreSongComments() {
+        val state = comments
+        if (state.songId <= 0L || !state.hasMore || state.loading || state.loadingMore) return
+        requestSongComments(state.songId, offset = state.comments.size, append = true)
+    }
+
+    fun retrySongComments() {
+        val songId = comments.songId
+        if (songId <= 0L) return
+        requestSongComments(songId, offset = 0, append = false)
+    }
+
+    /** The comment the composer is answering, or null while the composer is hidden. */
+    var replyTarget by mutableStateOf<SongComment?>(null)
+        private set
+    var replyDraft by mutableStateOf("")
+        private set
+    var isReplySending by mutableStateOf(false)
+        private set
+    var replyError by mutableStateOf<String?>(null)
+        private set
+
+    private var replyJob: Job? = null
+
+    fun startReply(comment: SongComment) {
+        if (currentUser == null) {
+            openLogin()
+            return
+        }
+        replyTarget = comment
+        replyError = null
+    }
+
+    fun cancelReply() {
+        replyTarget = null
+        replyDraft = ""
+        replyError = null
+    }
+
+    fun updateReplyDraft(value: String) {
+        replyDraft = value.take(SONG_COMMENT_CONTENT_LIMIT)
+    }
+
+    fun sendReply() {
+        val songId = comments.songId
+        val target = replyTarget ?: return
+        val content = replyDraft.trim()
+        if (songId <= 0L || content.isEmpty() || isReplySending) return
+        isReplySending = true
+        replyError = null
+        replyJob?.cancel()
+        replyJob = scope.launch {
+            val result = runCatching { gateway.replyToSongComment(songId, target.commentId, content) }
+            isReplySending = false
+            result.fold(
+                onSuccess = {
+                    replyTarget = null
+                    replyDraft = ""
+                    message = tr("comment.reply_sent")
+                    // Floor replies only show up in the parent's own summary, so re-read page one.
+                    requestSongComments(songId, offset = 0, append = false)
+                },
+                onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    replyError = tr("comment.reply_fail")
+                },
+            )
+        }
+    }
+
+    /** Flips the like locally first, because a round trip per tap feels broken. */
+    fun toggleCommentLiked(comment: SongComment) {
+        val songId = comments.songId
+        if (songId <= 0L) return
+        if (currentUser == null) {
+            openLogin()
+            return
+        }
+        val wanted = !comment.liked
+        patchComment(comment.commentId) { it.copy(liked = wanted, likedCount = likeCountAfter(comment, wanted)) }
+        // Each like patches only its own comment, so they never need to cancel one another.
+        scope.launch {
+            runCatching { gateway.setSongCommentLiked(songId, comment.commentId, wanted) }.onFailure { error ->
+                if (error is CancellationException) throw error
+                patchComment(comment.commentId) { it.copy(liked = comment.liked, likedCount = comment.likedCount) }
+                message = tr("comment.like_fail")
+            }
+        }
+    }
+
+    private fun likeCountAfter(comment: SongComment, liked: Boolean): Int =
+        (comment.likedCount + if (liked) 1 else -1).coerceAtLeast(0)
+
+    private fun patchComment(commentId: Long, transform: (SongComment) -> SongComment) {
+        comments = comments.copy(
+            hotComments = comments.hotComments.map { if (it.commentId == commentId) transform(it) else it },
+            comments = comments.comments.map { if (it.commentId == commentId) transform(it) else it },
+        )
+    }
+
+    private fun requestSongComments(songId: Long, offset: Int, append: Boolean) {
+        commentJob?.cancel()
+        commentJob = scope.launch {
+            comments = comments.copy(
+                songId = songId,
+                loading = !append && comments.comments.isEmpty(),
+                loadingMore = append,
+                failed = false,
+            )
+            val page = try {
+                gateway.songComments(songId, limit = COMMENT_PAGE_SIZE, offset = offset)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (isActive && comments.songId == songId) {
+                    comments = comments.copy(loading = false, loadingMore = false, failed = true)
+                }
+                return@launch
+            }
+            val merged = AndroidSongCommentState(
+                songId = songId,
+                total = page.total,
+                hasMore = page.more,
+                hotComments = if (offset == 0) page.hotComments else comments.hotComments,
+                comments = if (append) comments.comments + page.comments else page.comments,
+            )
+            commentPages[songId] = merged
+            // A newer request has already published by now if the sheet moved on to another song.
+            if (comments.songId == songId) comments = merged
+        }
     }
 
     fun createListenTogetherRoom(kind: ListenTogetherRoomKind) {
@@ -488,6 +685,12 @@ class AndroidGatewayController(context: Context) {
                         )
                         listenTogetherSequence = maxOf(listenTogetherSequence, remote.clientSequence + 1L)
                         applyRemotePlayback(remote)
+                        // Naming the room order is only worth a request when the order itself moved.
+                        if (remote.trackIds != lastListenTogetherRoomQueueIds) {
+                            lastListenTogetherRoomQueueIds = remote.trackIds
+                            runCatching { loadListenTogetherTracks(remote.trackIds) }
+                                .onSuccess { listenTogetherRoomQueue = it }
+                        }
                     }
                     listenTogether = room.copy(
                         connection = AndroidListenTogetherConnection.CONNECTED,
@@ -533,6 +736,8 @@ class AndroidGatewayController(context: Context) {
         listenTogetherPlaylistState = null
         listenTogetherVersions = emptyList()
         listenTogetherQueue = AndroidPlaybackConnection.currentQueue()
+        listenTogetherRoomQueue = emptyList()
+        lastListenTogetherRoomQueueIds = emptyList()
         lastReportedQueueIds = emptyList()
         lastAppliedRemoteSequence = -1L
         pendingRemotePlayback = null

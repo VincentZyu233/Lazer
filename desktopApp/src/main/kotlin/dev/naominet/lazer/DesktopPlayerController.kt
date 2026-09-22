@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
+import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
 import dev.naominet.lazer.gateway.model.ListenTogetherInvite
@@ -20,6 +21,7 @@ import dev.naominet.lazer.gateway.model.ListenTogetherRoomKind
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.QrCheckResponse
 import dev.naominet.lazer.gateway.model.Song
+import dev.naominet.lazer.gateway.model.SongComment
 import dev.naominet.lazer.gateway.model.SongUrl
 import dev.naominet.lazer.gateway.model.UserProfile
 import dev.naominet.lazer.gateway.model.incrementListenTogetherVersion
@@ -138,7 +140,27 @@ private data class DesktopListenTogetherPlaybackKey(
     val isPlaying: Boolean,
 )
 
+/** How the queue advances, mirroring the three modes the mobile player offers. */
+enum class DesktopPlayMode {
+    ListLoop,
+    SingleLoop,
+    Shuffle,
+}
+
+/** One page of song comments, accumulated so the panel can keep its scroll position. */
+data class DesktopSongCommentState(
+    val songId: Long = 0,
+    val loading: Boolean = false,
+    val loadingMore: Boolean = false,
+    val failed: Boolean = false,
+    val total: Int = 0,
+    val hasMore: Boolean = false,
+    val hotComments: List<SongComment> = emptyList(),
+    val comments: List<SongComment> = emptyList(),
+)
+
 private const val LISTEN_TOGETHER_REFRESH_MILLIS = 3_000L
+private const val COMMENT_PAGE_SIZE = 20
 private const val LISTEN_TOGETHER_WATCH_MILLIS = 700L
 private const val LISTEN_TOGETHER_HEARTBEAT_MILLIS = 10_000L
 private const val LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS = 4_000L
@@ -344,18 +366,33 @@ class DesktopPlayerController(
     private var streamExpectedBytes: Long? = null
     var isLiked by mutableStateOf(false)
         private set
-    var shuffle by mutableStateOf(false)
-        private set
-    var repeat by mutableStateOf(false)
-        private set
+    /**
+     * The single knob behind the shuffle and repeat buttons. Keeping it as one mode instead of two
+     * booleans is what lets the queue card show a real "up next" order.
+     */
+    private var playModeState by mutableStateOf(DesktopPlayMode.ListLoop)
+
+    val playMode: DesktopPlayMode get() = playModeState
+
+    val shuffle: Boolean get() = playModeState == DesktopPlayMode.Shuffle
+    val repeat: Boolean get() = playModeState == DesktopPlayMode.SingleLoop
+
+    /**
+     * An arrangement made in the queue card, paired with the source list it was made from. Carrying
+     * the source alongside the order is what retires an edit once a different playlist takes over,
+     * without the reader having to write anything back.
+     */
+    private data class QueueEdit(val base: List<TrackItem>, val order: List<TrackItem>)
+
+    private var queueEdit by mutableStateOf<QueueEdit?>(null)
+    private var derivedQueue: List<TrackItem>? = null
+    private var derivedQueueBase: List<TrackItem>? = null
 
     var lyrics by mutableStateOf<List<TimedLyricLine>>(emptyList())
         private set
     var lyricsLoading by mutableStateOf(false)
         private set
     var lyricsError by mutableStateOf<String?>(null)
-        private set
-    var isLyricsVisible by mutableStateOf(false)
         private set
     /** Album-art-derived seed and colors driving themes and visual backgrounds. */
     var nowPlayingArtworkSeed by mutableStateOf(CoverPalette.defaultSeed)
@@ -417,6 +454,7 @@ class DesktopPlayerController(
     private var listenTogetherPlaylistState: ListenTogetherPlaybackState? = null
     private var listenTogetherVersions: List<ListenTogetherPlaylistVersion> = emptyList()
     private var lastReportedQueueIds: List<Long> = emptyList()
+    private var lastRoomQueueIds: List<Long> = emptyList()
     private var lastAppliedRemoteSequence = -1L
     private var pendingRemotePlayback: DesktopListenTogetherPlaybackKey? = null
     private var lastStablePlayback: DesktopListenTogetherPlaybackKey? = null
@@ -752,18 +790,6 @@ class DesktopPlayerController(
         resolveAndPlay(track, resumeProgress = resumeProgress, playWhenReady = shouldPlay)
     }
 
-    fun openLyrics() {
-        isLyricsVisible = true
-        val track = nowPlaying ?: return
-        if (lyrics.isEmpty() && !lyricsLoading) {
-            loadLyrics(track.id)
-        }
-    }
-
-    fun closeLyrics() {
-        isLyricsVisible = false
-    }
-
     /** Jump playback to the start of a lyric line. */
     fun seekToLyric(index: Int) {
         val line = lyrics.getOrNull(index) ?: return
@@ -1070,11 +1096,51 @@ class DesktopPlayerController(
     }
 
     fun toggleShuffle() {
-        shuffle = !shuffle
+        setPlayMode(if (shuffle) DesktopPlayMode.ListLoop else DesktopPlayMode.Shuffle)
     }
 
     fun toggleRepeat() {
-        repeat = !repeat
+        setPlayMode(if (repeat) DesktopPlayMode.ListLoop else DesktopPlayMode.SingleLoop)
+    }
+
+    fun setPlayMode(mode: DesktopPlayMode) {
+        if (playModeState == mode) return
+        playModeState = mode
+        // Shuffling has to permute whatever order the listener just arranged, not the original one.
+        queueEdit = queueEdit?.let { it.copy(order = it.order.shuffled()) }
+        derivedQueue = null
+        derivedQueueBase = null
+    }
+
+    /** The order playback follows, including any edit made in the queue card. */
+    val queue: List<TrackItem> get() = effectiveQueue()
+
+    fun playQueueAt(position: Int) {
+        effectiveQueue().getOrNull(position)?.let { playTrack(it) }
+    }
+
+    fun removeFromQueue(position: Int) {
+        val remaining = effectiveQueue().toMutableList()
+        if (position !in remaining.indices) return
+        val wasAudible = remaining[position].id == nowPlaying?.id
+        remaining.removeAt(position)
+        rememberQueueOrder(remaining)
+        if (wasAudible) {
+            // Dropping the last item while it plays wraps, rather than stopping with a queue left.
+            (remaining.getOrNull(position) ?: remaining.firstOrNull())?.let(::playTrack)
+                ?: run { isPlaying = false }
+        }
+    }
+
+    fun moveInQueue(from: Int, to: Int) {
+        val reordered = effectiveQueue().toMutableList()
+        if (from !in reordered.indices || to !in reordered.indices || from == to) return
+        reordered.add(to, reordered.removeAt(from))
+        rememberQueueOrder(reordered)
+    }
+
+    private fun rememberQueueOrder(order: List<TrackItem>) {
+        queueEdit = QueueEdit(base = baseQueue(), order = order)
     }
 
     fun openPlaylist(playlist: PlaylistItem) {
@@ -1438,6 +1504,178 @@ class DesktopPlayerController(
         listenTogetherError = null
     }
 
+    var isQueuePanelVisible by mutableStateOf(false)
+        private set
+
+    /**
+     * The room's shared order. A room decides what everyone hears, so while one is open the queue
+     * panel reads this list instead of the local one and offers no edits.
+     */
+    var roomQueue by mutableStateOf<List<TrackItem>>(emptyList())
+        private set
+
+    fun openQueuePanel() {
+        isQueuePanelVisible = true
+    }
+
+    fun closeQueuePanel() {
+        isQueuePanelVisible = false
+    }
+
+    var isCommentPanelVisible by mutableStateOf(false)
+        private set
+    var comments by mutableStateOf(DesktopSongCommentState())
+        private set
+
+    private var commentJob: Job? = null
+    private val commentPages = mutableMapOf<Long, DesktopSongCommentState>()
+
+    /** Paints the cached page first, then asks the service for the same page again. */
+    fun openSongComments() {
+        val songId = nowPlaying?.id ?: return
+        isCommentPanelVisible = true
+        comments = commentPages[songId] ?: DesktopSongCommentState(songId = songId, loading = true)
+        requestSongComments(songId, offset = 0, append = false)
+    }
+
+    fun closeCommentPanel() {
+        isCommentPanelVisible = false
+        commentJob?.cancel()
+        cancelReply()
+    }
+
+    fun loadMoreSongComments() {
+        val state = comments
+        if (state.songId <= 0L || !state.hasMore || state.loading || state.loadingMore) return
+        requestSongComments(state.songId, offset = state.comments.size, append = true)
+    }
+
+    fun retrySongComments() {
+        val songId = comments.songId
+        if (songId <= 0L) return
+        requestSongComments(songId, offset = 0, append = false)
+    }
+
+    /** The comment the composer is answering, or null while the composer is hidden. */
+    var replyTarget by mutableStateOf<SongComment?>(null)
+        private set
+    var replyDraft by mutableStateOf("")
+        private set
+    var isReplySending by mutableStateOf(false)
+        private set
+    var replyError by mutableStateOf<String?>(null)
+        private set
+
+    private var replyJob: Job? = null
+
+    fun startReply(comment: SongComment) {
+        if (currentUser == null) {
+            openLogin()
+            return
+        }
+        replyTarget = comment
+        replyError = null
+    }
+
+    fun cancelReply() {
+        replyTarget = null
+        replyDraft = ""
+        replyError = null
+    }
+
+    fun updateReplyDraft(value: String) {
+        replyDraft = value.take(SONG_COMMENT_CONTENT_LIMIT)
+    }
+
+    fun sendReply() {
+        val songId = comments.songId
+        val target = replyTarget ?: return
+        val content = replyDraft.trim()
+        if (songId <= 0L || content.isEmpty() || isReplySending) return
+        isReplySending = true
+        replyError = null
+        replyJob?.cancel()
+        replyJob = scope.launch {
+            val result = runCatching { gateway.replyToSongComment(songId, target.commentId, content) }
+            isReplySending = false
+            result.fold(
+                onSuccess = {
+                    replyTarget = null
+                    replyDraft = ""
+                    statusMessage = tr("comment.reply_sent")
+                    requestSongComments(songId, offset = 0, append = false)
+                },
+                onFailure = { error ->
+                    if (error is CancellationException) throw error
+                    replyError = tr("comment.reply_fail")
+                },
+            )
+        }
+    }
+
+    /** Flips the like locally first, because a round trip per tap feels broken. */
+    fun toggleCommentLiked(comment: SongComment) {
+        val songId = comments.songId
+        if (songId <= 0L) return
+        if (currentUser == null) {
+            openLogin()
+            return
+        }
+        val wanted = !comment.liked
+        patchComment(comment.commentId) {
+            it.copy(
+                liked = wanted,
+                likedCount = (comment.likedCount + if (wanted) 1 else -1).coerceAtLeast(0),
+            )
+        }
+        // Each like patches only its own comment, so they never need to cancel one another.
+        scope.launch {
+            runCatching { gateway.setSongCommentLiked(songId, comment.commentId, wanted) }.onFailure { error ->
+                if (error is CancellationException) throw error
+                patchComment(comment.commentId) { it.copy(liked = comment.liked, likedCount = comment.likedCount) }
+                statusMessage = tr("comment.like_fail")
+            }
+        }
+    }
+
+    private fun patchComment(commentId: Long, transform: (SongComment) -> SongComment) {
+        comments = comments.copy(
+            hotComments = comments.hotComments.map { if (it.commentId == commentId) transform(it) else it },
+            comments = comments.comments.map { if (it.commentId == commentId) transform(it) else it },
+        )
+    }
+
+    private fun requestSongComments(songId: Long, offset: Int, append: Boolean) {
+        commentJob?.cancel()
+        commentJob = scope.launch {
+            comments = comments.copy(
+                songId = songId,
+                loading = !append && comments.comments.isEmpty(),
+                loadingMore = append,
+                failed = false,
+            )
+            val page = try {
+                gateway.songComments(songId, limit = COMMENT_PAGE_SIZE, offset = offset)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (isActive && comments.songId == songId) {
+                    comments = comments.copy(loading = false, loadingMore = false, failed = true)
+                }
+                return@launch
+            }
+            val merged = DesktopSongCommentState(
+                songId = songId,
+                total = page.total,
+                hasMore = page.more,
+                hotComments = if (offset == 0) page.hotComments else comments.hotComments,
+                comments = if (append) comments.comments + page.comments else page.comments,
+            )
+            commentPages[songId] = merged
+            if (comments.songId == songId) comments = merged
+        }
+    }
+
     fun createListenTogetherRoom(kind: ListenTogetherRoomKind) {
         val user = currentUser
         if (user == null) {
@@ -1571,6 +1809,12 @@ class DesktopPlayerController(
                         )
                         listenTogetherSequence = maxOf(listenTogetherSequence, remote.clientSequence + 1L)
                         applyRemotePlayback(remote)
+                        // Naming the room order is only worth a request when the order itself moved.
+                        if (remote.trackIds != lastRoomQueueIds) {
+                            lastRoomQueueIds = remote.trackIds
+                            runCatching { loadRoomTracks(remote.trackIds) }
+                                .onSuccess { roomQueue = it }
+                        }
                     }
                     listenTogether = room.copy(
                         connection = DesktopListenTogetherConnection.CONNECTED,
@@ -1723,6 +1967,8 @@ class DesktopPlayerController(
         listenTogetherSequence = 1L
         listenTogetherPlaylistState = null
         listenTogetherVersions = emptyList()
+        roomQueue = emptyList()
+        lastRoomQueueIds = emptyList()
         lastReportedQueueIds = emptyList()
         lastAppliedRemoteSequence = -1L
         pendingRemotePlayback = null
@@ -2121,15 +2367,28 @@ class DesktopPlayerController(
         isLiked = nowPlaying?.let { current -> likedTracks.any { it.id == current.id } } ?: false
     }
 
+    private fun baseQueue(): List<TrackItem> = when {
+        activeArtist != null && activeArtistTracks.isNotEmpty() -> activeArtistTracks
+        activePlaylist != null && activePlaylistTracks.isNotEmpty() -> activePlaylistTracks
+        searchResults.isNotEmpty() -> searchResults
+        recentTracks.isNotEmpty() -> recentTracks
+        else -> listOfNotNull(nowPlaying)
+    }
+
+    /**
+     * Resolving the queue once instead of on every call is what makes "up next" mean something:
+     * a fresh shuffle per lookup would promise an order it never keeps. Reads never mutate observed
+     * state, so a stale edit is ignored by comparing the source it was made from.
+     */
     private fun effectiveQueue(): List<TrackItem> {
-        val base = when {
-            activeArtist != null && activeArtistTracks.isNotEmpty() -> activeArtistTracks
-            activePlaylist != null && activePlaylistTracks.isNotEmpty() -> activePlaylistTracks
-            searchResults.isNotEmpty() -> searchResults
-            recentTracks.isNotEmpty() -> recentTracks
-            else -> listOfNotNull(nowPlaying)
+        val base = baseQueue()
+        queueEdit?.takeIf { it.base === base && it.order.isNotEmpty() }?.let { return it.order }
+        val cached = derivedQueue
+        if (cached != null && derivedQueueBase === base) return cached
+        return (if (shuffle) base.shuffled() else base).also {
+            derivedQueue = it
+            derivedQueueBase = base
         }
-        return if (shuffle) base.shuffled() else base
     }
 
     private fun adjacentQueueTracks(): List<TrackItem> {

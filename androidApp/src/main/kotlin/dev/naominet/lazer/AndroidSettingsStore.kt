@@ -167,6 +167,11 @@ internal class AndroidSettingsStore(context: Context) {
         get() = parseAndroidAudioQuality(preferences.getString(KEY_AUDIO_QUALITY, null))
         set(value) = preferences.edit().putString(KEY_AUDIO_QUALITY, value.name).apply()
 
+    /** How the queue advances. Survives a restart because the service reads it on creation. */
+    var playMode: AndroidPlayMode
+        get() = AndroidPlayMode.parse(preferences.getString(KEY_PLAY_MODE, null))
+        set(value) = preferences.edit().putString(KEY_PLAY_MODE, value.name).apply()
+
     var exclusiveAudio: Boolean
         get() = preferences.getBoolean(KEY_EXCLUSIVE_AUDIO, false)
         set(value) = preferences.edit().putBoolean(KEY_EXCLUSIVE_AUDIO, value).apply()
@@ -203,6 +208,7 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_LYRIC_FONT_SIZE_SP = "lyrics.font_size_sp"
         const val KEY_SHOW_FULL_LYRICS = "lyrics.show_full_lines"
         const val KEY_AUDIO_QUALITY = "playback.audio_quality"
+        const val KEY_PLAY_MODE = "playback.mode"
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"

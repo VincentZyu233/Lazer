@@ -292,7 +292,7 @@ private fun ListenTogetherParticipantRow(participant: ListenTogetherParticipant)
             contentAlignment = Alignment.Center,
         ) {
             Text(participant.nickname.firstOrNull()?.toString().orEmpty())
-            participant.avatarUrl?.let { url ->
+            normalizedArtworkUrl(participant.avatarUrl)?.let { url ->
                 AsyncImage(
                     model = url,
                     contentDescription = null,

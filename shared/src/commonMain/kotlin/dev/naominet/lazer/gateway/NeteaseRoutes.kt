@@ -124,6 +124,24 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
             put("cat", value("cat", "全部")); put("order", value("order", "hot")); page(50); put("total", true)
         }
         "/user/detail" -> request("/api/v1/user/detail/${id("uid")}", web = true)
+        "/comment/music" -> request(commentThreadPath(id()), web = true) {
+            put("rid", id())
+            put("limit", value("limit", "20"))
+            put("offset", value("offset", "0"))
+            put("beforeTime", value("before", "0"))
+        }
+        "/comment/like", "/comment/unlike" -> {
+            val action = if (alias == "/comment/like") "like" else "unlike"
+            request("/api/v1/comment/$action", web = true) {
+                put("threadId", songCommentThread(id()))
+                put("commentId", id("commentId"))
+            }
+        }
+        "/comment/reply" -> request("/api/resource/comments/reply") {
+            put("threadId", songCommentThread(id()))
+            put("commentId", id("commentId"))
+            put("content", value("content"))
+        }
         "/album" -> request("/api/v1/album/${id()}", web = true)
         "/artist/detail" -> request("/api/artist/head/info/get") { put("id", id()) }
         "/artist/top/song" -> request("/api/artist/top/song", web = true) { put("id", id()) }
@@ -183,6 +201,14 @@ internal fun neteaseRequest(alias: String, parameters: Map<String, String>): Net
         else -> throw IllegalArgumentException("Unsupported built-in Gateway route.")
     }
 }
+
+/** Songs own one comment thread namespace; the prefix is built here so no caller can supply one. */
+internal const val SONG_COMMENT_THREAD_PREFIX = "R_SO_4_"
+
+private fun songCommentThread(songId: String): String = SONG_COMMENT_THREAD_PREFIX + songId
+
+private fun commentThreadPath(songId: String): String =
+    "/api/v1/resource/comments/" + songCommentThread(songId)
 
 internal fun songIds(value: String): JsonArray = JsonArray(value.split(',').map {
     val id = it.trim().toLongOrNull()
