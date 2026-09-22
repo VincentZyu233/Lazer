@@ -188,6 +188,9 @@ fun WindowScope.DesktopPlayerApp(
         }
         // Windows 任务栏缩略图工具栏(上一首/播放暂停/下一首)。安装在原生窗口句柄就绪后。
         val thumbar = remember { WindowsThumbar(onAction = controller::dispatchMediaControlAction) }
+        DisposableEffect(thumbar) {
+            onDispose { thumbar.close() }
+        }
         LaunchedEffect(window) {
             delay(300)
             thumbar.install(window, controller.isPlaying)

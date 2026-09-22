@@ -24,6 +24,7 @@ import java.awt.Window
 
 private const val WM_COMMAND = 0x0111
 private const val THBN_CLICKED = 0x1800
+private const val TASKBAR_BUTTON_CREATED = "TaskbarButtonCreated"
 
 // THUMBBUTTON.dwMask 位
 private const val THB_BITMAP = 0x1
@@ -36,9 +37,16 @@ private const val THBF_ENABLED = 0x0
 private const val THBF_DISMISSONCLICK = 0x2
 
 // 每个按钮的命令 ID(WM_COMMAND 的低位字返回该值)
-private const val CMD_PREVIOUS = 0x1001
-private const val CMD_PLAYPAUSE = 0x1002
-private const val CMD_NEXT = 0x1003
+internal const val THUMBAR_CMD_PREVIOUS = 0x1001
+internal const val THUMBAR_CMD_PLAYPAUSE = 0x1002
+internal const val THUMBAR_CMD_NEXT = 0x1003
+
+internal fun thumbarActionFromCommand(commandId: Int): MediaControlAction? = when (commandId) {
+    THUMBAR_CMD_PREVIOUS -> MediaControlAction.Previous
+    THUMBAR_CMD_PLAYPAUSE -> MediaControlAction.PlayPause
+    THUMBAR_CMD_NEXT -> MediaControlAction.Next
+    else -> null
+}
 
 /**
  * 管理某个窗口的 Thumbar。生命周期与窗口一致:[install] 一次,[updatePlayState] 随播放状态刷新。
@@ -50,6 +58,9 @@ internal class WindowsThumbar(
     private var installed = false
     private var isPlaying = false
     private var wndProcInstalled = false
+    private var taskbarButtonCreatedMessage = 0
+    private var previousWndProc: Pointer? = null
+    private var hookedHwnd: HWND? = null
 
     /**
      * 在给定窗口上安装 Thumbar 按钮。可安全重复调用(窗口从最小化/托盘恢复后系统会清空按钮,需重装)。
@@ -67,12 +78,28 @@ internal class WindowsThumbar(
                 hookWndProc(handle)
                 wndProcInstalled = true
             }
-            WindowsThumbarNative.ensureButtons(handle, isPlaying)
-            installed = true
-            PlaybackDebugLog.event("thumbar-installed")
+            installed = WindowsThumbarNative.ensureButtons(handle, isPlaying)
+            PlaybackDebugLog.event(if (installed) "thumbar-installed" else "thumbar-install-pending")
         }.onFailure { error ->
             PlaybackDebugLog.event("thumbar-install-error", error.playbackDebugSummary())
         }
+    }
+
+    /** Restores the Compose/Skiko window procedure before the window is disposed. */
+    fun close() {
+        val handle = hookedHwnd ?: return
+        val previous = previousWndProc ?: return
+        runCatching {
+            User32.INSTANCE.SetWindowLongPtr(handle, WinUser.GWL_WNDPROC, previous)
+        }.onFailure { error ->
+            PlaybackDebugLog.event("thumbar-unhook-error", error.playbackDebugSummary())
+        }
+        retainedCallback = null
+        previousWndProc = null
+        hookedHwnd = null
+        hwnd = null
+        installed = false
+        wndProcInstalled = false
     }
 
     /** 播放状态变化时刷新中间按钮图标(播放 <-> 暂停)。 */
@@ -89,20 +116,27 @@ internal class WindowsThumbar(
 
     private fun hookWndProc(handle: HWND) {
         val user32 = User32.INSTANCE
-        // 保存原窗口过程指针,拦截 WM_COMMAND 中的 THBN_CLICKED,其余转发原过程
+        // 保存原窗口过程指针,拦截任务栏消息,其余转发原过程。
         val prevProc: Pointer = user32.GetWindowLongPtr(handle, WinUser.GWL_WNDPROC).toPointer()
+        previousWndProc = prevProc
+        hookedHwnd = handle
+        taskbarButtonCreatedMessage = user32.RegisterWindowMessage(TASKBAR_BUTTON_CREATED)
         val callback = object : WinUser.WindowProc {
             override fun callback(hWnd: HWND, uMsg: Int, wParam: WPARAM, lParam: LPARAM): LRESULT {
+                if (uMsg == taskbarButtonCreatedMessage) {
+                    installed = WindowsThumbarNative.ensureButtons(hWnd, isPlaying)
+                    PlaybackDebugLog.event(
+                        if (installed) "thumbar-taskbar-button-created" else "thumbar-taskbar-button-pending",
+                    )
+                }
                 if (uMsg == WM_COMMAND) {
                     val hiword = (wParam.toInt() ushr 16) and 0xFFFF
                     val loword = wParam.toInt() and 0xFFFF
                     if (hiword == THBN_CLICKED) {
-                        when (loword) {
-                            CMD_PREVIOUS -> runCatching { onAction(MediaControlAction.Previous) }
-                            CMD_PLAYPAUSE -> runCatching { onAction(MediaControlAction.PlayPause) }
-                            CMD_NEXT -> runCatching { onAction(MediaControlAction.Next) }
+                        thumbarActionFromCommand(loword)?.let { action ->
+                            runCatching { onAction(action) }
+                            return LRESULT(0)
                         }
-                        return LRESULT(0)
                     }
                 }
                 return user32.CallWindowProc(prevProc, hWnd, uMsg, wParam, lParam)

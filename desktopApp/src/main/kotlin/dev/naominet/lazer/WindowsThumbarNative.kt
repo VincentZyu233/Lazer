@@ -49,14 +49,16 @@ internal object WindowsThumbarNative {
     private var nextIcon: Pointer? = null
 
     /** 首次安装按钮(ThumbBarAddButtons)。 */
-    fun ensureButtons(hwnd: HWND, isPlaying: Boolean) {
-        val tb = ensureTaskbar() ?: return
+    fun ensureButtons(hwnd: HWND, isPlaying: Boolean): Boolean {
+        val tb = ensureTaskbar() ?: return false
         loadIcons()
         val buttons = buildButtons(isPlaying)
         val hr = invokeThumbBar(tb, VT_THUMBBAR_ADD, hwnd, buttons)
         if (!COMUtils.SUCCEEDED(HRESULT(hr))) {
             PlaybackDebugLog.event("thumbar-add-failed", "hr=0x${hr.toUInt().toString(16)}")
+            return false
         }
+        return true
     }
 
     /** 刷新按钮(ThumbBarUpdateButtons),用于播放/暂停图标切换。 */
@@ -82,7 +84,11 @@ internal object WindowsThumbarNative {
         }
         val tb = ref.value
         // HrInit() 必须在使用任何 taskbar 方法前调用
-        invokeNoArg(tb, VT_HRINIT)
+        val initHr = invokeNoArg(tb, VT_HRINIT)
+        if (!COMUtils.SUCCEEDED(HRESULT(initHr))) {
+            PlaybackDebugLog.event("thumbar-hrinit-failed", "hr=0x${initHr.toUInt().toString(16)}")
+            return null
+        }
         taskbar = tb
         return tb
     }

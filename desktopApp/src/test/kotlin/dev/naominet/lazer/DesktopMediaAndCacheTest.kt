@@ -21,6 +21,14 @@ import org.junit.Test
 
 class DesktopMediaAndCacheTest {
     @Test
+    fun `thumbar command ids dispatch only supported media actions`() {
+        assertEquals(MediaControlAction.Previous, thumbarActionFromCommand(THUMBAR_CMD_PREVIOUS))
+        assertEquals(MediaControlAction.PlayPause, thumbarActionFromCommand(THUMBAR_CMD_PLAYPAUSE))
+        assertEquals(MediaControlAction.Next, thumbarActionFromCommand(THUMBAR_CMD_NEXT))
+        assertEquals(null, thumbarActionFromCommand(0xFFFF))
+    }
+
+    @Test
     fun `acrylic tint follows the app theme instead of Windows appearance`() {
         // Native acrylic uses AABBGGRR. Day mode is the light paper (#F7F5EF) with an 80% tint,
         // leaving just enough blurred desktop to retain the acrylic character.
