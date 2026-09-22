@@ -53,6 +53,16 @@ compose.desktop {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "dev.naominet.lazer"
             packageVersion = "1.2.0"
+            // DesktopAudioCache uses java.net.http.HttpClient via the JDK module API.
+            // It is not visible to jdeps through the Kotlin bytecode analysis, so retain it
+            // explicitly in jpackage's custom runtime image.
+            modules("java.net.http")
+            buildTypes.release.proguard {
+                // Runtime-discovered libraries such as Ktor engines cannot be safely inferred
+                // by the shrinker. Keep release app images functionally identical to dev builds.
+                isEnabled.set(false)
+                configurationFiles.from(project.file("proguard-rules.pro"))
+            }
             windows {
                 iconFile = project.file("src/main/resources/icon.ico")
             }

@@ -59,6 +59,21 @@ jobs:
       - name: Build portable Windows app
         shell: pwsh
         run: .\gradlew.bat :desktopApp:createReleaseDistributable --stacktrace
+      - name: Verify portable Windows runtime
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem 'desktopApp/build/compose/binaries/main-release/app' -Directory | Select-Object -First 1
+          if ($null -eq $app) { throw 'Compose app image was not created.' }
+          $runtimeRelease = Get-Content "$($app.FullName)/runtime/release" -Raw
+          if ($runtimeRelease -notmatch 'java\.net\.http') {
+            throw 'Portable runtime is missing the java.net.http module required by DesktopAudioCache.'
+          }
+          $cioJar = Get-ChildItem "$($app.FullName)/app" -Filter 'ktor-client-cio-jvm-*.jar' | Select-Object -First 1
+          if ($null -eq $cioJar) { throw 'Ktor CIO engine jar was not packaged.' }
+          $entries = & "$env:JAVA_HOME/bin/jar.exe" tf $cioJar.FullName
+          if ($entries -notcontains 'io/ktor/client/engine/cio/CIOEngineContainer.class') {
+            throw 'Portable Ktor CIO jar is missing its ServiceLoader provider class.'
+          }
       - name: Archive portable Windows app
         shell: pwsh
         run: |
