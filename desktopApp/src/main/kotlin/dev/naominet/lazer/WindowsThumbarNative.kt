@@ -102,7 +102,7 @@ internal object WindowsThumbarNative {
         fun fill(b: THUMBBUTTON, id: Int, icon: Pointer?, tip: String) {
             b.dwMask = THB_ICON or THB_TOOLTIP or THB_FLAGS
             b.iId = id
-            b.hIcon = icon ?: Pointer.NULL
+            b.hIcon = icon
             b.dwFlags = THBF_ENABLED
             val chars = tip.take(259).toCharArray()
             for (i in chars.indices) b.szTip[i] = chars[i]
@@ -153,7 +153,8 @@ internal open class THUMBBUTTON : Structure() {
     @JvmField var dwMask: Int = 0
     @JvmField var iId: Int = 0
     @JvmField var iBitmap: Int = 0
-    @JvmField var hIcon: Pointer = Pointer.NULL
+    // Pointer.NULL is null in JNA. The native HICON field accepts null when icon loading fails.
+    @JvmField var hIcon: Pointer? = null
     @JvmField var szTip: CharArray = CharArray(260)
     @JvmField var dwFlags: Int = 0
 }

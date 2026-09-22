@@ -194,9 +194,11 @@ fun WindowScope.DesktopPlayerApp(
         LaunchedEffect(window) {
             delay(300)
             thumbar.install(window, controller.isPlaying)
+            WindowsJumpList.install(controller.isPlaying)
         }
         LaunchedEffect(window, controller.isPlaying) {
             thumbar.updatePlayState(controller.isPlaying)
+            WindowsJumpList.install(controller.isPlaying)
         }
         val osGlassActive = osGlassRequested && nativeGlassApplied
         val frameShape = RoundedCornerShape(0.dp)
