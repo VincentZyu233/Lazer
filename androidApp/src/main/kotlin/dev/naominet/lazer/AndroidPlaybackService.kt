@@ -36,6 +36,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.net.HttpURLConnection
@@ -52,6 +53,24 @@ data class AndroidPlaybackSnapshot(
     val message: String? = null,
 )
 
+/** How the queue advances. Single loop only re-plays a track that finished on its own. */
+enum class AndroidPlayMode {
+    ListLoop,
+    SingleLoop,
+    Shuffle,
+    ;
+
+    companion object {
+        fun parse(value: String?): AndroidPlayMode = entries.firstOrNull { it.name == value } ?: ListLoop
+    }
+}
+
+data class AndroidPlaybackQueueSnapshot(
+    val tracks: List<AndroidTrack> = emptyList(),
+    val index: Int = -1,
+    val mode: AndroidPlayMode = AndroidPlayMode.ListLoop,
+)
+
 private object AndroidPlaybackStateStore {
     private val mutableSnapshot = MutableStateFlow(AndroidPlaybackSnapshot())
     val snapshot: StateFlow<AndroidPlaybackSnapshot> = mutableSnapshot.asStateFlow()
@@ -66,32 +85,80 @@ private object AndroidPlaybackStateStore {
  * only the hand-off from a list tap to that service and lets system next/previous work while it is
  * alive. The active item itself is always mirrored in [AndroidPlaybackStateStore].
  */
-private object AndroidPlaybackQueue {
-    var tracks: List<AndroidTrack> = emptyList()
-    var index: Int = -1
+internal object AndroidPlaybackQueue {
+    private val mutableSnapshot = MutableStateFlow(AndroidPlaybackQueueSnapshot())
+    val snapshot: StateFlow<AndroidPlaybackQueueSnapshot> = mutableSnapshot.asStateFlow()
+
+    val tracks: List<AndroidTrack> get() = mutableSnapshot.value.tracks
+    val index: Int get() = mutableSnapshot.value.index
+    val mode: AndroidPlayMode get() = mutableSnapshot.value.mode
+
+    /** Loads the stored mode before the first track can advance. */
+    fun restoreMode(value: AndroidPlayMode) {
+        mutableSnapshot.update { it.copy(mode = value) }
+    }
+
+    fun setMode(value: AndroidPlayMode) {
+        mutableSnapshot.update { it.copy(mode = value) }
+    }
 
     fun replace(queue: List<AndroidTrack>, track: AndroidTrack) {
         val distinct = queue.distinctBy(AndroidTrack::id)
-        tracks = if (distinct.any { it.id == track.id }) {
+        val next = if (distinct.any { it.id == track.id }) {
             distinct
         } else {
             listOf(track) + distinct
         }
-        index = tracks.indexOfFirst { it.id == track.id }
+        mutableSnapshot.update {
+            it.copy(tracks = next, index = next.indexOfFirst { item -> item.id == track.id })
+        }
     }
 
     fun current(): AndroidTrack? = tracks.getOrNull(index)
 
-    fun next(): AndroidTrack? {
-        if (tracks.isEmpty()) return null
-        index = (index + 1) % tracks.size
-        return current()
+    fun next(): AndroidTrack? = advance(1)
+
+    fun previous(): AndroidTrack? = advance(-1)
+
+    /** Points the queue at [position] and returns what should now be audible. */
+    fun jumpTo(position: Int): AndroidTrack? {
+        val state = mutableSnapshot.value
+        val track = state.tracks.getOrNull(position) ?: return null
+        mutableSnapshot.update { it.copy(index = position) }
+        return track
     }
 
-    fun previous(): AndroidTrack? {
-        if (tracks.isEmpty()) return null
-        index = (index - 1 + tracks.size) % tracks.size
-        return current()
+    /** Reorders without touching playback, keeping the index pointed at the same track. */
+    fun move(from: Int, to: Int) {
+        val state = mutableSnapshot.value
+        if (from == to || from !in state.tracks.indices || to !in state.tracks.indices) return
+        val reordered = state.tracks.toMutableList().apply { add(to, removeAt(from)) }
+        val shifted = when {
+            state.index == from -> to
+            from < state.index && to >= state.index -> state.index - 1
+            from > state.index && to <= state.index -> state.index + 1
+            else -> state.index
+        }
+        mutableSnapshot.update { it.copy(tracks = reordered, index = shifted) }
+    }
+
+    /** Dropping the audible track is the caller's problem, so the edit reports what to play next. */
+    fun removeAt(position: Int): AndroidQueueEdit {
+        val state = mutableSnapshot.value
+        if (position !in state.tracks.indices) return AndroidQueueEdit.Kept
+        val remaining = state.tracks.toMutableList().apply { removeAt(position) }
+        if (position != state.index) {
+            val shifted = if (position < state.index) state.index - 1 else state.index
+            mutableSnapshot.update { it.copy(tracks = remaining, index = shifted) }
+            return AndroidQueueEdit.Kept
+        }
+        if (remaining.isEmpty()) {
+            mutableSnapshot.update { it.copy(tracks = remaining, index = -1) }
+            return AndroidQueueEdit.Emptied
+        }
+        val successorIndex = position.coerceAtMost(remaining.lastIndex)
+        mutableSnapshot.update { it.copy(tracks = remaining, index = successorIndex) }
+        return AndroidQueueEdit.Switched
     }
 
     fun adjacent(): List<AndroidTrack> {
@@ -101,6 +168,30 @@ private object AndroidPlaybackQueue {
             tracks[(index - 1 + tracks.size) % tracks.size],
         ).distinctBy(AndroidTrack::id)
     }
+
+    private fun advance(step: Int): AndroidTrack? {
+        val state = mutableSnapshot.value
+        if (state.tracks.isEmpty()) return null
+        val target = when {
+            state.tracks.size == 1 -> state.index.coerceAtLeast(0)
+            state.mode == AndroidPlayMode.Shuffle -> randomOtherIndex(state)
+            else -> (state.index + step + state.tracks.size) % state.tracks.size
+        }
+        mutableSnapshot.update { it.copy(index = target) }
+        return state.tracks.getOrNull(target)
+    }
+
+    private fun randomOtherIndex(state: AndroidPlaybackQueueSnapshot): Int {
+        val candidates = state.tracks.indices.filter { it != state.index }
+        return candidates.randomOrNull() ?: state.index.coerceAtLeast(0)
+    }
+}
+
+/** What an edit to the queue means for the track that is currently audible. */
+internal enum class AndroidQueueEdit {
+    Kept,
+    Switched,
+    Emptied,
 }
 
 /** Entry point used by Compose controls. System-media mode calls back into the same service. */
@@ -108,6 +199,38 @@ object AndroidPlaybackConnection {
     val snapshot: StateFlow<AndroidPlaybackSnapshot> = AndroidPlaybackStateStore.snapshot
 
     fun currentQueue(): List<AndroidTrack> = AndroidPlaybackQueue.tracks.toList()
+
+    /** The queue and its advance rule, observable so the player card redraws after an edit. */
+    val queue: StateFlow<AndroidPlaybackQueueSnapshot> = AndroidPlaybackQueue.snapshot
+
+    fun setPlayMode(context: Context, mode: AndroidPlayMode) {
+        AndroidPlaybackQueue.setMode(mode)
+        AndroidSettingsStore(context).playMode = mode
+    }
+
+    /** Makes the item at [position] audible, reusing the hand-off that a list tap already takes. */
+    fun playAt(context: Context, position: Int) {
+        if (AndroidPlaybackQueue.jumpTo(position) == null) return
+        dispatch(
+            context,
+            Intent(context, AndroidPlaybackService::class.java)
+                .setAction(AndroidPlaybackService.ACTION_PLAY_TRACK)
+                .putExtra(AndroidPlaybackService.EXTRA_AUTOPLAY, true),
+        )
+    }
+
+    fun removeAt(context: Context, position: Int) {
+        when (AndroidPlaybackQueue.removeAt(position)) {
+            AndroidQueueEdit.Kept -> Unit
+            // The queue has already settled on its successor; asking for the removed index again
+            // would fall off the end when the last track is the one that was audible.
+            AndroidQueueEdit.Switched -> playAt(context, AndroidPlaybackQueue.index)
+            AndroidQueueEdit.Emptied -> dispatch(context, AndroidPlaybackService.ACTION_STOP)
+        }
+    }
+
+    /** Reordering needs no round trip: the service reads the same in-process queue. */
+    fun moveTrack(from: Int, to: Int) = AndroidPlaybackQueue.move(from, to)
 
     fun play(
         context: Context,
@@ -252,6 +375,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     override fun onCreate() {
         super.onCreate()
         gatewaySettings = AndroidSettingsStore(applicationContext)
+        AndroidPlaybackQueue.restoreMode(gatewaySettings.playMode)
         gatewaySessionStore = AndroidGatewaySessionStore(applicationContext)
         gateway = NeteaseMusicGateway(sessionStore = gatewaySessionStore)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
@@ -379,7 +503,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 handler.removeCallbacks(progressReporter)
                 if (autoplay) handler.post(progressReporter)
             }
-            setOnCompletionListener { playNext() }
+            setOnCompletionListener { playOnCompletion() }
             setOnBufferingUpdateListener { _, percent ->
                 val snapshot = AndroidPlaybackStateStore.snapshot.value
                 AndroidPlaybackStateStore.update(
@@ -494,6 +618,32 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
 
     private fun playNext() {
         AndroidPlaybackQueue.next()?.let { resolveAndPlay(it) }
+    }
+
+    /**
+     * Only a track that ran to its end obeys the mode. The next button always advances, so single
+     * loop never traps a listener who is asking to move on.
+     */
+    private fun playOnCompletion() {
+        if (AndroidPlaybackQueue.mode == AndroidPlayMode.SingleLoop) replayCurrent() else playNext()
+    }
+
+    /** Restarting the prepared player skips a second stream lookup for the same track. */
+    private fun replayCurrent() {
+        val currentPlayer = player
+        val restarted = currentPlayer?.let {
+            runCatching {
+                it.seekTo(0)
+                it.start()
+            }.isSuccess
+        } ?: false
+        if (!restarted) {
+            playNext()
+            return
+        }
+        publishCurrentState(isPreparing = false, isPlaying = true)
+        handler.removeCallbacks(progressReporter)
+        handler.post(progressReporter)
     }
 
     private fun playPrevious() {

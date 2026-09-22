@@ -347,3 +347,36 @@ data class LikedSongIdsResponse(
     val code: Int = 0,
     val ids: List<Long> = emptyList(),
 )
+
+@Serializable
+data class CommentUser(
+    val userId: Long = 0,
+    val nickname: String = "",
+    /** Upstream serves this over plain http, so callers must upgrade it before loading. */
+    val avatarUrl: String? = null,
+)
+
+@Serializable
+data class CommentIpLocation(
+    val location: String? = null,
+)
+
+@Serializable
+data class SongComment(
+    val commentId: Long = 0,
+    val content: String = "",
+    val time: Long = 0,
+    val likedCount: Int = 0,
+    val liked: Boolean = false,
+    val ipLocation: CommentIpLocation? = null,
+    val user: CommentUser? = null,
+)
+
+@Serializable
+data class SongCommentResponse(
+    val code: Int = 0,
+    val total: Int = 0,
+    val more: Boolean = false,
+    val hotComments: List<SongComment> = emptyList(),
+    val comments: List<SongComment> = emptyList(),
+)

@@ -52,6 +52,9 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -63,15 +66,19 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.WindowScope
+import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import dev.naominet.lazer.gateway.AudioQuality
+import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
+import dev.naominet.lazer.gateway.model.SongComment
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.Frame
 import java.awt.datatransfer.StringSelection
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
+import java.text.SimpleDateFormat
 import java.util.*
 import kotlin.math.absoluteValue
 import kotlin.math.pow
@@ -208,10 +215,7 @@ fun WindowScope.DesktopPlayerApp(
                 val available = artists.filter { it.id > 0L && it.name.isNotBlank() }.distinctBy(Artist::id)
                 when (available.size) {
                     0 -> Unit
-                    1 -> {
-                        controller.closeLyrics()
-                        controller.openArtist(available.single())
-                    }
+                    1 -> controller.openArtist(available.single())
                     else -> artistChoices = available
                 }
             },
@@ -267,78 +271,40 @@ fun WindowScope.DesktopPlayerApp(
                         onToggleMaximize = onToggleMaximizeWindow,
                         onClose = onCloseWindow,
                     )
-                    AnimatedContent(
-                        targetState = controller.isLyricsVisible,
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        transitionSpec = {
-                            if (targetState) {
-                                (
-                                    fadeIn(tween(220)) +
-                                        slideInVertically(
-                                            spring(
-                                                dampingRatio = Spring.DampingRatioNoBouncy,
-                                                stiffness = Spring.StiffnessMediumLow,
-                                            ),
-                                        ) { height -> height / 14 }
-                                    ) togetherWith (
-                                    fadeOut(tween(170)) + scaleOut(tween(220), targetScale = 0.985f)
-                                    )
-                            } else {
-                                (
-                                    fadeIn(tween(220)) + scaleIn(tween(260), initialScale = 0.985f)
-                                    ) togetherWith (
-                                    fadeOut(tween(150)) +
-                                        slideOutVertically(
-                                            spring(
-                                                dampingRatio = Spring.DampingRatioNoBouncy,
-                                                stiffness = Spring.StiffnessMediumLow,
-                                            ),
-                                        ) { height -> height / 14 }
-                                    )
-                            }
-                        },
-                        contentKey = { lyricsVisible -> lyricsVisible },
-                        label = "main-lyrics-page",
-                    ) { lyricsVisible ->
-                        if (lyricsVisible) {
-                            LyricsOverlay(controller = controller, modifier = Modifier.fillMaxSize())
-                        } else {
-                            Column(Modifier.fillMaxSize()) {
-                                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                                    val compactNavigation = maxWidth < 1100.dp
-                                    Row(Modifier.fillMaxSize()) {
-                                        NavigationPanel(
-                                            controller = controller,
-                                            selectedDestination = destination,
-                                            settingsSelected = settingsVisible,
-                                            compact = compactNavigation,
-                                            onDestinationSelected = {
-                                                settingsVisible = false
-                                                controller.closeArtist()
-                                                destination = it
-                                            },
-                                            onPlaylistSelected = {
-                                                settingsVisible = false
-                                                controller.closeArtist()
-                                                destination = DesktopDestination.LIBRARY
-                                                controller.openPlaylist(it)
-                                            },
-                                            onOpenSettings = {
-                                                controller.closeArtist()
-                                                settingsVisible = true
-                                            },
-                                        )
-                                        MainContent(
-                                            controller = controller,
-                                            destination = destination,
-                                            settingsVisible = settingsVisible,
-                                            modifier = Modifier.weight(1f),
-                                        )
-                                    }
-                                }
-                                PlayerBar(controller, onOpenNowPlaying = { nowPlayingVisible = true })
+                    Column(Modifier.weight(1f).fillMaxWidth()) {
+                        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                            val compactNavigation = maxWidth < 1100.dp
+                            Row(Modifier.fillMaxSize()) {
+                                NavigationPanel(
+                                    controller = controller,
+                                    selectedDestination = destination,
+                                    settingsSelected = settingsVisible,
+                                    compact = compactNavigation,
+                                    onDestinationSelected = {
+                                        settingsVisible = false
+                                        controller.closeArtist()
+                                        destination = it
+                                    },
+                                    onPlaylistSelected = {
+                                        settingsVisible = false
+                                        controller.closeArtist()
+                                        destination = DesktopDestination.LIBRARY
+                                        controller.openPlaylist(it)
+                                    },
+                                    onOpenSettings = {
+                                        controller.closeArtist()
+                                        settingsVisible = true
+                                    },
+                                )
+                                MainContent(
+                                    controller = controller,
+                                    destination = destination,
+                                    settingsVisible = settingsVisible,
+                                    modifier = Modifier.weight(1f),
+                                )
                             }
                         }
+                        PlayerBar(controller, onOpenNowPlaying = { nowPlayingVisible = true })
                     }
                 }
 
@@ -377,7 +343,6 @@ fun WindowScope.DesktopPlayerApp(
                     onDismiss = { artistChoices = emptyList() },
                     onChoose = { artist ->
                         artistChoices = emptyList()
-                        controller.closeLyrics()
                         controller.openArtist(artist)
                     },
                 )
@@ -2550,11 +2515,6 @@ private fun TranslatedTrackTitle(
     }
 }
 
-@Composable
-private fun DesktopLyricsViewport(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
-    LyricsOverlay(controller = controller, modifier = modifier, embedded = true)
-}
-
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -2682,20 +2642,21 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                 )
                 Spacer(Modifier.width(2.dp))
                 CompactIconButton(
-                    Icons.Outlined.Lyrics,
-                    controller::openLyrics,
-                    tr("player.lyrics"),
-                    selected = controller.isLyricsVisible,
-                )
-                Spacer(Modifier.width(2.dp))
-                CompactIconButton(
                     Icons.Outlined.Headphones,
                     controller::openListenTogether,
                     tr("listen_together.open"),
                     selected = controller.listenTogether != null,
                 )
                 Spacer(Modifier.width(2.dp))
-                CompactIconButton(Icons.AutoMirrored.Outlined.QueueMusic, {}, tr("player.queue"))
+                PlayerPanelControl(
+                    icon = Icons.AutoMirrored.Outlined.QueueMusic,
+                    label = tr("player.queue"),
+                ) { PlayQueuePanel(controller) }
+                Spacer(Modifier.width(2.dp))
+                PlayerPanelControl(
+                    icon = Icons.Outlined.ModeComment,
+                    label = tr("comment.open"),
+                ) { SongCommentPanel(controller) }
             }
         }
     }
@@ -2940,12 +2901,645 @@ private fun QualityControl(
     }
 }
 
+private val DesktopQueueRowHeight = 46.dp
+private val DesktopPanelWidth = 400.dp
+private val DesktopPanelListHeight = 336.dp
+
+private val DesktopPlayMode.labelKey: String
+    get() = when (this) {
+        DesktopPlayMode.ListLoop -> "player.mode.list_loop"
+        DesktopPlayMode.SingleLoop -> "player.mode.single_loop"
+        DesktopPlayMode.Shuffle -> "player.shuffle"
+    }
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun LyricsOverlay(
+private fun PlayerPanelControl(
+    icon: ImageVector,
+    label: String,
+    content: @Composable () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { open = !open },
+            modifier = Modifier.size(30.dp),
+        ) {
+            Icon(
+                icon,
+                label,
+                Modifier.size(18.dp),
+                tint = if (open) colors.primary else colors.onSurfaceVariant,
+            )
+        }
+        if (open) {
+            // These cards hang off the transport bar at the bottom of the window, so they have to
+            // grow upward; anchored to the top they would spill past the window edge. The lift
+            // clears the 30.dp button plus a gap.
+            val lift = with(density) { (-44.dp).roundToPx() }
+            Popup(
+                alignment = Alignment.BottomEnd,
+                offset = IntOffset(0, lift),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Surface(
+                    modifier = Modifier.width(DesktopPanelWidth),
+                    shape = RoundedCornerShape(16.dp),
+                    color = colors.surface,
+                    shadowElevation = 12.dp,
+                    border = BorderStroke(1.dp, colors.outlineVariant),
+                ) {
+                    content()
+                }
+            }
+        }
+    }
+}
+
+/** Title, one line of context, and a rule that keeps the header off the scrolling body. */
+@Composable
+private fun PlayerPanelHeader(
+    title: String,
+    subtitle: String?,
+) {
+    Column(Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 12.dp)) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (subtitle != null) {
+            Spacer(Modifier.height(2.dp))
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+}
+
+@Composable
+private fun PlayQueuePanel(controller: DesktopPlayerController) {
+    val inRoom = controller.listenTogether != null
+    val tracks = if (inRoom) controller.roomQueue else controller.queue
+    val currentIndex = tracks.indexOfFirst { it.id == controller.nowPlaying?.id }
+    Column {
+        PlayerPanelHeader(
+            title = tr(if (inRoom) "player.queue.room_title" else "player.queue"),
+            subtitle = when {
+                inRoom && tracks.isEmpty() -> tr("player.queue.room_empty")
+                inRoom -> tr("player.queue.room_hint", tracks.size)
+                currentIndex >= 0 -> tr("player.queue.position", currentIndex + 1, tracks.size)
+                else -> tr("player.queue.empty_hint")
+            },
+        )
+        if (!inRoom && tracks.isNotEmpty()) {
+            // The three modes are mutually exclusive, so they share the row width evenly instead of
+            // crowding three chips plus a label into one line.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp).padding(top = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                DesktopPlayMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = controller.playMode == mode,
+                        onClick = { controller.setPlayMode(mode) },
+                        label = {
+                            Text(
+                                tr(mode.labelKey),
+                                style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        modifier = Modifier.weight(1f).height(30.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        border = null,
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                    )
+                }
+            }
+        }
+        if (tracks.isEmpty()) {
+            Text(
+                tr("player.queue.empty_hint"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 16.dp),
+            )
+        } else if (inRoom) {
+            LazyColumn(
+                Modifier.fillMaxWidth().height(DesktopPanelListHeight).padding(horizontal = 8.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+                    Box(Modifier.fillMaxWidth().height(DesktopQueueRowHeight)) {
+                        DesktopQueueRow(
+                            index = index,
+                            track = track,
+                            current = index == currentIndex,
+                            isPlaying = controller.isPlaying,
+                        )
+                    }
+                }
+            }
+        } else {
+            ReorderableDesktopQueue(
+                tracks = tracks,
+                currentIndex = currentIndex,
+                isPlaying = controller.isPlaying,
+                onPlayAt = controller::playQueueAt,
+                onRemoveAt = controller::removeFromQueue,
+                onMove = controller::moveInQueue,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReorderableDesktopQueue(
+    tracks: List<TrackItem>,
+    currentIndex: Int,
+    isPlaying: Boolean,
+    onPlayAt: (Int) -> Unit,
+    onRemoveAt: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val rowHeightPx = with(LocalDensity.current) { DesktopQueueRowHeight.toPx() }
+    var draggedIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val dragged = draggedIndex
+    val target = dragged?.let {
+        (it + (dragOffset / rowHeightPx).roundToInt()).coerceIn(tracks.indices)
+    }
+    fun finishDrag() {
+        val from = draggedIndex
+        val to = from?.let { (it + (dragOffset / rowHeightPx).roundToInt()).coerceIn(tracks.indices) }
+        if (from != null && to != null && from != to) onMove(from, to)
+        draggedIndex = null
+        dragOffset = 0f
+    }
+
+    LazyColumn(
+        Modifier.fillMaxWidth().height(DesktopPanelListHeight).padding(horizontal = 8.dp),
+        contentPadding = PaddingValues(vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+            val lifted = index == dragged
+            val translation = when {
+                dragged == null -> 0f
+                lifted -> dragOffset
+                target != null && dragged < target && index in (dragged + 1)..target -> -rowHeightPx
+                target != null && dragged > target && index in target..<dragged -> rowHeightPx
+                else -> 0f
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(DesktopQueueRowHeight)
+                    .zIndex(if (lifted) 1f else 0f)
+                    .graphicsLayer {
+                        translationY = translation
+                        if (lifted) {
+                            clip = true
+                            shape = RoundedCornerShape(10.dp)
+                            shadowElevation = 8f
+                        }
+                    },
+            ) {
+                DesktopQueueRow(
+                    index = index,
+                    track = track,
+                    current = index == currentIndex,
+                    isPlaying = isPlaying,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPlayAt(index) }
+                        .semantics {
+                            customActions = listOf(
+                                CustomAccessibilityAction(tr("player.queue.move_up")) {
+                                    onMove(index, index - 1); true
+                                },
+                                CustomAccessibilityAction(tr("player.queue.move_down")) {
+                                    onMove(index, index + 1); true
+                                },
+                            )
+                        },
+                    handle = {
+                        Box(
+                            Modifier
+                                .size(26.dp)
+                                .pointerInput(tracks.size) {
+                                    detectDragGestures(
+                                        onDragStart = {
+                                            draggedIndex = index
+                                            dragOffset = 0f
+                                        },
+                                        onDrag = { change, amount ->
+                                            change.consume()
+                                            dragOffset += amount.y
+                                        },
+                                        onDragEnd = ::finishDrag,
+                                        onDragCancel = ::finishDrag,
+                                    )
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.DragHandle,
+                                tr("player.queue.drag"),
+                                Modifier.size(15.dp),
+                                tint = colors.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    onRemove = { onRemoveAt(index) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+@OptIn(ExperimentalComposeUiApi::class)
+private fun DesktopQueueRow(
+    index: Int,
+    track: TrackItem,
+    current: Boolean,
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier,
+    onRemove: (() -> Unit)? = null,
+    handle: @Composable (() -> Unit)? = null,
+) {
+    val colors = MaterialTheme.colorScheme
+    var hovered by remember { mutableStateOf(false) }
+    Row(
+        modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                when {
+                    current -> colors.primary.copy(alpha = 0.10f)
+                    hovered -> colors.surfaceVariant.copy(alpha = 0.45f)
+                    else -> Color.Transparent
+                },
+            )
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            Modifier.width(22.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (current) {
+                Icon(
+                    if (isPlaying) Icons.Filled.PlayArrow else Icons.Outlined.Pause,
+                    null,
+                    Modifier.size(14.dp),
+                    tint = colors.primary,
+                )
+            } else {
+                Text(
+                    (index + 1).toString(),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                track.title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (current) colors.primary else colors.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (track.artist.isNotBlank()) {
+                Text(
+                    track.artist,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        handle?.invoke()
+        if (onRemove != null) {
+            IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
+                Icon(
+                    Icons.Outlined.Close,
+                    tr("player.queue.remove"),
+                    Modifier.size(14.dp),
+                    tint = colors.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SongCommentPanel(controller: DesktopPlayerController) {
+    val colors = MaterialTheme.colorScheme
+    val state = controller.comments
+    Column {
+        PlayerPanelHeader(
+            title = tr("comment.title"),
+            subtitle = tr("comment.count", state.total).takeIf { state.total > 0 },
+        )
+        Column(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+        controller.replyTarget?.let { target ->
+            CommentReplyComposer(
+                nickname = target.user?.nickname.orEmpty(),
+                draft = controller.replyDraft,
+                sending = controller.isReplySending,
+                error = controller.replyError,
+                onDraftChange = controller::updateReplyDraft,
+                onSend = controller::sendReply,
+                onCancel = controller::cancelReply,
+            )
+        }
+        when {
+            state.failed && state.comments.isEmpty() -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    tr("comment.load_fail"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                TextButton(onClick = controller::retrySongComments) { Text(tr("comment.retry")) }
+            }
+            state.loading -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                Text(
+                    tr("comment.loading"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            state.comments.isEmpty() && state.hotComments.isEmpty() -> Text(
+                tr("comment.empty"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+            )
+            else -> Column(
+                Modifier.fillMaxWidth().height(DesktopPanelListHeight).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                if (state.hotComments.isNotEmpty()) {
+                    CommentSectionLabel(tr("comment.hot"))
+                    state.hotComments.forEach {
+                        DesktopCommentRow(
+                            comment = it,
+                            onLike = { controller.toggleCommentLiked(it) },
+                            onReply = { controller.startReply(it) },
+                        )
+                    }
+                    HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.6f))
+                }
+                CommentSectionLabel(tr("comment.latest"))
+                state.comments.forEach {
+                    DesktopCommentRow(
+                        comment = it,
+                        onLike = { controller.toggleCommentLiked(it) },
+                        onReply = { controller.startReply(it) },
+                    )
+                }
+                when {
+                    state.loadingMore -> CircularProgressIndicator(
+                        Modifier.size(14.dp).align(Alignment.CenterHorizontally),
+                        strokeWidth = 2.dp,
+                    )
+                    state.hasMore -> TextButton(
+                        onClick = controller::loadMoreSongComments,
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    ) { Text(tr("comment.more")) }
+                    else -> Text(
+                        tr("comment.end"),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        }
+    }
+}
+
+@Composable
+private fun CommentSectionLabel(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun DesktopCommentRow(
+    comment: SongComment,
+    onLike: () -> Unit,
+    onReply: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val nickname = comment.user?.nickname.orEmpty()
+    val avatarUrl = comment.user?.avatarUrl?.toArtworkUrl(96)
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Box(
+            Modifier
+                .size(30.dp)
+                .clip(CircleShape)
+                .background(colors.secondaryContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                nickname.firstOrNull()?.toString().orEmpty(),
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.onSecondaryContainer,
+            )
+            if (avatarUrl != null) {
+                AsyncImage(
+                    model = avatarUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                nickname,
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(comment.content, style = MaterialTheme.typography.bodySmall)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val stamp = relativeCommentTime(comment.time)
+                if (stamp.isNotBlank()) {
+                    Text(stamp, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                }
+                comment.ipLocation?.location?.takeIf(String::isNotBlank)?.let { location ->
+                    Text(location, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                }
+                Spacer(Modifier.weight(1f))
+                CommentAction(
+                    label = if (comment.likedCount > 0) comment.likedCount.toString() else "",
+                    onClick = onLike,
+                ) {
+                    Icon(
+                        if (comment.liked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                        tr("comment.like"),
+                        Modifier.size(13.dp),
+                        tint = if (comment.liked) colors.error else colors.onSurfaceVariant,
+                    )
+                }
+                CommentAction(label = tr("comment.reply"), onClick = onReply) {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.Reply,
+                        null,
+                        Modifier.size(13.dp),
+                        tint = colors.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommentAction(
+    label: String,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 5.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        icon()
+        if (label.isNotBlank()) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun CommentReplyComposer(
+    nickname: String,
+    draft: String,
+    sending: Boolean,
+    error: String?,
+    onDraftChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(colors.surfaceVariant.copy(alpha = 0.4f))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            tr("comment.reply_to", nickname),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text(tr("comment.reply_hint"), style = MaterialTheme.typography.bodySmall) },
+            isError = error != null,
+            minLines = 2,
+            singleLine = false,
+        )
+        error?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                tr("comment.reply_limit", draft.length, SONG_COMMENT_CONTENT_LIMIT),
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onCancel, enabled = !sending) { Text(tr("comment.reply_cancel")) }
+            Button(onClick = onSend, enabled = draft.isNotBlank() && !sending) {
+                if (sending) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(tr("comment.reply_send"))
+                }
+            }
+        }
+    }
+}
+
+private fun relativeCommentTime(
+    epochMillis: Long,
+    nowMillis: Long = System.currentTimeMillis(),
+): String {
+    if (epochMillis <= 0L) return ""
+    val elapsed = (nowMillis - epochMillis).coerceAtLeast(0L)
+    val minutes = elapsed / 60_000L
+    val hours = minutes / 60L
+    val days = hours / 24L
+    return when {
+        minutes < 1 -> tr("comment.time.now")
+        minutes < 60 -> tr("comment.time.minutes", minutes)
+        hours < 24 -> tr("comment.time.hours", hours)
+        days < 30 -> tr("comment.time.days", days)
+        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(epochMillis))
+    }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun DesktopLyricsViewport(
     controller: DesktopPlayerController,
     modifier: Modifier = Modifier,
-    embedded: Boolean = false,
 ) {
     val colors = MaterialTheme.colorScheme
     val density = LocalDensity.current
@@ -3149,78 +3743,11 @@ private fun LyricsOverlay(
         lyricWheelInertia.stop()
     }
 
-    // The same renderer powers the dedicated lyrics page and the lyrics half of landscape now
-    // playing. Only the dedicated page owns its background/header/footer chrome.
+    // The lyrics half of the landscape now-playing screen. The page owns no background or transport
+    // chrome of its own; the player already shows both.
     Box(modifier = modifier.fillMaxSize()) {
-        if (!embedded) {
-            Box(Modifier.fillMaxSize().background(colors.background))
-            AlbumFlowBackground(
-                colors = controller.lyricFlowColors,
-                modifier = Modifier.fillMaxSize(),
-                cornerRadius = 0.dp,
-                veil = colors.background.copy(alpha = 0.38f),
-            )
-        }
-
         Column(Modifier.fillMaxSize()) {
-            if (!embedded) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(
-                        onClick = controller::closeLyrics,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        shape = RoundedCornerShape(10.dp),
-                    ) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, tr("lyrics.back"), Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(tr("lyrics.back"), style = MaterialTheme.typography.labelMedium)
-                    }
-                    Spacer(Modifier.weight(1f))
-                    Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(max = 360.dp)) {
-                        ///stp
-                        Text(
-                            controller.nowPlaying?.title ?: tr("lyrics.nothing"),
-                            style = MaterialTheme.typography.titleSmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        ArtistNames(
-                            artists = controller.nowPlaying?.artists.orEmpty(),
-                            fallback = controller.nowPlaying?.artist.orEmpty(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = colors.onSurfaceVariant,
-                        )
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .size(50.dp)
-                            .clip(RoundedCornerShape(11.dp))
-                            .background(Color.Transparent)
-                            .padding(6.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        controller.nowPlaying?.title?.let {
-                            controller.nowPlaying?.id?.let { id ->
-                                Artwork(
-                                    id = id,
-                                    title = it,
-                                    coverUrl = controller.nowPlaying?.coverUrl,
-                                    modifier = Modifier.size(36.dp),
-                                    cornerRadius = 9.dp,
-                                    saveOnLongPress = true,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-                BoxWithConstraints(
+            BoxWithConstraints(
                     Modifier
                         .weight(1f)
                         .fillMaxWidth()
@@ -3460,34 +3987,6 @@ private fun LyricsOverlay(
                     }
                 }
 
-            if (!embedded) {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    CompactIconButton(Icons.Filled.SkipPrevious, controller::playPrevious, tr("player.previous"))
-                    Spacer(Modifier.width(8.dp))
-                    IconButton(
-                        onClick = controller::togglePlayPause,
-                        modifier = Modifier.size(44.dp),
-                        colors = IconButtonDefaults.iconButtonColors(
-                            containerColor = colors.primary,
-                            contentColor = colors.onPrimary,
-                        ),
-                    ) {
-                        Icon(
-                            if (controller.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            if (controller.isPlaying) tr("player.pause") else tr("player.play"),
-                            Modifier.size(24.dp),
-                        )
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    CompactIconButton(Icons.Filled.SkipNext, controller::playNext, tr("player.next"))
-                }
-            }
             }
         }
     }

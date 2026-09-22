@@ -48,6 +48,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -95,6 +96,10 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.automirrored.outlined.QueueMusic
+import androidx.compose.material.icons.automirrored.outlined.Reply
+import androidx.compose.material.icons.outlined.DragHandle
+import androidx.compose.material.icons.outlined.ModeComment
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.Home
@@ -107,9 +112,11 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -183,6 +190,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.setProgress
@@ -206,6 +215,7 @@ import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import coil3.compose.AsyncImage
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
@@ -223,13 +233,19 @@ import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.material.icons.outlined.Headphones
 import dev.naominet.lazer.gateway.AudioQuality
+import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
+import dev.naominet.lazer.gateway.model.SongComment
 import dev.naominet.lazer.gateway.model.parseListenTogetherInvite
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.net.URI
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
 import top.yukonga.miuix.kmp.basic.ButtonColors as MiuixButtonColors
 import top.yukonga.miuix.kmp.basic.ButtonDefaults as MiuixButtonDefaults
@@ -1110,6 +1126,8 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                     onPrevious = { AndroidPlaybackConnection.previous(context) },
                     onNext = { AndroidPlaybackConnection.next(context) },
                     onSeek = controller::seekTo,
+                    onOpenQueue = controller::openQueueSheet,
+                    onOpenComments = controller::openSongComments,
                     modifier = Modifier
                         .fillMaxSize()
                         .predictiveBackTransform(
@@ -1123,6 +1141,18 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                 ListenTogetherSheet(
                     controller = controller,
                     onShare = shareListenTogether,
+                )
+            }
+            if (controller.isQueueSheetVisible) {
+                PlayQueueSheet(
+                    controller = controller,
+                    onDismiss = controller::closeQueueSheet,
+                )
+            }
+            if (controller.isCommentSheetVisible) {
+                SongCommentSheet(
+                    controller = controller,
+                    onDismiss = controller::closeSongComments,
                 )
             }
             if (controller.isLoginVisible) LoginSheet(controller, liquidGlass)
@@ -2522,6 +2552,666 @@ private fun AudioQualitySheet(
     }
 }
 
+private val AndroidPlayMode.labelKey: String
+    get() = when (this) {
+        AndroidPlayMode.ListLoop -> "player.mode.list_loop"
+        AndroidPlayMode.SingleLoop -> "player.mode.single_loop"
+        AndroidPlayMode.Shuffle -> "player.shuffle"
+    }
+
+/** Rows are a fixed height so a drag distance maps onto exactly one slot per row. Sized for
+ * title + translated title + artist, which is the tallest a queue row can be. */
+private val QueueRowHeight = 72.dp
+
+/**
+ * The two actions that sit on either side of the top of the seek bar. They are labelled rather
+ * than icon-only because nothing else on the card explains what either one opens.
+ */
+@Composable
+private fun PlayerCardAction(
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(imageVector, null, Modifier.size(18.dp), tint = colors.onSurfaceVariant)
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium, color = colors.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun PlayerSheetHeader(
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String?,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            modifier = Modifier.size(44.dp),
+            shape = CircleShape,
+            color = colors.primaryContainer,
+            contentColor = colors.onPrimaryContainer,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(imageVector, null, Modifier.size(22.dp))
+            }
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            if (subtitle != null) {
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayQueueSheet(
+    controller: AndroidGatewayController,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val room = controller.listenTogether
+    val queue by AndroidPlaybackConnection.queue.collectAsState()
+    val snapshot by AndroidPlaybackConnection.snapshot.collectAsState()
+    val inRoom = room != null
+    val tracks = if (inRoom) controller.listenTogetherRoomQueue else queue.tracks
+    val currentIndex = if (inRoom) {
+        tracks.indexOfFirst { it.id == snapshot.track?.id }
+    } else {
+        queue.index
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = colors.surface,
+        contentColor = colors.onSurface,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            PlayerSheetHeader(
+                imageVector = Icons.AutoMirrored.Outlined.QueueMusic,
+                title = tr(if (inRoom) "player.queue.room_title" else "player.queue"),
+                subtitle = when {
+                    inRoom && tracks.isEmpty() -> tr("player.queue.room_empty")
+                    inRoom -> tr("player.queue.room_hint", tracks.size)
+                    tracks.isEmpty() -> tr("player.queue.empty")
+                    currentIndex >= 0 -> tr("player.queue.position", currentIndex + 1, tracks.size)
+                    else -> null
+                },
+            )
+            if (!inRoom && tracks.isNotEmpty()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        tr("player.mode"),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = colors.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    AndroidPlayMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = queue.mode == mode,
+                            onClick = { controller.setPlayMode(mode) },
+                            label = { Text(tr(mode.labelKey)) },
+                        )
+                        Spacer(Modifier.width(8.dp))
+                    }
+                }
+            }
+            when {
+                tracks.isEmpty() -> Text(
+                    tr("player.queue.empty_hint"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
+                inRoom -> StaticQueueList(tracks, currentIndex, snapshot.isPlaying)
+                else -> ReorderableQueueList(
+                    tracks = tracks,
+                    currentIndex = currentIndex,
+                    isPlaying = snapshot.isPlaying,
+                    onPlayAt = controller::playQueueAt,
+                    onRemoveAt = controller::removeFromQueue,
+                    onMove = controller::moveInQueue,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StaticQueueList(
+    tracks: List<AndroidTrack>,
+    currentIndex: Int,
+    isPlaying: Boolean,
+) {
+    val colors = MaterialTheme.colorScheme
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
+        itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+            QueueRowBody(
+                index = index,
+                track = track,
+                current = index == currentIndex,
+                isPlaying = isPlaying,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/**
+ * Drag is claimed from the handle only. Putting it on the whole row would compete with the tap
+ * that jumps to a track, and which one wins depends on nothing the reader can see.
+ */
+@Composable
+private fun ReorderableQueueList(
+    tracks: List<AndroidTrack>,
+    currentIndex: Int,
+    isPlaying: Boolean,
+    onPlayAt: (Int) -> Unit,
+    onRemoveAt: (Int) -> Unit,
+    onMove: (Int, Int) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val rowHeightPx = with(LocalDensity.current) { QueueRowHeight.toPx() }
+    var draggedIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val dragged = draggedIndex
+    val target = dragged?.let {
+        (it + (dragOffset / rowHeightPx).roundToInt()).coerceIn(tracks.indices)
+    }
+    fun finishDrag() {
+        val from = draggedIndex
+        val to = from?.let { (it + (dragOffset / rowHeightPx).roundToInt()).coerceIn(tracks.indices) }
+        if (from != null && to != null && from != to) onMove(from, to)
+        draggedIndex = null
+        dragOffset = 0f
+    }
+
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
+        itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
+            val lifted = index == dragged
+            val translation = when {
+                dragged == null -> 0f
+                lifted -> dragOffset
+                target != null && dragged < target && index in (dragged + 1)..target -> -rowHeightPx
+                target != null && dragged > target && index in target..<dragged -> rowHeightPx
+                else -> 0f
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(QueueRowHeight)
+                    .zIndex(if (lifted) 1f else 0f)
+                    .graphicsLayer {
+                        translationY = translation
+                        if (lifted) {
+                            clip = true
+                            shape = RoundedCornerShape(16.dp)
+                            shadowElevation = 10f
+                        }
+                    },
+            ) {
+                QueueRowBody(
+                    index = index,
+                    track = track,
+                    current = index == currentIndex,
+                    isPlaying = isPlaying,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(role = Role.Button) { onPlayAt(index) }
+                        .semantics {
+                            customActions = listOf(
+                                CustomAccessibilityAction(tr("player.queue.move_up")) {
+                                    onMove(index, index - 1); true
+                                },
+                                CustomAccessibilityAction(tr("player.queue.move_down")) {
+                                    onMove(index, index + 1); true
+                                },
+                            )
+                        },
+                    handle = {
+                        Box(
+                            Modifier
+                                .size(40.dp)
+                                .pointerInput(tracks.size) {
+                                    detectDragGesturesAfterLongPress(
+                                        onDragStart = {
+                                            draggedIndex = index
+                                            dragOffset = 0f
+                                        },
+                                        onDrag = { change, amount ->
+                                            change.consume()
+                                            dragOffset += amount.y
+                                        },
+                                        onDragEnd = ::finishDrag,
+                                        onDragCancel = ::finishDrag,
+                                    )
+                                }
+                                .semantics { contentDescription = tr("player.queue.drag") },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.DragHandle,
+                                null,
+                                Modifier.size(18.dp),
+                                tint = colors.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    onRemove = { onRemoveAt(index) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueueRowBody(
+    index: Int,
+    track: AndroidTrack,
+    current: Boolean,
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier,
+    onRemove: (() -> Unit)? = null,
+    handle: @Composable (() -> Unit)? = null,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier.padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .width(34.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(if (current) colors.primary.copy(alpha = 0.10f) else Color.Transparent),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (current) {
+                NowPlayingBars(color = colors.primary, isPlaying = isPlaying)
+            } else {
+                Text(
+                    (index + 1).toString(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                track.title,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (current) colors.primary else colors.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            TranslatedTrackTitle(track.translatedTitle)
+            if (track.artist.isNotBlank()) {
+                Text(
+                    track.artist,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        handle?.invoke()
+        if (onRemove != null) {
+            IconButton(onClick = onRemove, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    Icons.Filled.Close,
+                    tr("player.queue.remove"),
+                    Modifier.size(18.dp),
+                    tint = colors.onSurfaceVariant,
+                )
+            }
+        } else {
+            Text(
+                track.durationLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun SongCommentSheet(
+    controller: AndroidGatewayController,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val state = controller.comments
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = colors.surface,
+        contentColor = colors.onSurface,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            PlayerSheetHeader(
+                imageVector = Icons.Outlined.ModeComment,
+                title = tr("comment.title"),
+                subtitle = tr("comment.count", state.total).takeIf { state.total > 0 },
+            )
+            controller.replyTarget?.let { target ->
+                CommentReplyComposer(
+                    nickname = target.user?.nickname.orEmpty(),
+                    draft = controller.replyDraft,
+                    sending = controller.isReplySending,
+                    error = controller.replyError,
+                    onDraftChange = controller::updateReplyDraft,
+                    onSend = controller::sendReply,
+                    onCancel = controller::cancelReply,
+                )
+            }
+            when {
+                state.failed && state.comments.isEmpty() -> {
+                    Text(
+                        tr("comment.load_fail"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                    )
+                    TextButton(onClick = controller::retrySongComments) { Text(tr("comment.retry")) }
+                }
+                state.loading -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text(
+                        tr("comment.loading"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                state.comments.isEmpty() && state.hotComments.isEmpty() -> Text(
+                    tr("comment.empty"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                )
+                else -> {
+                    if (state.hotComments.isNotEmpty()) {
+                        CommentSection(tr("comment.hot"))
+                        state.hotComments.forEach {
+                            SongCommentRow(
+                                comment = it,
+                                onLike = { controller.toggleCommentLiked(it) },
+                                onReply = { controller.startReply(it) },
+                            )
+                        }
+                    }
+                    CommentSection(tr("comment.latest"))
+                    state.comments.forEach {
+                        SongCommentRow(
+                            comment = it,
+                            onLike = { controller.toggleCommentLiked(it) },
+                            onReply = { controller.startReply(it) },
+                        )
+                    }
+                    when {
+                        state.loadingMore -> CircularProgressIndicator(
+                            Modifier.size(18.dp).align(Alignment.CenterHorizontally),
+                            strokeWidth = 2.dp,
+                        )
+                        state.hasMore -> TextButton(onClick = controller::loadMoreSongComments) {
+                            Text(tr("comment.more"))
+                        }
+                        else -> Text(
+                            tr("comment.end"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CommentSection(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun SongCommentRow(
+    comment: SongComment,
+    onLike: () -> Unit,
+    onReply: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val nickname = comment.user?.nickname.orEmpty()
+    val avatarUrl = normalizedArtworkUrl(comment.user?.avatarUrl)
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(
+            Modifier
+                .size(36.dp)
+                .clip(CircleShape)
+                .background(colors.secondaryContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                nickname.firstOrNull()?.toString().orEmpty(),
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.onSecondaryContainer,
+            )
+            if (avatarUrl != null) {
+                AsyncImage(
+                    model = avatarUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+        Column(
+            Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                nickname,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(comment.content, style = MaterialTheme.typography.bodyLarge)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val stamp = relativeCommentTime(comment.time)
+                if (stamp.isNotBlank()) {
+                    Text(
+                        stamp,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                comment.ipLocation?.location?.takeIf(String::isNotBlank)?.let { location ->
+                    Text(
+                        location,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                CommentAction(
+                    label = if (comment.likedCount > 0) comment.likedCount.toString() else "",
+                    contentDescription = tr("comment.like"),
+                    onClick = onLike,
+                ) {
+                    Icon(
+                        if (comment.liked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                        null,
+                        Modifier.size(14.dp),
+                        tint = if (comment.liked) colors.error else colors.onSurfaceVariant,
+                    )
+                }
+                CommentAction(
+                    label = tr("comment.reply"),
+                    contentDescription = null,
+                    onClick = onReply,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Outlined.Reply,
+                        null,
+                        Modifier.size(14.dp),
+                        tint = colors.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Icon plus optional count, wide enough to tap without leaning on the neighbouring action. */
+@Composable
+private fun CommentAction(
+    label: String,
+    contentDescription: String?,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .then(
+                if (contentDescription != null) {
+                    Modifier.semantics { this.contentDescription = contentDescription }
+                } else {
+                    Modifier
+                },
+            )
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        icon()
+        if (label.isNotBlank()) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CommentReplyComposer(
+    nickname: String,
+    draft: String,
+    sending: Boolean,
+    error: String?,
+    onDraftChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(colors.surfaceVariant.copy(alpha = 0.45f))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            tr("comment.reply_to", nickname),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text(tr("comment.reply_hint"), style = MaterialTheme.typography.bodyMedium) },
+            isError = error != null,
+            minLines = 2,
+        )
+        error?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error)
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                tr("comment.reply_limit", draft.length, SONG_COMMENT_CONTENT_LIMIT),
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onCancel, enabled = !sending) { Text(tr("comment.reply_cancel")) }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = onSend, enabled = draft.isNotBlank() && !sending) {
+                if (sending) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                } else {
+                    Text(tr("comment.reply_send"))
+                }
+            }
+        }
+    }
+}
+
+private fun relativeCommentTime(
+    epochMillis: Long,
+    nowMillis: Long = System.currentTimeMillis(),
+): String {
+    if (epochMillis <= 0L) return ""
+    val elapsed = (nowMillis - epochMillis).coerceAtLeast(0L)
+    val minutes = elapsed / 60_000L
+    val hours = minutes / 60L
+    val days = hours / 24L
+    return when {
+        minutes < 1 -> tr("comment.time.now")
+        minutes < 60 -> tr("comment.time.minutes", minutes)
+        hours < 24 -> tr("comment.time.hours", hours)
+        days < 30 -> tr("comment.time.days", days)
+        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(epochMillis))
+    }
+}
+
 @Composable
 private fun ArtistPage(
     artist: Artist,
@@ -3832,6 +4522,8 @@ private fun NowPlayingPage(
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSeek: (Long) -> Unit,
+    onOpenQueue: () -> Unit,
+    onOpenComments: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val track = snapshot.track ?: return
@@ -3923,6 +4615,22 @@ private fun NowPlayingPage(
                                 .liquidGlassSurface(glass, RoundedCornerShape(24.dp), colors.surface, blurRadius = 8.dp)
                                 .padding(horizontal = 12.dp, vertical = 4.dp),
                         ) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                PlayerCardAction(
+                                    imageVector = Icons.AutoMirrored.Outlined.QueueMusic,
+                                    label = tr("player.queue"),
+                                    onClick = onOpenQueue,
+                                )
+                                Spacer(Modifier.weight(1f))
+                                PlayerCardAction(
+                                    imageVector = Icons.Outlined.ModeComment,
+                                    label = tr("comment.open"),
+                                    onClick = onOpenComments,
+                                )
+                            }
                             ThinSeekBar(
                                 progress = seekProgress,
                                 bufferedProgress = snapshot.bufferedFraction,
@@ -4102,6 +4810,22 @@ private fun NowPlayingPage(
                             .liquidGlassSurface(glass, RoundedCornerShape(28.dp), colors.surface, blurRadius = 12.dp)
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            PlayerCardAction(
+                                imageVector = Icons.AutoMirrored.Outlined.QueueMusic,
+                                label = tr("player.queue"),
+                                onClick = onOpenQueue,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            PlayerCardAction(
+                                imageVector = Icons.Outlined.ModeComment,
+                                label = tr("comment.open"),
+                                onClick = onOpenComments,
+                            )
+                        }
                         ThinSeekBar(
                             progress = seekProgress,
                             bufferedProgress = snapshot.bufferedFraction,

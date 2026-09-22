@@ -19,6 +19,7 @@ import dev.naominet.lazer.gateway.model.QrCheckResponse
 import dev.naominet.lazer.gateway.model.QrCodeResponse
 import dev.naominet.lazer.gateway.model.QrKeyResponse
 import dev.naominet.lazer.gateway.model.SearchResponse
+import dev.naominet.lazer.gateway.model.SongCommentResponse
 import dev.naominet.lazer.gateway.model.SongDetailResponse
 import dev.naominet.lazer.gateway.model.SongUrlResponse
 import dev.naominet.lazer.gateway.model.TopPlaylistsResponse
@@ -44,7 +45,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /** Search types supported by `/search` and `/cloudsearch`. */
@@ -89,6 +92,9 @@ enum class BannerPlatform(internal val apiValue: Int) {
     IPHONE(2),
     IPAD(3),
 }
+
+/** The upstream caps a comment body at this length; the UI uses it for its own counter. */
+const val SONG_COMMENT_CONTENT_LIMIT = 500
 
 /**
  * A Kotlin Multiplatform Wrapper around NeteaseCloudMusicApi Enhanced Gateway.
@@ -266,6 +272,45 @@ class NeteaseMusicGateway(
     suspend fun userDetail(uid: Long): UserDetailResponse {
         require(uid > 0) { "uid must be positive." }
         return post("/user/detail", parametersOf("uid" to uid))
+    }
+
+    /** Song comments are readable without a session; `more` reports whether another page exists. */
+    suspend fun songComments(songId: Long, limit: Int = 20, offset: Int = 0): SongCommentResponse {
+        require(songId > 0) { "songId must be positive." }
+        return post(
+            "/comment/music",
+            parametersOf(
+                "id" to songId,
+                "limit" to limit.coerceIn(1, 100),
+                "offset" to offset.coerceAtLeast(0),
+            ),
+        )
+    }
+
+    /** Liking and replying both need the session the comment reader does not. */
+    suspend fun setSongCommentLiked(songId: Long, commentId: Long, liked: Boolean) {
+        require(songId > 0 && commentId > 0) { "songId and commentId must be positive." }
+        requireCommentSuccess(
+            postRaw(
+                if (liked) "/comment/like" else "/comment/unlike",
+                parametersOf("id" to songId, "commentId" to commentId),
+            ).jsonObject,
+        )
+    }
+
+    suspend fun replyToSongComment(songId: Long, commentId: Long, content: String) {
+        require(songId > 0 && commentId > 0) { "songId and commentId must be positive." }
+        require(content.isNotBlank()) { "content must not be blank." }
+        requireCommentSuccess(
+            postRaw(
+                "/comment/reply",
+                parametersOf(
+                    "id" to songId,
+                    "commentId" to commentId,
+                    "content" to content.trim().take(SONG_COMMENT_CONTENT_LIMIT),
+                ),
+            ).jsonObject,
+        )
     }
 
     suspend fun logout(): JsonObject {
@@ -587,6 +632,11 @@ private fun parametersOf(vararg values: Pair<String, Any?>): Map<String, String>
             if (value != null) put(key, value.toString())
         }
     }
+
+/** The upstream answers 200 at the transport layer for a rejected write, so check the body code. */
+private fun requireCommentSuccess(response: JsonObject) {
+    check(response["code"]?.jsonPrimitive?.intOrNull == 200) { "comment request was rejected" }
+}
 
 private fun Map<String, String>.toJsonObject(): JsonObject = buildJsonObject {
     this@toJsonObject.forEach { (key, value) -> put(key, value) }
