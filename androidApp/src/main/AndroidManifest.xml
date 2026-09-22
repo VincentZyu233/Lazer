@@ -46,6 +46,10 @@
                     android:pathPrefix="/listen-together/share/" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".LazerScanActivity"
+            android:exported="false"
+            android:theme="@style/LazerScanTheme" />
         <service
             android:name=".AndroidPlaybackService"
             android:exported="false"

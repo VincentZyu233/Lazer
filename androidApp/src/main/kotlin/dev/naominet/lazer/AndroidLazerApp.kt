@@ -9,6 +9,10 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Base64
+import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.activity.BackEventCompat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.PredictiveBackHandler
@@ -100,6 +104,7 @@ import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -157,6 +162,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -199,6 +205,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import coil3.compose.AsyncImage
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
@@ -217,10 +224,12 @@ import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.material.icons.outlined.Headphones
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.model.Artist
+import dev.naominet.lazer.gateway.model.parseListenTogetherInvite
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import java.net.URI
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
 import top.yukonga.miuix.kmp.basic.ButtonColors as MiuixButtonColors
 import top.yukonga.miuix.kmp.basic.ButtonDefaults as MiuixButtonDefaults
@@ -569,8 +578,22 @@ private fun ExperimentalBadge() {
 fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     val context = LocalContext.current
     val controller = remember(context.applicationContext) { AndroidGatewayController(context.applicationContext) }
+    var pendingQrAuthorizationUrl by remember { mutableStateOf<String?>(null) }
+    var scanMessage by remember { mutableStateOf<String?>(null) }
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let(controller::joinListenTogether)
+        when (val target = result.contents?.let(::classifyScannedCode)) {
+            is ScannedCode.ListenTogether -> controller.joinListenTogether(target.raw)
+            is ScannedCode.ClientLogin -> {
+                if (controller.currentSessionCookie == null) {
+                    scanMessage = tr("scan.login_required")
+                    controller.openLogin()
+                } else {
+                    pendingQrAuthorizationUrl = target.url
+                }
+            }
+            ScannedCode.Unsupported -> scanMessage = tr("scan.unsupported")
+            null -> Unit
+        }
     }
     // Library/navigation only need transport changes; position ticks belong to the visible player.
     val playback by remember {
@@ -616,6 +639,11 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     }
     LaunchedEffect(initialListenTogetherInvitation) {
         initialListenTogetherInvitation?.let(controller::joinListenTogether)
+    }
+    LaunchedEffect(scanMessage) {
+        val shown = scanMessage ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(3_000L)
+        if (scanMessage == shown) scanMessage = null
     }
     LaunchedEffect(playback.track?.id) { playback.track?.id?.let(controller::loadLyrics) }
 
@@ -702,6 +730,29 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             LocalAndroidRequestCoverSave provides { coverSaveRequest = it },
         ) {
         val colors = MaterialTheme.colorScheme
+        val launchScanner = {
+            scanLauncher.launch(
+                ScanOptions().apply {
+                    setBeepEnabled(false)
+                    setCaptureActivity(LazerScanActivity::class.java)
+                    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    setOrientationLocked(false)
+                    setPrompt(tr("scan.prompt"))
+                    addExtra(LazerScanActivity.EXTRA_TITLE, tr("scan.open"))
+                    addExtra(LazerScanActivity.EXTRA_DESCRIPTION, tr("scan.description"))
+                    addExtra(LazerScanActivity.EXTRA_PROMPT, tr("scan.prompt"))
+                    addExtra(LazerScanActivity.EXTRA_BACK_DESCRIPTION, tr("common.back"))
+                    addExtra(LazerScanActivity.EXTRA_DARK_THEME, controller.isDark)
+                    addExtra(LazerScanActivity.EXTRA_BACKGROUND_COLOR, colors.background.toArgb())
+                    addExtra(LazerScanActivity.EXTRA_SURFACE_COLOR, colors.surface.toArgb())
+                    addExtra(LazerScanActivity.EXTRA_PRIMARY_COLOR, colors.primary.toArgb())
+                    addExtra(LazerScanActivity.EXTRA_PRIMARY_CONTAINER_COLOR, colors.primaryContainer.toArgb())
+                    addExtra(LazerScanActivity.EXTRA_ON_BACKGROUND_COLOR, colors.onBackground.toArgb())
+                    addExtra(LazerScanActivity.EXTRA_ON_SURFACE_VARIANT_COLOR, colors.onSurfaceVariant.toArgb())
+                    addExtra(LazerScanActivity.EXTRA_ON_PRIMARY_CONTAINER_COLOR, colors.onPrimaryContainer.toArgb())
+                },
+            )
+        }
         val view = LocalView.current
         val playFromQueue: (List<AndroidTrack>, AndroidTrack) -> Unit = { queue, track ->
             controller.play(queue, track)
@@ -836,6 +887,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                         currentTrackId = playback.track?.id,
                         onPlay = playFromQueue,
                         onListenTogether = controller::openListenTogether,
+                        onScan = launchScanner,
                         showHeaderControls = !liquidGlass.isEnabled || landscape,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -945,6 +997,13 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     LiquidGlassIconButton(
+                        onClick = launchScanner,
+                        contentDescription = tr("scan.open"),
+                        glass = liquidGlass,
+                    ) {
+                        Icon(Icons.Outlined.QrCodeScanner, null)
+                    }
+                    LiquidGlassIconButton(
                         onClick = controller::openListenTogether,
                         contentDescription = tr("listen_together.open"),
                         glass = liquidGlass,
@@ -975,6 +1034,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             if (landscape) {
                 LandscapeNavigationRail(
                     controller = controller,
+                    onScan = launchScanner,
                     modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
@@ -1002,6 +1062,13 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             }
 
             controller.message?.let { text ->
+                MessageBanner(
+                    text = text,
+                    modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(16.dp),
+                    glass = liquidGlass,
+                )
+            }
+            scanMessage?.let { text ->
                 MessageBanner(
                     text = text,
                     modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(16.dp),
@@ -1055,18 +1122,17 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             if (controller.isListenTogetherVisible) {
                 ListenTogetherSheet(
                     controller = controller,
-                    onScan = {
-                        scanLauncher.launch(
-                            ScanOptions().apply {
-                                setBeepEnabled(false)
-                                setPrompt(tr("listen_together.scan_prompt"))
-                            },
-                        )
-                    },
                     onShare = shareListenTogether,
                 )
             }
             if (controller.isLoginVisible) LoginSheet(controller, liquidGlass)
+            pendingQrAuthorizationUrl?.let { url ->
+                NeteaseQrAuthorizationSheet(
+                    url = url,
+                    sessionCookie = controller.currentSessionCookie.orEmpty(),
+                    onDismiss = { pendingQrAuthorizationUrl = null },
+                )
+            }
             ArtistChoiceSheet(
                 artists = artistChoices,
                 onDismiss = { artistChoices = emptyList() },
@@ -1144,6 +1210,7 @@ private fun AndroidRootContent(
     currentTrackId: Long?,
     onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
     onListenTogether: () -> Unit,
+    onScan: () -> Unit,
     showHeaderControls: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -1153,6 +1220,7 @@ private fun AndroidRootContent(
                 controller = controller,
                 showControls = showHeaderControls,
                 onListenTogether = onListenTogether,
+                onScan = onScan,
                 modifier = Modifier.padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 4.dp),
             )
         }
@@ -1192,6 +1260,7 @@ private fun AndroidRootContent(
 @Composable
 private fun LandscapeNavigationRail(
     controller: AndroidGatewayController,
+    onScan: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -1223,6 +1292,11 @@ private fun LandscapeNavigationRail(
                     ) { Icon(destination.icon(), destination.label) }
                 }
             }
+            IconButton(
+                onClick = onScan,
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.iconButtonColors(contentColor = colors.onSurfaceVariant),
+            ) { Icon(Icons.Outlined.QrCodeScanner, tr("scan.open")) }
             IconButton(
                 onClick = controller::openListenTogether,
                 modifier = Modifier.size(48.dp),
@@ -2988,6 +3062,7 @@ private fun MobileHeader(
     controller: AndroidGatewayController,
     showControls: Boolean,
     onListenTogether: () -> Unit,
+    onScan: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2995,6 +3070,9 @@ private fun MobileHeader(
             Text("Lazer", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
         if (showControls) {
+            IconButton(onClick = onScan) {
+                Icon(Icons.Outlined.QrCodeScanner, tr("scan.open"))
+            }
             IconButton(onClick = onListenTogether) {
                 Icon(
                     Icons.Outlined.Headphones,
@@ -4278,6 +4356,122 @@ private fun androidCoverFileName(title: String): String {
     val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Lazer cover" }
     return "$safeTitle.jpg"
 }
+
+private sealed interface ScannedCode {
+    data class ClientLogin(val url: String) : ScannedCode
+    data class ListenTogether(val raw: String) : ScannedCode
+    data object Unsupported : ScannedCode
+}
+
+private fun classifyScannedCode(raw: String): ScannedCode {
+    if (parseListenTogetherInvite(raw) != null) return ScannedCode.ListenTogether(raw)
+    parseNeteaseClientLoginUrl(raw)?.let { return ScannedCode.ClientLogin(it) }
+    return ScannedCode.Unsupported
+}
+
+/** Only official NetEase login QR URLs may receive the user's saved session cookie. */
+internal fun parseNeteaseClientLoginUrl(raw: String): String? {
+    val uri = runCatching { URI(raw.trim()) }.getOrNull() ?: return null
+    if (!uri.scheme.equals("https", ignoreCase = true)) return null
+    if (!uri.host.equals("music.163.com", ignoreCase = true)) return null
+    val query = uri.rawQuery?.takeIf(String::isNotBlank) ?: return null
+    val hasCodeKey = query.split('&').any { parameter ->
+        parameter.substringBefore('=').equals("codekey", ignoreCase = true) &&
+            parameter.substringAfter('=', "").isNotBlank()
+    }
+    if (!hasCodeKey) return null
+    return when (uri.path) {
+        "/login", "/st/platform/scanlogin" ->
+            "https://music.163.com/st/platform/scanlogin?$query"
+        else -> null
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun NeteaseQrAuthorizationSheet(
+    url: String,
+    sessionCookie: String,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    var webView by remember(url) { mutableStateOf<WebView?>(null) }
+    DisposableEffect(url) {
+        onDispose {
+            webView?.stopLoading()
+            webView?.destroy()
+            webView = null
+        }
+    }
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = colors.surface,
+        contentColor = colors.onSurface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().navigationBarsPadding().padding(start = 20.dp, end = 20.dp, bottom = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(tr("scan.authorize_title"), style = MaterialTheme.typography.headlineSmall)
+            Text(
+                tr("scan.authorize_hint"),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+            )
+            AndroidView(
+                factory = { context ->
+                    WebView(context).apply {
+                        webView = this
+                        val authorizationWebView = this
+                        setBackgroundColor(android.graphics.Color.WHITE)
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.allowFileAccess = false
+                        settings.allowContentAccess = false
+                        CookieManager.getInstance().apply {
+                            setAcceptCookie(true)
+                            setAcceptThirdPartyCookies(authorizationWebView, false)
+                            installNeteaseSessionCookies(sessionCookie)
+                            flush()
+                        }
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView,
+                                request: WebResourceRequest,
+                            ): Boolean = !isAllowedNeteaseWebHost(request.url.host)
+                        }
+                        loadUrl(url)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().heightIn(min = 360.dp, max = 560.dp)
+                    .clip(RoundedCornerShape(18.dp)),
+            )
+            ThemeTextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                Text(tr("login.close"))
+            }
+        }
+    }
+}
+
+private fun CookieManager.installNeteaseSessionCookies(sessionCookie: String) {
+    val allowed = setOf("MUSIC_U", "MUSIC_A", "NMTID", "deviceId", "__csrf")
+    sessionCookie.split(';').forEach { field ->
+        val name = field.substringBefore('=').trim()
+        val value = field.substringAfter('=', "").trim()
+        if (name in allowed && value.isNotBlank()) {
+            setCookie(
+                "https://music.163.com",
+                "$name=$value; Domain=.music.163.com; Path=/; Secure; SameSite=Lax",
+            )
+        }
+    }
+}
+
+private fun isAllowedNeteaseWebHost(host: String?): Boolean =
+    host.equals("music.163.com", ignoreCase = true) ||
+        host.equals("st.music.163.com", ignoreCase = true)
 
 private fun Context.hasRecordAudioPermission(): Boolean =
     checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED

@@ -184,9 +184,13 @@ class DesktopMediaAndCacheTest {
         assertEquals(0f, tracker.releaseVelocity(), 0.0001f)
 
         val motion = WheelInertiaMotion()
+        assertFalse(motion.isMoving)
         motion.fling(1_200f)
+        assertTrue(motion.isMoving)
         assertEquals(20f, motion.advance(1f / 60f), 0.0001f)
         assertEquals(18f, motion.advance(1f / 60f), 0.0001f)
+        motion.stop()
+        assertFalse(motion.isMoving)
     }
 
     @Test
@@ -411,6 +415,17 @@ class DesktopMediaAndCacheTest {
         assertEquals(0f, bufferedFraction(1, 0), 0f)
         assertEquals(0.5f, bufferedFraction(50, 100), 0.0001f)
         assertEquals(1f, bufferedFraction(150, 100), 0f)
+    }
+
+    @Test
+    fun `background UI updates are throttled without changing foreground cadence`() {
+        val last = 1_000_000_000L
+        assertTrue(shouldPublishDesktopUiUpdate(last, 0L, foreground = false, value = 0.2f))
+        assertFalse(shouldPublishDesktopUiUpdate(last + 32_000_000L, last, foreground = true, value = 0.2f))
+        assertTrue(shouldPublishDesktopUiUpdate(last + 33_000_000L, last, foreground = true, value = 0.2f))
+        assertFalse(shouldPublishDesktopUiUpdate(last + 999_000_000L, last, foreground = false, value = 0.2f))
+        assertTrue(shouldPublishDesktopUiUpdate(last + 1_000_000_000L, last, foreground = false, value = 0.2f))
+        assertTrue(shouldPublishDesktopUiUpdate(last + 1L, last, foreground = false, value = 1f))
     }
 
     @Test

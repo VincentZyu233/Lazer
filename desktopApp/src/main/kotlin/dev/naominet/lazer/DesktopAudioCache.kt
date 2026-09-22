@@ -24,7 +24,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.min
 
@@ -66,6 +65,7 @@ internal class DesktopAudioCache(
                 trackId = trackId,
                 onProgress = onProgress,
                 httpClient = httpClient,
+                onIdle = { idleEntry -> entries.remove(fileName, idleEntry) },
             )
         }
         entry.ensureDownload(url, expectedBytes)
@@ -114,6 +114,7 @@ private class AudioCacheEntry(
     private val trackId: Long,
     private val onProgress: (trackId: Long, fraction: Float) -> Unit,
     private val httpClient: HttpClient,
+    private val onIdle: (AudioCacheEntry) -> Unit,
 ) {
     private val completePath = mediaPath.resolveSibling("${mediaPath.fileName}.complete")
     private val dataLock = ReentrantLock()
@@ -134,6 +135,9 @@ private class AudioCacheEntry(
 
     @Volatile
     private var cancelled = false
+
+    @Volatile
+    private var dataRevision = 0L
 
     private var downloadJob: Job? = null
     private val readers = ConcurrentHashMap.newKeySet<GrowingCacheInputStream>()
@@ -172,6 +176,7 @@ private class AudioCacheEntry(
 
     fun readerClosed(reader: GrowingCacheInputStream) {
         readers.remove(reader)
+        if (isIdle()) onIdle(this)
     }
 
     fun bufferedFraction(): Float = when {
@@ -184,10 +189,12 @@ private class AudioCacheEntry(
     fun isComplete(): Boolean = complete
     fun currentFailure(): Throwable? = failure
 
-    fun awaitMoreData() {
+    fun currentDataRevision(): Long = dataRevision
+
+    fun awaitMoreData(observedRevision: Long) {
         dataLock.lock()
         try {
-            dataChanged.await(100L, TimeUnit.MILLISECONDS)
+            if (dataRevision == observedRevision) dataChanged.await()
         } finally {
             dataLock.unlock()
         }
@@ -196,6 +203,7 @@ private class AudioCacheEntry(
     fun wakeReaders() {
         dataLock.lock()
         try {
+            dataRevision += 1L
             dataChanged.signalAll()
         } finally {
             dataLock.unlock()
@@ -208,6 +216,7 @@ private class AudioCacheEntry(
         synchronized(stateLock) { downloadJob }?.cancel()
         readers.forEach { runCatching { it.close() } }
         wakeReaders()
+        if (isIdle()) onIdle(this)
     }
 
     suspend fun join() {
@@ -215,6 +224,9 @@ private class AudioCacheEntry(
     }
 
     fun isCancelled(): Boolean = cancelled
+
+    private fun isIdle(): Boolean =
+        readers.isEmpty() && (complete || failure != null || cancelled)
 
     private suspend fun openHttp(request: HttpRequest): HttpResponse<InputStream> {
         val future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
@@ -340,6 +352,7 @@ private class AudioCacheEntry(
             if (error is CancellationException) throw error
         } finally {
             wakeReaders()
+            if (isIdle()) onIdle(this)
         }
     }
 
@@ -366,13 +379,13 @@ private class GrowingCacheInputStream(
     private var closed = false
 
     override fun read(): Int {
-        val one = ByteArray(1)
-        return if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xFF
+        return if (read(singleByte, 0, 1) < 0) -1 else singleByte[0].toInt() and 0xFF
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         while (true) {
+            val observedRevision = entry.currentDataRevision()
             if (closed || entry.isCancelled()) throw IOException("音频缓存读取已关闭")
             val available = entry.availableFrom(position)
             if (available > 0L) {
@@ -386,7 +399,7 @@ private class GrowingCacheInputStream(
             }
             if (entry.isComplete()) return -1
             entry.currentFailure()?.let { throw IOException("音频缓存下载中断", it) }
-            entry.awaitMoreData()
+            entry.awaitMoreData(observedRevision)
         }
     }
 

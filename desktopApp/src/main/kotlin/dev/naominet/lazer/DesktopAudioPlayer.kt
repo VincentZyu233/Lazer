@@ -11,6 +11,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicLong
@@ -19,6 +21,9 @@ import javax.sound.sampled.AudioFormat
 import kotlin.math.roundToInt
 
 private const val OutputWriteTimeoutNanos = 2_000_000_000L
+private const val OutputWatchdogIntervalMillis = 250L
+private const val ForegroundProgressIntervalNanos = 33_000_000L
+private const val BackgroundProgressIntervalNanos = 1_000_000_000L
 
 /**
  * Small desktop streaming player. JavaMP3 decodes the growing cached MP3 stream, while PCM is
@@ -32,6 +37,8 @@ internal class DesktopAudioPlayer(
     initialExclusiveAudio: Boolean = false,
 ) : Closeable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile
+    private var uiForeground = true
     private val audioCache = DesktopAudioCache(onProgress = onBuffered)
     private val generation = AtomicLong(0L)
     private var playbackJob: Job? = null
@@ -44,6 +51,7 @@ internal class DesktopAudioPlayer(
 
     @Volatile
     private var paused = false
+    private val pausedState = MutableStateFlow(false)
 
     @Volatile
     private var volume = 0.72f
@@ -63,7 +71,7 @@ internal class DesktopAudioPlayer(
     ): Long {
         stopCurrent()
         this.volume = volume.coerceIn(0f, 1f)
-        paused = !playWhenReady
+        setPaused(!playWhenReady)
         val token = generation.incrementAndGet()
         val safeFromProgress = playableSeekProgress(fromProgress, durationMillis)
         PlaybackDebugLog.event(
@@ -96,7 +104,7 @@ internal class DesktopAudioPlayer(
     }
 
     fun pause() {
-        paused = true
+        setPaused(true)
         PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
         activeLine?.let { output ->
             if (output.usesSoftwareVolume) {
@@ -109,7 +117,7 @@ internal class DesktopAudioPlayer(
     }
 
     fun resume() {
-        paused = false
+        setPaused(false)
         PlaybackDebugLog.event("audio-resume", "token=${generation.get()}")
         runCatching { activeLine?.start() }
     }
@@ -117,6 +125,10 @@ internal class DesktopAudioPlayer(
     fun setVolume(value: Float) {
         volume = value.coerceIn(0f, 1f)
         activeLine?.setVolume(volume)
+    }
+
+    fun setUiForeground(foreground: Boolean) {
+        uiForeground = foreground
     }
 
     suspend fun setExclusiveAudio(enabled: Boolean) {
@@ -128,7 +140,7 @@ internal class DesktopAudioPlayer(
         generation.incrementAndGet()
         playbackJob?.cancel()
         playbackJob = null
-        paused = false
+        setPaused(false)
         runInterruptible(Dispatchers.IO) { releaseActiveResources() }
     }
 
@@ -214,7 +226,8 @@ internal class DesktopAudioPlayer(
             // existing bounded output-line recovery reopen it.
             outputWatchdog = scope.launch {
                 while (isActive && token == generation.get()) {
-                    delay(100)
+                    if (paused) pausedState.first { isPaused -> !isPaused }
+                    delay(OutputWatchdogIntervalMillis)
                     val output = writeInProgress.get() ?: continue
                     val startedAt = writeStartedAtNanos.get()
                     if (
@@ -232,7 +245,7 @@ internal class DesktopAudioPlayer(
             }
 
             while (scope.isActive && token == generation.get()) {
-                while (paused && scope.isActive && token == generation.get()) delay(40)
+                if (paused) pausedState.first { isPaused -> !isPaused }
                 if (!scope.isActive || token != generation.get()) return
 
                 val currentOutput = line
@@ -291,7 +304,7 @@ internal class DesktopAudioPlayer(
                 var zeroWrites = 0
                 while (written < count && token == generation.get() && scope.isActive) {
                     if (paused) {
-                        delay(20)
+                        pausedState.first { isPaused -> !isPaused }
                         continue
                     }
                     val output = line ?: return
@@ -352,7 +365,12 @@ internal class DesktopAudioPlayer(
                 if (endOfStream) break
 
                 val now = System.nanoTime()
-                if (durationMillis > 0L && now - lastProgressUpdate >= 33_000_000L) {
+                val progressInterval = if (uiForeground) {
+                    ForegroundProgressIntervalNanos
+                } else {
+                    BackgroundProgressIntervalNanos
+                }
+                if (durationMillis > 0L && now - lastProgressUpdate >= progressInterval) {
                     val progress = fromProgress + playedMillis().toFloat() / durationMillis.toFloat()
                     onProgress(token, progress.coerceIn(0f, 0.999f))
                     lastProgressUpdate = now
@@ -436,8 +454,13 @@ internal class DesktopAudioPlayer(
         if (priorToken > 0L) PlaybackDebugLog.event("audio-stop", "token=$priorToken")
         playbackJob?.cancel()
         playbackJob = null
-        paused = false
+        setPaused(false)
         releaseActiveResources()
+    }
+
+    private fun setPaused(value: Boolean) {
+        paused = value
+        pausedState.value = value
     }
 
     private fun release(line: DesktopPcmAudioOutput, input: Closeable) {

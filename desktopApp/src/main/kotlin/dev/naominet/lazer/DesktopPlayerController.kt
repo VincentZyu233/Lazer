@@ -174,21 +174,35 @@ class DesktopPlayerController(
     }
     private val streamUrlPrefetches = mutableSetOf<DesktopStreamCacheKey>()
     private var started = false
+    private var uiForeground = true
+    private var lastProgressUiUpdateNanos = 0L
+    private var lastCacheUiUpdateNanos = 0L
     private val activePlaybackToken = AtomicLong(0L)
     private val progressEvents = Channel<PlaybackProgress>(Channel.CONFLATED)
     private val cacheProgressEvents = Channel<CacheProgress>(Channel.CONFLATED)
     private val progressCollectorJob = scope.launch {
         for (event in progressEvents) {
-            if (event.token == activePlaybackToken.get() && !isSeeking) {
+            val now = System.nanoTime()
+            if (
+                event.token == activePlaybackToken.get() &&
+                !isSeeking &&
+                shouldPublishDesktopUiUpdate(now, lastProgressUiUpdateNanos, uiForeground, event.value)
+            ) {
                 progress = event.value
+                lastProgressUiUpdateNanos = now
                 publishSystemMedia()
             }
         }
     }
     private val cacheProgressCollectorJob = scope.launch {
         for (event in cacheProgressEvents) {
-            if (nowPlaying?.id == event.trackId) {
+            val now = System.nanoTime()
+            if (
+                nowPlaying?.id == event.trackId &&
+                shouldPublishDesktopUiUpdate(now, lastCacheUiUpdateNanos, uiForeground, event.value)
+            ) {
                 bufferedProgress = event.value.coerceIn(0f, 1f)
+                lastCacheUiUpdateNanos = now
             }
         }
     }
@@ -623,6 +637,15 @@ class DesktopPlayerController(
         audioPlayer.close()
         controllerJob.cancel()
         gateway.close()
+    }
+
+    /** Keep foreground motion unchanged, but avoid repainting an inactive window for every audio tick. */
+    fun setUiForeground(foreground: Boolean) {
+        if (uiForeground == foreground) return
+        uiForeground = foreground
+        audioPlayer.setUiForeground(foreground)
+        lastProgressUiUpdateNanos = 0L
+        lastCacheUiUpdateNanos = 0L
     }
 
     fun toggleTheme() {
@@ -2240,6 +2263,20 @@ internal fun lyricSeekProgress(timeMillis: Long, durationMillis: Long): Float {
     val requested = timeMillis.coerceAtLeast(0L).toDouble() / durationMillis.toDouble()
     return playableSeekProgress(requested.toFloat(), durationMillis)
 }
+
+internal fun shouldPublishDesktopUiUpdate(
+    nowNanos: Long,
+    lastUpdateNanos: Long,
+    foreground: Boolean,
+    value: Float,
+): Boolean {
+    if (lastUpdateNanos == 0L || value >= 1f) return true
+    val interval = if (foreground) FOREGROUND_UI_UPDATE_NANOS else BACKGROUND_UI_UPDATE_NANOS
+    return nowNanos < lastUpdateNanos || nowNanos - lastUpdateNanos >= interval
+}
+
+private const val FOREGROUND_UI_UPDATE_NANOS = 33_000_000L
+private const val BACKGROUND_UI_UPDATE_NANOS = 1_000_000_000L
 
 /** Stable cache variant: the content hash wins, with bitrate/type as a safe fallback. */
 internal fun audioCacheVariant(bitrate: Int?, md5: String?, mediaType: String?): String {

@@ -19,7 +19,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Headphones
 import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -29,7 +28,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -60,7 +58,6 @@ private val ListenTogetherRoomKind.labelKey: String
 @Composable
 internal fun ListenTogetherSheet(
     controller: AndroidGatewayController,
-    onScan: () -> Unit,
     onShare: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -135,7 +132,6 @@ internal fun ListenTogetherSheet(
                     onInvitationChange = { invitation = it },
                     busy = controller.isListenTogetherBusy,
                     onCreate = controller::createListenTogetherRoom,
-                    onScan = onScan,
                     onJoin = { controller.joinListenTogether(invitation) },
                 )
                 else -> ActiveListenTogetherRoom(
@@ -170,7 +166,6 @@ private fun ListenTogetherLobby(
     onInvitationChange: (String) -> Unit,
     busy: Boolean,
     onCreate: (ListenTogetherRoomKind) -> Unit,
-    onScan: () -> Unit,
     onJoin: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -220,7 +215,7 @@ private fun ListenTogetherLobby(
             )
             HorizontalDivider(Modifier.weight(1f))
         }
-        Text(tr("listen_together.join_hint"), color = colors.onSurfaceVariant)
+        Text(tr("listen_together.join_hint_desktop"), color = colors.onSurfaceVariant)
         OutlinedTextField(
             value = invitation,
             onValueChange = onInvitationChange,
@@ -231,19 +226,12 @@ private fun ListenTogetherLobby(
             maxLines = 4,
             shape = RoundedCornerShape(16.dp),
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedButton(onClick = onScan, enabled = !busy, modifier = Modifier.weight(1f)) {
-                Icon(Icons.Outlined.QrCodeScanner, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(tr("listen_together.scan"))
-            }
-            Button(
-                onClick = onJoin,
-                enabled = !busy && invitation.isNotBlank(),
-                modifier = Modifier.weight(1f),
-            ) {
-                Text(tr("listen_together.join"))
-            }
+        Button(
+            onClick = onJoin,
+            enabled = !busy && invitation.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text(tr("listen_together.join"))
         }
     }
 }
