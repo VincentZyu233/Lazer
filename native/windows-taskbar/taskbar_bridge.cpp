@@ -109,7 +109,9 @@ void FillButton(THUMBBUTTON& button, UINT command, HICON icon, const wchar_t* to
     button.dwMask = THB_ICON | THB_TOOLTIP | THB_FLAGS;
     button.iId = command;
     button.hIcon = icon;
-    button.dwFlags = THBF_ENABLED | THBF_DISMISSONCLICK;
+    // Keep the thumbnail toolbar open after a click. This matches Chromium/Electron's default
+    // behavior and makes the button state observable while its notification is dispatched.
+    button.dwFlags = THBF_ENABLED;
     if (tooltip != nullptr) lstrcpynW(button.szTip, tooltip, ARRAYSIZE(button.szTip));
 }
 

@@ -147,6 +147,29 @@ class DesktopMediaAndCacheTest {
     }
 
     @Test
+    fun `PCM volume transition advances across its requested duration`() {
+        val format = AudioFormat(
+            AudioFormat.Encoding.PCM_SIGNED,
+            48_000f,
+            16,
+            2,
+            4,
+            48_000f,
+            false,
+        )
+
+        val afterQuarterSecond = nextPcmVolumeRampEnd(
+            startVolume = 0f,
+            targetVolume = 1f,
+            byteCount = 48_000,
+            format = format,
+            durationMillis = 1_000,
+        )
+
+        assertEquals(0.25f, afterQuarterSecond, 0.0001f)
+    }
+
+    @Test
     fun `WASAPI wave format matches decoded stereo PCM`() {
         val format = AudioFormat(
             AudioFormat.Encoding.PCM_SIGNED,

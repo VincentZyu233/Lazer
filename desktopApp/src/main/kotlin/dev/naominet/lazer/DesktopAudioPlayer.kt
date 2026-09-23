@@ -19,6 +19,10 @@ import javax.sound.sampled.AudioFormat
 import kotlin.math.roundToInt
 
 private const val OutputWriteTimeoutNanos = 2_000_000_000L
+private const val VolumeTransitionMillis = 400
+private const val PlaybackFadeMillis = 450
+private const val PauseFadeMillis = 700
+private const val VolumeRampCompleteTolerance = 0.001f
 internal const val DEFAULT_DESKTOP_VOLUME = 0.50f
 
 /**
@@ -294,11 +298,31 @@ internal class DesktopAudioPlayer(
                         // delayed or changing normal playback from the beginning.
                         seekFadeIn?.apply(buffer, count)
                         val targetVolume = if (pauseFadeRequested) 0f else volume
-                        if (line.usesSoftwareVolume) {
-                            applyPcm16VolumeRamp(buffer, count, decodedFormat, renderedVolume, targetVolume)
+                        val transitionMillis = when {
+                            pauseFadeRequested -> PauseFadeMillis
+                            renderedVolume <= VolumeRampCompleteTolerance && targetVolume > VolumeRampCompleteTolerance ->
+                                PlaybackFadeMillis
+                            else -> VolumeTransitionMillis
                         }
-                        renderedVolume = targetVolume
-                        val pauseAfterCurrentBuffer = pauseFadeRequested
+                        val nextRenderedVolume = nextPcmVolumeRampEnd(
+                            startVolume = renderedVolume,
+                            targetVolume = targetVolume,
+                            byteCount = count,
+                            format = decodedFormat,
+                            durationMillis = transitionMillis,
+                        )
+                        if (line.usesSoftwareVolume) {
+                            applyPcm16VolumeRamp(
+                                buffer,
+                                count,
+                                decodedFormat,
+                                renderedVolume,
+                                nextRenderedVolume,
+                            )
+                        }
+                        renderedVolume = nextRenderedVolume
+                        val pauseAfterCurrentBuffer = pauseFadeRequested &&
+                            renderedVolume <= VolumeRampCompleteTolerance
 
                         var written = 0
                         var zeroWrites = 0
@@ -571,6 +595,27 @@ internal fun applyPcm16Volume(
     format: AudioFormat,
     volume: Float,
 ) = applyPcm16VolumeRamp(buffer, byteCount, format, volume, volume)
+
+/** Advances one PCM block toward its target gain at a fixed full-scale transition rate. */
+internal fun nextPcmVolumeRampEnd(
+    startVolume: Float,
+    targetVolume: Float,
+    byteCount: Int,
+    format: AudioFormat,
+    durationMillis: Int,
+): Float {
+    val start = startVolume.coerceIn(0f, 1f)
+    val target = targetVolume.coerceIn(0f, 1f)
+    if (start == target || durationMillis <= 0 || format.frameSize <= 0 || format.frameRate <= 0f) return target
+    val frameCount = byteCount.coerceAtLeast(0) / format.frameSize
+    val durationFrames = format.frameRate * durationMillis / 1_000f
+    if (frameCount <= 0 || durationFrames <= 0f) return start
+    val maximumGainChange = (frameCount / durationFrames).coerceIn(0f, 1f)
+    return when {
+        target > start -> (start + maximumGainChange).coerceAtMost(target)
+        else -> (start - maximumGainChange).coerceAtLeast(target)
+    }
+}
 
 /** Applies a linear gain ramp across one decoded PCM block to avoid audible parameter steps. */
 internal fun applyPcm16VolumeRamp(
