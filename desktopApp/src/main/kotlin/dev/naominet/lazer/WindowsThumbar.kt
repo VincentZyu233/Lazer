@@ -23,9 +23,9 @@ internal fun thumbarActionFromCommand(commandId: Int): MediaControlAction? = whe
 /**
  * Windows thumbnail-toolbar integration backed by the x64 native bridge.
  *
- * Keeping the actual window subclass in C++ is deliberate: Compose/Skiko may replace an AWT
- * window procedure after the JVM has installed a JNA callback. The bridge owns that native
- * subclass and forwards only the explicit media actions to Kotlin.
+ * The C++ bridge observes the HWND owner's message thread before Compose/Skiko dispatches to
+ * its window procedure. Skiko may replace that procedure during startup, so a direct JVM/native
+ * subclass is not a reliable place to receive thumbnail commands.
  */
 internal class WindowsThumbar(
     private val onAction: (MediaControlAction) -> Unit,

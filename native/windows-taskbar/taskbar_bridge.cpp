@@ -32,7 +32,7 @@ struct TaskbarState {
     std::wstring playTooltip;
     std::wstring pauseTooltip;
     std::wstring nextTooltip;
-    WNDPROC previousWindowProc = nullptr;
+    HHOOK messageHook = nullptr;
     bool isPlaying = false;
     bool buttonsAdded = false;
 
@@ -101,31 +101,28 @@ void RequestButtonApply(HWND hwnd) {
     PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
 }
 
-LRESULT CALLBACK TaskbarWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    const auto it = g_states.find(hwnd);
-    if (it == g_states.end()) return DefWindowProcW(hwnd, message, wParam, lParam);
-    TaskbarState& state = *it->second;
-
+void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM wParam) {
     if (message == g_taskbarButtonCreated) {
         state.buttonsAdded = false;
         if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
-        return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
+        else SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
+        return;
     }
     if (message == WM_TIMER && wParam == kRetryTimerId) {
         // Compose can create its AWT peer after Explorer already emitted TaskbarButtonCreated.
         // Keep retrying the documented AddButtons call from this window's own message thread
         // until Explorer has a taskbar button for the window.
         if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
-        return 0;
+        return;
     }
     if (message == kApplyButtonsMessage) {
         if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
         else SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
-        return 0;
+        return;
     }
     if (message == WM_SETTINGCHANGE) {
         if (state.callback != nullptr) state.callback(kActionThemeChanged);
-        return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
+        return;
     }
     if (message == WM_COMMAND) {
         const UINT command = LOWORD(wParam);
@@ -138,10 +135,23 @@ LRESULT CALLBACK TaskbarWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // as zero through the AWT peer's native window procedure. The command IDs belong
             // exclusively to this bridge, so they are the reliable discriminator here.
             if (state.callback != nullptr) state.callback(action);
-            return 0;
+            return;
         }
     }
-    return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
+}
+
+// Compose/Skiko owns and can replace its AWT window procedure after the Kotlin side has obtained
+// the HWND. A thread hook observes messages before that procedure runs, so thumbnail commands
+// remain visible even when Skiko changes the procedure later in the window lifetime.
+LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code >= 0) {
+        const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        const auto it = g_states.find(message->hwnd);
+        if (it != g_states.end()) {
+            HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
 bool UpdateState(HWND hwnd, const wchar_t* previous, const wchar_t* play, const wchar_t* pause,
@@ -179,19 +189,18 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     state->callback = callback;
     state->isPlaying = isPlaying != 0;
     g_states.emplace(hwnd, std::move(state));
-    // SetWindowSubclass may only be called from the HWND's creator thread. Compose invokes this
-    // entry point from AWT-EventQueue-0 while the native peer is owned by AWT-Windows, so install
-    // a native procedure directly and marshal taskbar COM work back with PostMessage.
-    SetLastError(0);
-    const auto previousWindowProc = reinterpret_cast<WNDPROC>(
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TaskbarWindowProc)));
-    if (previousWindowProc == nullptr && GetLastError() != 0) {
+    // The Compose call is on AWT-EventQueue-0, but the HWND belongs to AWT-Windows. A
+    // thread-specific call-window hook executes in that owner thread without replacing Skiko's
+    // procedure, and also provides the required COM apartment for ITaskbarList3 calls.
+    const DWORD ownerThread = GetWindowThreadProcessId(hwnd, nullptr);
+    const HHOOK messageHook = SetWindowsHookExW(
+        WH_CALLWNDPROC, TaskbarMessageHook, nullptr, ownerThread);
+    if (messageHook == nullptr) {
         g_states.erase(hwnd);
         return 0;
     }
-    g_states.at(hwnd)->previousWindowProc = previousWindowProc;
-    // Report success once the procedure is active so Kotlin keeps the bridge and its callback
-    // alive while the owner thread receives the posted apply request.
+    g_states.at(hwnd)->messageHook = messageHook;
+    // Keep the callback alive while the owner thread receives the posted apply request.
     UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
         pauseTooltip, nextTooltip, isPlaying);
     return 1;
@@ -210,10 +219,6 @@ extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) 
     KillTimer(hwnd, kRetryTimerId);
     const auto it = g_states.find(hwnd);
     if (it == g_states.end()) return;
-    const WNDPROC previousWindowProc = it->second->previousWindowProc;
-    const auto currentWindowProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
-    if (currentWindowProc == TaskbarWindowProc && previousWindowProc != nullptr) {
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(previousWindowProc));
-    }
+    if (it->second->messageHook != nullptr) UnhookWindowsHookEx(it->second->messageHook);
     g_states.erase(it);
 }
