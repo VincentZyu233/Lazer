@@ -52,6 +52,14 @@ struct TaskbarState {
 std::unordered_map<HWND, std::unique_ptr<TaskbarState>> g_states;
 UINT g_taskbarButtonCreated = 0;
 
+HWND ResolveTaskbarWindow(HWND hwnd) {
+    if (hwnd == nullptr) return nullptr;
+    // Native.getWindowPointer can expose a Compose rendering child. The shell owns thumbnail
+    // buttons on the taskbar-visible root owner and sends its commands to that top-level peer.
+    const HWND rootOwner = GetAncestor(hwnd, GA_ROOTOWNER);
+    return rootOwner == nullptr ? hwnd : rootOwner;
+}
+
 HICON LoadIconFile(const wchar_t* path) {
     if (path == nullptr || *path == L'\0') return nullptr;
     return static_cast<HICON>(LoadImageW(nullptr, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE));
@@ -248,6 +256,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     const wchar_t* previous, const wchar_t* play, const wchar_t* pause, const wchar_t* next,
     const wchar_t* previousTooltip, const wchar_t* playTooltip, const wchar_t* pauseTooltip,
     const wchar_t* nextTooltip, int isPlaying, ActionCallback callback) {
+    hwnd = ResolveTaskbarWindow(hwnd);
     if (hwnd == nullptr) return 0;
     if (g_taskbarButtonCreated == 0) g_taskbarButtonCreated = RegisterWindowMessageW(L"TaskbarButtonCreated");
     lazer_taskbar_remove(hwnd);
@@ -286,11 +295,12 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_update(HWND hwnd,
     const wchar_t* previous, const wchar_t* play, const wchar_t* pause, const wchar_t* next,
     const wchar_t* previousTooltip, const wchar_t* playTooltip, const wchar_t* pauseTooltip,
     const wchar_t* nextTooltip, int isPlaying) {
-    return UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
+    return UpdateState(ResolveTaskbarWindow(hwnd), previous, play, pause, next, previousTooltip, playTooltip,
         pauseTooltip, nextTooltip, isPlaying) ? 1 : 0;
 }
 
 extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) {
+    hwnd = ResolveTaskbarWindow(hwnd);
     if (hwnd == nullptr) return;
     KillTimer(hwnd, kRetryTimerId);
     const auto it = g_states.find(hwnd);
