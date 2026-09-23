@@ -120,9 +120,25 @@ void RequestButtonApply(HWND hwnd) {
     PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
 }
 
-bool IsTaskbarCommand(WPARAM wParam) {
-    const UINT command = LOWORD(wParam);
-    return command == kCommandPrevious || command == kCommandPlayPause || command == kCommandNext;
+int MediaActionForMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_COMMAND) {
+        const UINT command = LOWORD(wParam);
+        if (command == kCommandPrevious) return kActionPrevious;
+        if (command == kCommandPlayPause) return kActionPlayPause;
+        if (command == kCommandNext) return kActionNext;
+    }
+    if (message == WM_APPCOMMAND) {
+        switch (GET_APPCOMMAND_LPARAM(lParam)) {
+            case APPCOMMAND_MEDIA_PREVIOUSTRACK: return kActionPrevious;
+            case APPCOMMAND_MEDIA_PLAY_PAUSE: return kActionPlayPause;
+            case APPCOMMAND_MEDIA_NEXTTRACK: return kActionNext;
+        }
+    }
+    return 0;
+}
+
+bool IsTaskbarMediaMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+    return MediaActionForMessage(message, wParam, lParam) != 0;
 }
 
 // The shell can deliver a thumbnail WM_COMMAND to the taskbar-visible parent/proxy HWND rather
@@ -154,7 +170,7 @@ void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
     }
 }
 
-void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM wParam) {
+void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == g_taskbarButtonCreated) {
         state.buttonsAdded = false;
         ApplyButtonsOnOwnerThread(hwnd, state);
@@ -175,19 +191,11 @@ void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM w
         if (state.callback != nullptr) state.callback(kActionThemeChanged);
         return;
     }
-    if (message == WM_COMMAND) {
-        const UINT command = LOWORD(wParam);
-        int action = 0;
-        if (command == kCommandPrevious) action = kActionPrevious;
-        if (command == kCommandPlayPause) action = kActionPlayPause;
-        if (command == kCommandNext) action = kActionNext;
-        if (action != 0) {
-            // Explorer normally documents THBN_CLICKED in HIWORD(wParam), but this can arrive
-            // as zero through the AWT peer's native window procedure. The command IDs belong
-            // exclusively to this bridge, so they are the reliable discriminator here.
-            if (state.callback != nullptr) state.callback(action);
-            return;
-        }
+    const int action = MediaActionForMessage(message, wParam, lParam);
+    if (action != 0) {
+        // Explorer normally documents THBN_CLICKED in HIWORD(wParam), but this can arrive as
+        // zero through the AWT peer. Some Shell routes instead expose media APPCOMMAND values.
+        if (state.callback != nullptr) state.callback(action);
     }
 }
 
@@ -201,7 +209,7 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPA
         if (message == WM_COMMAND) {
             ReportObservedCommand(it->second.get(), kActionSubclassCommandObserved, wParam);
         }
-        HandleTaskbarMessage(hwnd, *it->second, message, wParam);
+        HandleTaskbarMessage(hwnd, *it->second, message, wParam, lParam);
     }
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
@@ -231,15 +239,16 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
             }
         }
         const bool shouldHandle = message->message == g_taskbarButtonCreated ||
-            message->message == WM_SETTINGCHANGE || message->message == WM_COMMAND;
+            message->message == WM_SETTINGCHANGE || message->message == WM_COMMAND ||
+            message->message == WM_APPCOMMAND;
         if (shouldHandle) {
             const auto it = g_states.find(message->hwnd);
             if (it != g_states.end()) {
-                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
-            } else if (message->message == WM_COMMAND && IsTaskbarCommand(message->wParam)) {
+                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam, message->lParam);
+            } else if (IsTaskbarMediaMessage(message->message, message->wParam, message->lParam)) {
                 HWND stateHwnd = nullptr;
                 if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
-                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam);
+                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
                 }
             }
         }
@@ -264,19 +273,19 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
         }
         const bool isApplyMessage = message->message == kApplyButtonsMessage;
         const bool isRetryTimer = message->message == WM_TIMER && message->wParam == kRetryTimerId;
-        const bool isTaskbarCommand = message->message == WM_COMMAND && IsTaskbarCommand(message->wParam);
+        const bool isTaskbarCommand = IsTaskbarMediaMessage(message->message, message->wParam, message->lParam);
         if (isApplyMessage || isRetryTimer || isTaskbarCommand) {
             const auto it = g_states.find(message->hwnd);
             if (it != g_states.end()) {
                 if (isApplyMessage) EnsureTaskbarSubclass(message->hwnd, *it->second);
-                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam, message->lParam);
                 // Our registration/timer messages and private command IDs have no meaning to
                 // AWT. Prevent a queued thumbnail command from being dispatched a second time.
                 message->message = WM_NULL;
             } else if (isTaskbarCommand) {
                 HWND stateHwnd = nullptr;
                 if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
-                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam);
+                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
                     message->message = WM_NULL;
                 }
             }
