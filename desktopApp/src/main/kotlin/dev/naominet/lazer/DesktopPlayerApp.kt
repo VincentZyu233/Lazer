@@ -192,6 +192,8 @@ fun WindowScope.DesktopPlayerApp(
             onDispose { thumbar.close() }
         }
         LaunchedEffect(window) {
+            // Compose creates the taskbar-visible peer after its first frame. Attaching before
+            // that peer is stable succeeds at the COM layer but is not rendered by Explorer.
             delay(300)
             thumbar.install(window, controller.isPlaying)
             WindowsJumpList.install(controller.isPlaying)

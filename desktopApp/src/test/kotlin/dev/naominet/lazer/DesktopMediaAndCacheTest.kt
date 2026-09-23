@@ -21,10 +21,27 @@ import org.junit.Test
 
 class DesktopMediaAndCacheTest {
     @Test
+    fun `desktop default volume is fifty percent`() {
+        assertEquals(0.50f, DEFAULT_DESKTOP_VOLUME)
+    }
+
+    @Test
+    fun `Windows media control theme follows AppsUseLightTheme with a safe light fallback`() {
+        assertEquals(WindowsAppTheme.Dark, windowsAppTheme(0))
+        assertEquals(WindowsAppTheme.Light, windowsAppTheme(1))
+        assertEquals(WindowsAppTheme.Light, windowsAppTheme(null))
+        assertEquals("media-control/dark/play.ico", WindowsMediaControlIcons.resourcePath(WindowsAppTheme.Dark, "play"))
+        assertEquals("media-control/light/pause.ico", WindowsMediaControlIcons.resourcePath(WindowsAppTheme.Light, "pause"))
+    }
+
+    @Test
     fun `thumbar command ids dispatch only supported media actions`() {
         assertEquals(MediaControlAction.Previous, thumbarActionFromCommand(THUMBAR_CMD_PREVIOUS))
         assertEquals(MediaControlAction.PlayPause, thumbarActionFromCommand(THUMBAR_CMD_PLAYPAUSE))
         assertEquals(MediaControlAction.Next, thumbarActionFromCommand(THUMBAR_CMD_NEXT))
+        assertEquals(null, thumbarActionFromCommand(0))
+        assertEquals(null, thumbarActionFromCommand(1))
+        assertEquals(null, thumbarActionFromCommand(2))
         assertEquals(null, thumbarActionFromCommand(0xFFFF))
     }
 

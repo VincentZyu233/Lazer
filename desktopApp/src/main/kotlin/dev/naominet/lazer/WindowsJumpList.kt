@@ -83,14 +83,15 @@ internal object WindowsJumpList {
                 )
                 val tasks = create(clsidObjectCollection, iidObjectCollection) ?: return
                 try {
-                    addTask(tasks, executable, WindowsMediaCommand.Previous, tr("media_control.previous"))
+                    addTask(tasks, executable, WindowsMediaCommand.Previous, tr("media_control.previous"), "previous")
                     addTask(
                         tasks,
                         executable,
                         WindowsMediaCommand.PlayPause,
                         if (isPlaying) tr("media_control.pause") else tr("media_control.play"),
+                        if (isPlaying) "pause" else "play",
                     )
-                    addTask(tasks, executable, WindowsMediaCommand.Next, tr("media_control.next"))
+                    addTask(tasks, executable, WindowsMediaCommand.Next, tr("media_control.next"), "next")
                     val taskArray = queryInterface(tasks, iidObjectArray) ?: error("Unable to query IObjectArray")
                     try {
                         checkHr(
@@ -117,7 +118,13 @@ internal object WindowsJumpList {
         }
     }
 
-    private fun addTask(tasks: Pointer, executable: String, command: WindowsMediaCommand, label: String) {
+    private fun addTask(
+        tasks: Pointer,
+        executable: String,
+        command: WindowsMediaCommand,
+        label: String,
+        iconName: String,
+    ) {
         val link = create(clsidShellLink, iidShellLinkW) ?: error("Unable to create IShellLinkW")
         try {
             checkHr("IShellLinkW.SetPath", invoke(link, VT_SHELL_LINK_SET_PATH, arrayOf(link, WString(executable))))
@@ -128,7 +135,11 @@ internal object WindowsJumpList {
             checkHr("IShellLinkW.SetDescription", invoke(link, VT_SHELL_LINK_SET_DESCRIPTION, arrayOf(link, WString(label))))
             checkHr(
                 "IShellLinkW.SetIconLocation",
-                invoke(link, VT_SHELL_LINK_SET_ICON_LOCATION, arrayOf(link, WString(executable), 0)),
+                invoke(
+                    link,
+                    VT_SHELL_LINK_SET_ICON_LOCATION,
+                    arrayOf(link, WString(WindowsMediaControlIcons.iconFile(iconName)?.absolutePath ?: executable), 0),
+                ),
             )
             setShellLinkProperties(link, label)
             checkHr("IObjectCollection.AddObject", invoke(tasks, VT_OBJECT_COLLECTION_ADD_OBJECT, arrayOf(tasks, link)))

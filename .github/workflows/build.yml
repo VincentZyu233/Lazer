@@ -24,6 +24,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # setup-gradle owns the Gradle wrapper, dependency and project build caches.
+      # Do not cache generated APKs or build directories across commits.
       - uses: gradle/actions/setup-gradle@v4
       - name: Assemble arm64 release APK
         run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
@@ -43,6 +45,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # setup-gradle caches Gradle toolchain/dependencies and the project build cache. MSVC and
+      # CMake come from the versioned hosted runner image; generated native output is never cached.
       - uses: gradle/actions/setup-gradle@v4
       # jpackage needs WiX to produce an .msi.
       - name: Install WiX Toolset
@@ -50,15 +54,26 @@ jobs:
         run: |
           choco install wixtoolset --no-progress -y
           "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Test desktop media integration
+        shell: pwsh
+        run: .\gradlew.bat :desktopApp:test -PwindowsArch=x64 --stacktrace
       - name: Build MSI
         shell: pwsh
-        run: .\gradlew.bat :desktopApp:packageMsi --stacktrace
-      - name: Build runnable jar
+        run: .\gradlew.bat :desktopApp:packageMsi -PwindowsArch=x64 --stacktrace
+      - name: Build Windows x64 runnable jar
         shell: pwsh
-        run: .\gradlew.bat :desktopApp:packageUberJarForCurrentOS --stacktrace
+        run: |
+          .\gradlew.bat :desktopApp:packageUberJarForCurrentOS -PwindowsArch=x64 -PembedTaskbarBridge --stacktrace
+          $jar = Get-ChildItem 'desktopApp/build/compose/jars' -Filter '*.jar' | Select-Object -First 1
+          if ($null -eq $jar) { throw 'Windows runnable JAR was not created.' }
+          $entries = & "$env:JAVA_HOME/bin/jar.exe" tf $jar.FullName
+          if ($entries -notcontains 'native/windows-x64/lazer-taskbar-bridge.dll') {
+            throw 'Windows runnable JAR is missing the taskbar bridge DLL.'
+          }
+          Copy-Item -LiteralPath $jar.FullName -Destination 'desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64.jar'
       - name: Build portable Windows app
         shell: pwsh
-        run: .\gradlew.bat :desktopApp:createReleaseDistributable --stacktrace
+        run: .\gradlew.bat :desktopApp:createReleaseDistributable -PwindowsArch=x64 --stacktrace
       - name: Verify portable Windows runtime
         shell: pwsh
         run: |
@@ -74,6 +89,13 @@ jobs:
           if ($entries -notcontains 'io/ktor/client/engine/cio/CIOEngineContainer.class') {
             throw 'Portable Ktor CIO jar is missing its ServiceLoader provider class.'
           }
+          foreach ($file in @(
+            "$($app.FullName)/app/resources/native/windows-x64/lazer-taskbar-bridge.dll",
+            "$($app.FullName)/app/resources/media-control/light/play.ico",
+            "$($app.FullName)/app/resources/media-control/dark/play.ico"
+          )) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "Portable app is missing $file" }
+          }
       - name: Archive portable Windows app
         shell: pwsh
         run: |
@@ -88,8 +110,8 @@ jobs:
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: lazer-jar
-          path: desktopApp/build/compose/jars/*.jar
+          name: lazer-jar-windows-x64
+          path: desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64.jar
           if-no-files-found: error
 
       - uses: actions/upload-artifact@v4
@@ -109,13 +131,22 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # setup-gradle owns Gradle toolchain/dependency and project build caches.
       - uses: gradle/actions/setup-gradle@v4
       - name: Install Linux packaging tools
         run: sudo apt-get update && sudo apt-get install -y fakeroot rpm
+      - name: Test desktop media integration
+        run: ./gradlew :desktopApp:test --stacktrace
       - name: Build deb and rpm packages
         run: ./gradlew :desktopApp:packageReleaseDeb :desktopApp:packageReleaseRpm --stacktrace
       - name: Build Linux app image
         run: ./gradlew :desktopApp:createReleaseDistributable --stacktrace
+      - name: Build Linux x64 runnable jar
+        run: |
+          ./gradlew :desktopApp:packageUberJarForCurrentOS --stacktrace
+          jar_file="$(find desktopApp/build/compose/jars -maxdepth 1 -name '*.jar' -print -quit)"
+          test -n "$jar_file"
+          cp "$jar_file" desktopApp/build/compose/binaries/Lazer-1.2.0-linux-x64.jar
       - name: Assemble AppImage
         shell: bash
         run: |
@@ -166,6 +197,11 @@ jobs:
         with:
           name: lazer-appimage-x64
           path: desktopApp/build/compose/binaries/*.AppImage
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-jar-linux-x64
+          path: desktopApp/build/compose/binaries/Lazer-1.2.0-linux-x64.jar
           if-no-files-found: error
 
   # Version tags publish all deliverables uncompressed as release assets. Untagged builds leave

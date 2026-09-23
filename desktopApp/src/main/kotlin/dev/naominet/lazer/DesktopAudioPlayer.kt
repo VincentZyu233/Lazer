@@ -19,6 +19,7 @@ import javax.sound.sampled.AudioFormat
 import kotlin.math.roundToInt
 
 private const val OutputWriteTimeoutNanos = 2_000_000_000L
+internal const val DEFAULT_DESKTOP_VOLUME = 0.50f
 
 /**
  * Small desktop streaming player. JavaMP3 decodes the growing cached MP3 stream, while PCM is
@@ -46,7 +47,7 @@ internal class DesktopAudioPlayer(
     private var paused = false
 
     @Volatile
-    private var volume = 0.72f
+    private var volume = DEFAULT_DESKTOP_VOLUME
 
     @Volatile
     private var exclusiveAudio = initialExclusiveAudio && isWindowsDesktop()
