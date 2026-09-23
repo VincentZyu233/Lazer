@@ -47,7 +47,15 @@ internal class WindowsThumbar(
                 ACTION_BUTTONS_APPLY_FAILED -> PlaybackDebugLog.event("thumbar-buttons-apply-failed")
                 ACTION_SUBCLASS_INSTALLED -> PlaybackDebugLog.event("thumbar-subclass-installed")
                 ACTION_SUBCLASS_INSTALL_FAILED -> PlaybackDebugLog.event("thumbar-subclass-install-failed")
-                else -> reportObservedCommand(action)
+                else -> {
+                    when (action and COMMAND_SOURCE_MASK) {
+                        ACTION_PEER_WINDOWS_ATTACHED -> PlaybackDebugLog.event(
+                            "thumbar-peer-windows-attached",
+                            (action and COMMAND_ID_MASK).toString(),
+                        )
+                        else -> reportObservedCommand(action)
+                    }
+                }
             }
         }
     }
@@ -221,6 +229,7 @@ private const val ACTION_BUTTONS_APPLIED = 5
 private const val ACTION_BUTTONS_APPLY_FAILED = 6
 private const val ACTION_SUBCLASS_INSTALLED = 7
 private const val ACTION_SUBCLASS_INSTALL_FAILED = 8
+private const val ACTION_PEER_WINDOWS_ATTACHED = 0x40000000
 private const val ACTION_CALL_WINDOW_COMMAND_OBSERVED = 0x10000000
 private const val ACTION_QUEUED_COMMAND_OBSERVED = 0x20000000
 private const val ACTION_SUBCLASS_COMMAND_OBSERVED = 0x30000000
