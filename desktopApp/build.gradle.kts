@@ -172,5 +172,7 @@ tasks.withType<JavaExec>().configureEach {
 }
 
 tasks.configureEach {
-    if (name.startsWith("package") || name.startsWith("create")) dependsOn(prepareJpackageResources)
+    if (name.startsWith("package") || name.startsWith("create") || name == "prepareAppResources") {
+        dependsOn(prepareJpackageResources)
+    }
 }

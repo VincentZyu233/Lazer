@@ -37,7 +37,8 @@ jobs:
 
   # Windows x64 MSI, portable app image, and runnable fat jar.
   desktop:
-    runs-on: windows-latest
+    # windows-2022 supplies the Visual Studio 2022 C++ toolchain used by the x64 taskbar bridge.
+    runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
