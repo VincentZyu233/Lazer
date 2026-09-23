@@ -596,7 +596,7 @@ internal fun applyPcm16Volume(
     volume: Float,
 ) = applyPcm16VolumeRamp(buffer, byteCount, format, volume, volume)
 
-/** Advances one PCM block toward its target gain at a fixed full-scale transition rate. */
+/** Advances one PCM block toward its target gain over the requested full transition duration. */
 internal fun nextPcmVolumeRampEnd(
     startVolume: Float,
     targetVolume: Float,
@@ -610,11 +610,8 @@ internal fun nextPcmVolumeRampEnd(
     val frameCount = byteCount.coerceAtLeast(0) / format.frameSize
     val durationFrames = format.frameRate * durationMillis / 1_000f
     if (frameCount <= 0 || durationFrames <= 0f) return start
-    val maximumGainChange = (frameCount / durationFrames).coerceIn(0f, 1f)
-    return when {
-        target > start -> (start + maximumGainChange).coerceAtMost(target)
-        else -> (start - maximumGainChange).coerceAtLeast(target)
-    }
+    val completedFraction = (frameCount / durationFrames).coerceIn(0f, 1f)
+    return start + (target - start) * completedFraction
 }
 
 /** Applies a linear gain ramp across one decoded PCM block to avoid audible parameter steps. */

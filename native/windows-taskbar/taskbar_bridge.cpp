@@ -56,9 +56,12 @@ struct TaskbarState {
     std::vector<HHOOK> getMessageHooks;
     std::unordered_set<DWORD> hookedThreads;
     std::unordered_set<HWND> subclassWindows;
+    // Each target has its own immutable ThumbBarAddButtons lifecycle. AWT can
+    // expose more than one top-level peer for the visible Compose window.
+    std::unordered_set<HWND> taskbarWindows;
+    std::unordered_set<HWND> buttonsAddedWindows;
     std::vector<HWND> peerWindows;
     bool isPlaying = false;
-    bool buttonsAdded = false;
 
     ~TaskbarState() {
         if (taskbar != nullptr) taskbar->Release();
@@ -138,15 +141,17 @@ HRESULT ApplyButtons(HWND hwnd, TaskbarState& state) {
         buttons[index].dwFlags = THBF_HIDDEN;
     }
 
-    const HRESULT result = state.buttonsAdded
+    const HRESULT result = state.buttonsAddedWindows.contains(hwnd)
         ? state.taskbar->ThumbBarUpdateButtons(hwnd, ARRAYSIZE(buttons), buttons)
         : state.taskbar->ThumbBarAddButtons(hwnd, ARRAYSIZE(buttons), buttons);
-    if (SUCCEEDED(result)) state.buttonsAdded = true;
+    if (SUCCEEDED(result)) state.buttonsAddedWindows.emplace(hwnd);
     return result;
 }
 
-void RequestButtonApply(HWND hwnd) {
-    PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
+void RequestButtonApply(TaskbarState& state) {
+    for (const HWND hwnd : state.taskbarWindows) {
+        if (IsWindow(hwnd)) PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
+    }
 }
 
 int MediaActionForMessage(UINT message, WPARAM wParam, LPARAM lParam) {
@@ -214,7 +219,7 @@ void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
 
 void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == g_taskbarButtonCreated) {
-        state.buttonsAdded = false;
+        state.buttonsAddedWindows.erase(hwnd);
         ApplyButtonsOnOwnerThread(hwnd, state);
         return;
     }
@@ -251,7 +256,7 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPA
         if (message == WM_COMMAND) {
             ReportObservedCommand(state, kActionSubclassCommandObserved, wParam);
         }
-        HandleTaskbarMessage(taskbarHwnd, *state, message, wParam, lParam);
+        HandleTaskbarMessage(hwnd, *state, message, wParam, lParam);
     }
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
@@ -298,6 +303,12 @@ BOOL CALLBACK CollectPeerWindow(HWND candidate, LPARAM value) {
         const auto [_, inserted] = g_peerWindows.emplace(candidate, collector.taskbarHwnd);
         if (inserted) collector.state.peerWindows.push_back(candidate);
     }
+    // The taskbar-visible peer is always top-level. Registering the toolbar
+    // on each in-process top-level AWT peer means the window Explorer picks
+    // receives both ThumbBarAddButtons and its THBN_CLICKED notification.
+    if (GetAncestor(candidate, GA_ROOT) == candidate) {
+        collector.state.taskbarWindows.emplace(candidate);
+    }
     InstallTaskbarHooksForThread(collector.state, threadId);
     // The thread hook installs the subclass from the window's own message queue.
     PostMessageW(candidate, kInstallInputSubclassMessage, 0, 0);
@@ -331,7 +342,7 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
         if (shouldHandle) {
             HWND stateHwnd = nullptr;
             if (TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd); state != nullptr) {
-                HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
+                HandleTaskbarMessage(message->hwnd, *state, message->message, message->wParam, message->lParam);
             } else if (IsTaskbarMediaMessage(message->message, message->wParam, message->lParam)) {
                 if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
                     HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
@@ -363,7 +374,7 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
             if (TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd); state != nullptr) {
                 if (isApplyMessage || isInputSubclassMessage) EnsureTaskbarSubclass(message->hwnd, *state);
                 if (!isInputSubclassMessage) {
-                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
+                    HandleTaskbarMessage(message->hwnd, *state, message->message, message->wParam, message->lParam);
                 }
                 // Our registration/timer messages and private command IDs have no meaning to
                 // AWT. Prevent a queued thumbnail command from being dispatched a second time.
@@ -394,7 +405,7 @@ bool UpdateState(HWND hwnd, const wchar_t* previous, const wchar_t* play, const 
     state.pauseTooltip = pauseTooltip == nullptr ? L"" : pauseTooltip;
     state.nextTooltip = nextTooltip == nullptr ? L"" : nextTooltip;
     state.isPlaying = isPlaying;
-    RequestButtonApply(hwnd);
+    RequestButtonApply(state);
     return true;
 }
 
@@ -415,6 +426,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     state->callback = callback;
     state->isPlaying = isPlaying != 0;
     state->taskbarHwnd = hwnd;
+    state->taskbarWindows.emplace(hwnd);
     g_states.emplace(hwnd, std::move(state));
     // The Compose call is on AWT-EventQueue-0, whereas the native peer can be owned by AWT-
     // Windows or a short-lived taskbar proxy. Attach every in-process peer and each UI thread.
@@ -441,9 +453,11 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_update(HWND hwnd,
 extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) {
     hwnd = ResolveTaskbarWindow(hwnd);
     if (hwnd == nullptr) return;
-    KillTimer(hwnd, kRetryTimerId);
     const auto it = g_states.find(hwnd);
     if (it == g_states.end()) return;
+    for (const HWND taskbarWindow : it->second->taskbarWindows) {
+        KillTimer(taskbarWindow, kRetryTimerId);
+    }
     for (const HHOOK hook : it->second->callWindowHooks) UnhookWindowsHookEx(hook);
     for (const HHOOK hook : it->second->getMessageHooks) UnhookWindowsHookEx(hook);
     for (const HWND peer : it->second->peerWindows) g_peerWindows.erase(peer);
