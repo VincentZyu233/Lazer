@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main, "ci/**"]
+    branches: [master, main, feat/taskbar-media-controls, "ci/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:

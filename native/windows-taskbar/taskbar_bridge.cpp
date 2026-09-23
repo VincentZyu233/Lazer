@@ -19,9 +19,11 @@ constexpr int kActionButtonsApplied = 5;
 constexpr int kActionButtonsApplyFailed = 6;
 constexpr int kActionCallWindowCommandObserved = 0x10000000;
 constexpr int kActionQueuedCommandObserved = 0x20000000;
+constexpr int kActionSubclassCommandObserved = 0x30000000;
 constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
 constexpr UINT kRetryIntervalMillis = 100;
 constexpr UINT kApplyButtonsMessage = WM_APP + 0x4C61;
+constexpr UINT_PTR kTaskbarSubclassId = 0x4C617A72;
 
 using ActionCallback = void(__stdcall*)(int action);
 
@@ -39,6 +41,7 @@ struct TaskbarState {
     HHOOK callWindowHook = nullptr;
     HHOOK getMessageHook = nullptr;
     DWORD ownerThread = 0;
+    bool subclassInstalled = false;
     bool isPlaying = false;
     bool buttonsAdded = false;
 
@@ -186,6 +189,27 @@ void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM w
     }
 }
 
+// This is installed by TaskbarGetMessageHook, which runs on the HWND creator thread. Unlike a
+// cross-thread SetWindowLongPtr replacement, the common-controls subclass chain is compatible
+// with AWT/Skiko owning the underlying procedure.
+LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+    UINT_PTR, DWORD_PTR) {
+    const auto it = g_states.find(hwnd);
+    if (it != g_states.end()) {
+        if (message == WM_COMMAND) {
+            ReportObservedCommand(it->second.get(), kActionSubclassCommandObserved, wParam);
+        }
+        HandleTaskbarMessage(hwnd, *it->second, message, wParam);
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state) {
+    if (state.subclassInstalled) return;
+    state.subclassInstalled = SetWindowSubclass(
+        hwnd, TaskbarSubclassProc, kTaskbarSubclassId, 0) != FALSE;
+}
+
 // Compose/Skiko owns and can replace its AWT window procedure after the Kotlin side has obtained
 // the HWND. A thread hook observes messages before that procedure runs, so thumbnail commands
 // remain visible even when Skiko changes the procedure later in the window lifetime.
@@ -239,6 +263,7 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
         if (isApplyMessage || isRetryTimer || isTaskbarCommand) {
             const auto it = g_states.find(message->hwnd);
             if (it != g_states.end()) {
+                if (isApplyMessage) EnsureTaskbarSubclass(message->hwnd, *it->second);
                 HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
                 // Our registration/timer messages and private command IDs have no meaning to
                 // AWT. Prevent a queued thumbnail command from being dispatched a second time.

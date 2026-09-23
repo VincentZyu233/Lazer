@@ -23,9 +23,9 @@ internal fun thumbarActionFromCommand(commandId: Int): MediaControlAction? = whe
 /**
  * Windows thumbnail-toolbar integration backed by the x64 native bridge.
  *
- * The C++ bridge observes the HWND owner's message thread before Compose/Skiko dispatches to
- * its window procedure. Skiko may replace that procedure during startup, so a direct JVM/native
- * subclass is not a reliable place to receive thumbnail commands.
+ * The C++ bridge installs its native subclass from the HWND owner thread. That preserves AWT's
+ * procedure chain while giving the bridge a stable taskbar-command entry point after Compose and
+ * Skiko have finished creating the window peer.
  */
 internal class WindowsThumbar(
     private val onAction: (MediaControlAction) -> Unit,
@@ -125,6 +125,8 @@ internal class WindowsThumbar(
                 PlaybackDebugLog.event("thumbar-command-call-window", command.toString())
             ACTION_QUEUED_COMMAND_OBSERVED ->
                 PlaybackDebugLog.event("thumbar-command-queued", command.toString())
+            ACTION_SUBCLASS_COMMAND_OBSERVED ->
+                PlaybackDebugLog.event("thumbar-command-subclass", command.toString())
         }
     }
 
@@ -217,5 +219,6 @@ private const val ACTION_BUTTONS_APPLIED = 5
 private const val ACTION_BUTTONS_APPLY_FAILED = 6
 private const val ACTION_CALL_WINDOW_COMMAND_OBSERVED = 0x10000000
 private const val ACTION_QUEUED_COMMAND_OBSERVED = 0x20000000
+private const val ACTION_SUBCLASS_COMMAND_OBSERVED = 0x30000000
 private const val COMMAND_SOURCE_MASK = 0xF0000000.toInt()
 private const val COMMAND_ID_MASK = 0x0000FFFF
