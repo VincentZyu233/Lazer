@@ -17,6 +17,8 @@ constexpr int kActionNext = 3;
 constexpr int kActionThemeChanged = 4;
 constexpr int kActionButtonsApplied = 5;
 constexpr int kActionButtonsApplyFailed = 6;
+constexpr int kActionCallWindowCommandObserved = 0x10000000;
+constexpr int kActionQueuedCommandObserved = 0x20000000;
 constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
 constexpr UINT kRetryIntervalMillis = 100;
 constexpr UINT kApplyButtonsMessage = WM_APP + 0x4C61;
@@ -132,6 +134,12 @@ TaskbarState* FindStateForCommand(HWND& hwnd) {
     return nullptr;
 }
 
+void ReportObservedCommand(TaskbarState* state, int source, WPARAM wParam) {
+    if (state != nullptr && state->callback != nullptr) {
+        state->callback(source | static_cast<int>(LOWORD(wParam)));
+    }
+}
+
 void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
     const HRESULT result = ApplyButtons(hwnd, state);
     if (SUCCEEDED(result)) KillTimer(hwnd, kRetryTimerId);
@@ -184,6 +192,15 @@ void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM w
 LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        if (message->message == WM_COMMAND) {
+            const auto stateIt = g_states.find(message->hwnd);
+            if (stateIt != g_states.end()) {
+                ReportObservedCommand(stateIt->second.get(), kActionCallWindowCommandObserved, message->wParam);
+            } else {
+                HWND stateHwnd = nullptr;
+                ReportObservedCommand(FindStateForCommand(stateHwnd), kActionCallWindowCommandObserved, message->wParam);
+            }
+        }
         const bool shouldHandle = message->message == g_taskbarButtonCreated ||
             message->message == WM_SETTINGCHANGE || message->message == WM_COMMAND;
         if (shouldHandle) {
@@ -207,6 +224,15 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
 LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         auto* message = reinterpret_cast<MSG*>(lParam);
+        if (message->message == WM_COMMAND) {
+            const auto stateIt = g_states.find(message->hwnd);
+            if (stateIt != g_states.end()) {
+                ReportObservedCommand(stateIt->second.get(), kActionQueuedCommandObserved, message->wParam);
+            } else {
+                HWND stateHwnd = nullptr;
+                ReportObservedCommand(FindStateForCommand(stateHwnd), kActionQueuedCommandObserved, message->wParam);
+            }
+        }
         const bool isApplyMessage = message->message == kApplyButtonsMessage;
         const bool isRetryTimer = message->message == WM_TIMER && message->wParam == kRetryTimerId;
         const bool isTaskbarCommand = message->message == WM_COMMAND && IsTaskbarCommand(message->wParam);

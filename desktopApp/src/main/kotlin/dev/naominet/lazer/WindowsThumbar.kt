@@ -45,6 +45,7 @@ internal class WindowsThumbar(
                 ACTION_THEME_CHANGED -> EventQueue.invokeLater(::refreshTheme)
                 ACTION_BUTTONS_APPLIED -> PlaybackDebugLog.event("thumbar-buttons-applied")
                 ACTION_BUTTONS_APPLY_FAILED -> PlaybackDebugLog.event("thumbar-buttons-apply-failed")
+                else -> reportObservedCommand(action)
             }
         }
     }
@@ -113,6 +114,17 @@ internal class WindowsThumbar(
                 .onFailure { error ->
                     PlaybackDebugLog.event("thumbar-action-error", error.playbackDebugSummary())
                 }
+        }
+    }
+
+    private fun reportObservedCommand(action: Int) {
+        val source = action and COMMAND_SOURCE_MASK
+        val command = action and COMMAND_ID_MASK
+        when (source) {
+            ACTION_CALL_WINDOW_COMMAND_OBSERVED ->
+                PlaybackDebugLog.event("thumbar-command-call-window", command.toString())
+            ACTION_QUEUED_COMMAND_OBSERVED ->
+                PlaybackDebugLog.event("thumbar-command-queued", command.toString())
         }
     }
 
@@ -203,3 +215,7 @@ private const val ACTION_NEXT = 3
 private const val ACTION_THEME_CHANGED = 4
 private const val ACTION_BUTTONS_APPLIED = 5
 private const val ACTION_BUTTONS_APPLY_FAILED = 6
+private const val ACTION_CALL_WINDOW_COMMAND_OBSERVED = 0x10000000
+private const val ACTION_QUEUED_COMMAND_OBSERVED = 0x20000000
+private const val COMMAND_SOURCE_MASK = 0xF0000000.toInt()
+private const val COMMAND_ID_MASK = 0x0000FFFF
