@@ -47,6 +47,9 @@ internal class DesktopAudioPlayer(
     private var paused = false
 
     @Volatile
+    private var pauseFadeRequested = false
+
+    @Volatile
     private var volume = DEFAULT_DESKTOP_VOLUME
 
     @Volatile
@@ -65,6 +68,7 @@ internal class DesktopAudioPlayer(
         stopCurrent()
         this.volume = volume.coerceIn(0f, 1f)
         paused = !playWhenReady
+        pauseFadeRequested = false
         val token = generation.incrementAndGet()
         val safeFromProgress = playableSeekProgress(fromProgress, durationMillis)
         PlaybackDebugLog.event(
@@ -97,19 +101,24 @@ internal class DesktopAudioPlayer(
     }
 
     fun pause() {
-        paused = true
-        PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
         activeLine?.let { output ->
             if (output.usesSoftwareVolume) {
-                // A paused exclusive stream must not keep other applications locked out.
-                closeOutputLine(output)
+                // Finish the current PCM block at zero to avoid a discontinuity click.
+                pauseFadeRequested = true
+                PlaybackDebugLog.event("audio-pause-fade", "token=${generation.get()}")
             } else {
+                paused = true
+                PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
                 runCatching { output.stop() }
             }
+        } ?: run {
+            paused = true
+            PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
         }
     }
 
     fun resume() {
+        pauseFadeRequested = false
         paused = false
         PlaybackDebugLog.event("audio-resume", "token=${generation.get()}")
         runCatching { activeLine?.start() }
@@ -130,6 +139,7 @@ internal class DesktopAudioPlayer(
         playbackJob?.cancel()
         playbackJob = null
         paused = false
+        pauseFadeRequested = false
         runInterruptible(Dispatchers.IO) { releaseActiveResources() }
     }
 
@@ -201,6 +211,7 @@ internal class DesktopAudioPlayer(
                 frameRate = decodedFormat.frameRate,
             )
             val seekFadeIn = PcmSeekFadeIn(decodedFormat).takeIf { fromProgress > 0f }
+            var renderedVolume = 0f
             val writeInProgress = AtomicReference<DesktopPcmAudioOutput?>(null)
             val writeStartedAtNanos = AtomicLong(0L)
 
@@ -282,72 +293,81 @@ internal class DesktopAudioPlayer(
                         // short ramp removes that discontinuity without making the seek sound
                         // delayed or changing normal playback from the beginning.
                         seekFadeIn?.apply(buffer, count)
+                        val targetVolume = if (pauseFadeRequested) 0f else volume
                         if (line.usesSoftwareVolume) {
-                            applyPcm16Volume(buffer, count, decodedFormat, volume)
+                            applyPcm16VolumeRamp(buffer, count, decodedFormat, renderedVolume, targetVolume)
                         }
-                    }
-                }
+                        renderedVolume = targetVolume
+                        val pauseAfterCurrentBuffer = pauseFadeRequested
 
-                var written = 0
-                var zeroWrites = 0
-                while (written < count && token == generation.get() && scope.isActive) {
-                    if (paused) {
-                        delay(20)
-                        continue
-                    }
-                    val output = line ?: return
-                    if (!output.isOpen && output.usesSoftwareVolume) {
-                        outputTimeline.onLineReplaced()
-                        line = openOutputLine(decodedFormat)
-                        zeroWrites = 0
-                        continue
-                    }
-                    var writeError: Throwable? = null
-                    writeStartedAtNanos.set(System.nanoTime())
-                    writeInProgress.set(output)
-                    val chunk = try {
-                        output.write(buffer, written, count - written)
-                    } catch (error: Throwable) {
-                        writeError = error
-                        0
-                    } finally {
-                        writeInProgress.compareAndSet(output, null)
-                        writeStartedAtNanos.set(0L)
-                    }
-                    if (paused && output.usesSoftwareVolume && !output.isOpen) continue
-                    if (chunk > 0) {
-                        written += chunk
-                        outputTimeline.onBytesSubmitted(chunk)
-                        zeroWrites = 0
-                    } else {
-                        zeroWrites += 1
-                        val shouldReopen = shouldRecoverAudioOutput(
-                            writeError = writeError,
-                            outputOpen = output.isOpen,
-                            consecutiveZeroWrites = zeroWrites,
-                        )
-                        if (shouldReopen && outputRecoveries < 3) {
-                            PlaybackDebugLog.event(
-                                "audio-output-recover",
-                                "token=$token track=$trackId attempt=${outputRecoveries + 1} " +
-                                    "open=${output.isOpen} running=${output.isRunning} " +
-                                    "available=${runCatching { output.availableBytes }.getOrDefault(-1)} " +
-                                    "written=$written count=$count " +
-                                    "error=${writeError?.playbackDebugSummary().orEmpty()}",
-                            )
-                            outputTimeline.onLineReplaced()
-                            closeOutputLine(output)
-                            if (!scope.isActive || token != generation.get()) return
-                            line = openOutputLine(decodedFormat)
-                            outputRecoveries += 1
-                            zeroWrites = 0
-                            continue
+                        var written = 0
+                        var zeroWrites = 0
+                        while (written < count && token == generation.get() && scope.isActive) {
+                            if (paused) {
+                                delay(20)
+                                continue
+                            }
+                            val output = line ?: return
+                            if (!output.isOpen && output.usesSoftwareVolume) {
+                                outputTimeline.onLineReplaced()
+                                line = openOutputLine(decodedFormat)
+                                zeroWrites = 0
+                                continue
+                            }
+                            var writeError: Throwable? = null
+                            writeStartedAtNanos.set(System.nanoTime())
+                            writeInProgress.set(output)
+                            val chunk = try {
+                                output.write(buffer, written, count - written)
+                            } catch (error: Throwable) {
+                                writeError = error
+                                0
+                            } finally {
+                                writeInProgress.compareAndSet(output, null)
+                                writeStartedAtNanos.set(0L)
+                            }
+                            if (paused && output.usesSoftwareVolume && !output.isOpen) continue
+                            if (chunk > 0) {
+                                written += chunk
+                                outputTimeline.onBytesSubmitted(chunk)
+                                zeroWrites = 0
+                            } else {
+                                zeroWrites += 1
+                                val shouldReopen = shouldRecoverAudioOutput(
+                                    writeError = writeError,
+                                    outputOpen = output.isOpen,
+                                    consecutiveZeroWrites = zeroWrites,
+                                )
+                                if (shouldReopen && outputRecoveries < 3) {
+                                    PlaybackDebugLog.event(
+                                        "audio-output-recover",
+                                        "token=$token track=$trackId attempt=${outputRecoveries + 1} " +
+                                            "open=${output.isOpen} running=${output.isRunning} " +
+                                            "available=${runCatching { output.availableBytes }.getOrDefault(-1)} " +
+                                            "written=$written count=$count " +
+                                            "error=${writeError?.playbackDebugSummary().orEmpty()}",
+                                    )
+                                    outputTimeline.onLineReplaced()
+                                    closeOutputLine(output)
+                                    if (!scope.isActive || token != generation.get()) return
+                                    line = openOutputLine(decodedFormat)
+                                    outputRecoveries += 1
+                                    zeroWrites = 0
+                                    continue
+                                }
+                                if (shouldReopen) {
+                                    throw IOException("系统音频输出停止响应", writeError)
+                                }
+                                if (!output.isRunning) runCatching { output.start() }
+                                delay(10)
+                            }
                         }
-                        if (shouldReopen) {
-                            throw IOException("系统音频输出停止响应", writeError)
+                        if (pauseAfterCurrentBuffer && token == generation.get()) {
+                            pauseFadeRequested = false
+                            paused = true
+                            PlaybackDebugLog.event("audio-pause", "token=$token")
+                            line?.let(::closeOutputLine)
                         }
-                        if (!output.isRunning) runCatching { output.start() }
-                        delay(10)
                     }
                 }
                 if (endOfStream) break
@@ -438,6 +458,7 @@ internal class DesktopAudioPlayer(
         playbackJob?.cancel()
         playbackJob = null
         paused = false
+        pauseFadeRequested = false
         releaseActiveResources()
     }
 
@@ -549,6 +570,15 @@ internal fun applyPcm16Volume(
     byteCount: Int,
     format: AudioFormat,
     volume: Float,
+) = applyPcm16VolumeRamp(buffer, byteCount, format, volume, volume)
+
+/** Applies a linear gain ramp across one decoded PCM block to avoid audible parameter steps. */
+internal fun applyPcm16VolumeRamp(
+    buffer: ByteArray,
+    byteCount: Int,
+    format: AudioFormat,
+    startVolume: Float,
+    endVolume: Float,
 ) {
     if (
         format.encoding != AudioFormat.Encoding.PCM_SIGNED ||
@@ -558,15 +588,20 @@ internal fun applyPcm16Volume(
     ) {
         return
     }
-    val normalized = volume.coerceIn(0f, 1f)
-    if (normalized >= 0.9999f) return
+    val start = startVolume.coerceIn(0f, 1f)
+    val end = endVolume.coerceIn(0f, 1f)
+    if (start >= 0.9999f && end >= 0.9999f) return
     val safeByteCount = byteCount.coerceIn(0, buffer.size)
     val sampleBytes = safeByteCount - safeByteCount % 2
-    for (offset in 0 until sampleBytes step 2) {
+    val sampleCount = sampleBytes / 2
+    for (sampleIndex in 0 until sampleCount) {
+        val offset = sampleIndex * 2
         val first = buffer[offset].toInt() and 0xFF
         val second = buffer[offset + 1].toInt() and 0xFF
         val raw = if (format.isBigEndian) (first shl 8) or second else (second shl 8) or first
-        val scaled = (raw.toShort().toInt() * normalized)
+        val interpolation = if (sampleCount <= 1) 1f else sampleIndex.toFloat() / (sampleCount - 1).toFloat()
+        val gain = start + (end - start) * interpolation
+        val scaled = (raw.toShort().toInt() * gain)
             .roundToInt()
             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
         if (format.isBigEndian) {

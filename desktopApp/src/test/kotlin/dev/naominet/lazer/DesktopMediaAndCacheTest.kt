@@ -129,6 +129,24 @@ class DesktopMediaAndCacheTest {
     }
 
     @Test
+    fun `PCM volume ramp reaches the requested gain without a sample step`() {
+        val format = AudioFormat(
+            AudioFormat.Encoding.PCM_SIGNED,
+            48_000f,
+            16,
+            1,
+            2,
+            48_000f,
+            false,
+        )
+        val pcm = byteArrayOf(0x10, 0x27, 0x10, 0x27)
+
+        applyPcm16VolumeRamp(pcm, pcm.size, format, startVolume = 0f, endVolume = 1f)
+
+        assertArrayEquals(byteArrayOf(0, 0, 0x10, 0x27), pcm)
+    }
+
+    @Test
     fun `WASAPI wave format matches decoded stereo PCM`() {
         val format = AudioFormat(
             AudioFormat.Encoding.PCM_SIGNED,
