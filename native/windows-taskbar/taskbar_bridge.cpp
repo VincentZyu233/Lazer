@@ -31,6 +31,8 @@ constexpr int kActionSubclassCommandObserved = 0x30000000;
 constexpr int kActionPeerWindowsAttached = static_cast<int>(0x40000000u);
 constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
 constexpr UINT kRetryIntervalMillis = 100;
+constexpr UINT_PTR kSubclassRefreshTimerId = 0x4C617A67;
+constexpr UINT kSubclassRefreshIntervalMillis = 1'000;
 constexpr UINT kApplyButtonsMessage = WM_APP + 0x4C61;
 constexpr UINT kInstallInputSubclassMessage = WM_APP + 0x4C62;
 constexpr UINT_PTR kTaskbarSubclassId = 0x4C617A72;
@@ -79,6 +81,8 @@ std::unordered_map<HWND, std::unique_ptr<TaskbarState>> g_states;
 // state, while command IDs still provide the final strict filter.
 std::unordered_map<HWND, HWND> g_peerWindows;
 UINT g_taskbarButtonCreated = 0;
+
+void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state);
 
 HWND ResolveTaskbarWindow(HWND hwnd) {
     // ITaskbarList3 delivers THBN_CLICKED to the exact HWND supplied to
@@ -232,6 +236,14 @@ void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM w
     }
     if (message == kApplyButtonsMessage) {
         ApplyButtonsOnOwnerThread(hwnd, state);
+        // Skiko can replace an AWT peer's window procedure after the first
+        // Compose frame. Keep the common-controls subclass present on the
+        // creator thread so a later THBN_CLICKED cannot bypass this bridge.
+        SetTimer(hwnd, kSubclassRefreshTimerId, kSubclassRefreshIntervalMillis, nullptr);
+        return;
+    }
+    if (message == WM_TIMER && wParam == kSubclassRefreshTimerId) {
+        EnsureTaskbarSubclass(hwnd, state);
         return;
     }
     if (message == WM_SETTINGCHANGE) {
@@ -262,11 +274,13 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPA
 }
 
 void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state) {
-    if (state.subclassWindows.contains(hwnd)) return;
+    const bool knownWindow = state.subclassWindows.contains(hwnd);
     const bool installed = SetWindowSubclass(
         hwnd, TaskbarSubclassProc, kTaskbarSubclassId, 0) != FALSE;
     if (installed) state.subclassWindows.emplace(hwnd);
-    if (state.callback != nullptr) {
+    // Reapplying the same subclass ID is idempotent. Do that on every refresh
+    // because Skiko/AWT may have replaced the WNDPROC after our first install.
+    if (!knownWindow && state.callback != nullptr) {
         state.callback(installed ? kActionSubclassInstalled : kActionSubclassInstallFailed);
     }
 }
@@ -368,8 +382,10 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
         const bool isApplyMessage = message->message == kApplyButtonsMessage;
         const bool isInputSubclassMessage = message->message == kInstallInputSubclassMessage;
         const bool isRetryTimer = message->message == WM_TIMER && message->wParam == kRetryTimerId;
+        const bool isSubclassRefreshTimer =
+            message->message == WM_TIMER && message->wParam == kSubclassRefreshTimerId;
         const bool isTaskbarCommand = IsTaskbarMediaMessage(message->message, message->wParam, message->lParam);
-        if (isApplyMessage || isInputSubclassMessage || isRetryTimer || isTaskbarCommand) {
+        if (isApplyMessage || isInputSubclassMessage || isRetryTimer || isSubclassRefreshTimer || isTaskbarCommand) {
             HWND stateHwnd = nullptr;
             if (TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd); state != nullptr) {
                 if (isApplyMessage || isInputSubclassMessage) EnsureTaskbarSubclass(message->hwnd, *state);
@@ -457,6 +473,7 @@ extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) 
     if (it == g_states.end()) return;
     for (const HWND taskbarWindow : it->second->taskbarWindows) {
         KillTimer(taskbarWindow, kRetryTimerId);
+        KillTimer(taskbarWindow, kSubclassRefreshTimerId);
     }
     for (const HHOOK hook : it->second->callWindowHooks) UnhookWindowsHookEx(hook);
     for (const HHOOK hook : it->second->getMessageHooks) UnhookWindowsHookEx(hook);
