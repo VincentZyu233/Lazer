@@ -127,13 +127,16 @@ LRESULT CALLBACK TaskbarWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (state.callback != nullptr) state.callback(kActionThemeChanged);
         return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
     }
-    if (message == WM_COMMAND && HIWORD(wParam) == THBN_CLICKED) {
+    if (message == WM_COMMAND) {
         const UINT command = LOWORD(wParam);
         int action = 0;
         if (command == kCommandPrevious) action = kActionPrevious;
         if (command == kCommandPlayPause) action = kActionPlayPause;
         if (command == kCommandNext) action = kActionNext;
         if (action != 0) {
+            // Explorer normally documents THBN_CLICKED in HIWORD(wParam), but this can arrive
+            // as zero through the AWT peer's native window procedure. The command IDs belong
+            // exclusively to this bridge, so they are the reliable discriminator here.
             if (state.callback != nullptr) state.callback(action);
             return 0;
         }
