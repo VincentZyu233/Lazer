@@ -43,6 +43,8 @@ internal class WindowsThumbar(
                 ACTION_PLAY_PAUSE -> dispatchAction(MediaControlAction.PlayPause)
                 ACTION_NEXT -> dispatchAction(MediaControlAction.Next)
                 ACTION_THEME_CHANGED -> EventQueue.invokeLater(::refreshTheme)
+                ACTION_BUTTONS_APPLIED -> PlaybackDebugLog.event("thumbar-buttons-applied")
+                ACTION_BUTTONS_APPLY_FAILED -> PlaybackDebugLog.event("thumbar-buttons-apply-failed")
             }
         }
     }
@@ -199,3 +201,5 @@ private const val ACTION_PREVIOUS = 1
 private const val ACTION_PLAY_PAUSE = 2
 private const val ACTION_NEXT = 3
 private const val ACTION_THEME_CHANGED = 4
+private const val ACTION_BUTTONS_APPLIED = 5
+private const val ACTION_BUTTONS_APPLY_FAILED = 6

@@ -15,6 +15,8 @@ constexpr int kActionPrevious = 1;
 constexpr int kActionPlayPause = 2;
 constexpr int kActionNext = 3;
 constexpr int kActionThemeChanged = 4;
+constexpr int kActionButtonsApplied = 5;
+constexpr int kActionButtonsApplyFailed = 6;
 constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
 constexpr UINT kRetryIntervalMillis = 100;
 constexpr UINT kApplyButtonsMessage = WM_APP + 0x4C61;
@@ -32,7 +34,8 @@ struct TaskbarState {
     std::wstring playTooltip;
     std::wstring pauseTooltip;
     std::wstring nextTooltip;
-    HHOOK messageHook = nullptr;
+    HHOOK callWindowHook = nullptr;
+    HHOOK getMessageHook = nullptr;
     bool isPlaying = false;
     bool buttonsAdded = false;
 
@@ -101,23 +104,30 @@ void RequestButtonApply(HWND hwnd) {
     PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
 }
 
+void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
+    const HRESULT result = ApplyButtons(hwnd, state);
+    if (SUCCEEDED(result)) KillTimer(hwnd, kRetryTimerId);
+    else SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
+    if (state.callback != nullptr) {
+        state.callback(SUCCEEDED(result) ? kActionButtonsApplied : kActionButtonsApplyFailed);
+    }
+}
+
 void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM wParam) {
     if (message == g_taskbarButtonCreated) {
         state.buttonsAdded = false;
-        if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
-        else SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
+        ApplyButtonsOnOwnerThread(hwnd, state);
         return;
     }
     if (message == WM_TIMER && wParam == kRetryTimerId) {
         // Compose can create its AWT peer after Explorer already emitted TaskbarButtonCreated.
         // Keep retrying the documented AddButtons call from this window's own message thread
         // until Explorer has a taskbar button for the window.
-        if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
+        ApplyButtonsOnOwnerThread(hwnd, state);
         return;
     }
     if (message == kApplyButtonsMessage) {
-        if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
-        else SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
+        ApplyButtonsOnOwnerThread(hwnd, state);
         return;
     }
     if (message == WM_SETTINGCHANGE) {
@@ -146,9 +156,31 @@ void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM w
 LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
-        const auto it = g_states.find(message->hwnd);
-        if (it != g_states.end()) {
-            HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+        const bool shouldHandle = message->message == g_taskbarButtonCreated ||
+            message->message == WM_SETTINGCHANGE || message->message == WM_COMMAND;
+        if (shouldHandle) {
+            const auto it = g_states.find(message->hwnd);
+            if (it != g_states.end()) {
+                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+// Posted WM_APP messages and WM_TIMER messages are retrieved from the AWT message queue before
+// they reach a window procedure. Use this hook for taskbar registration/retry work; Explorer's
+// sent WM_COMMAND notifications remain handled by TaskbarMessageHook above.
+LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
+    if (code >= 0) {
+        const auto* message = reinterpret_cast<const MSG*>(lParam);
+        const bool isApplyMessage = message->message == kApplyButtonsMessage;
+        const bool isRetryTimer = message->message == WM_TIMER && message->wParam == kRetryTimerId;
+        if (isApplyMessage || isRetryTimer) {
+            const auto it = g_states.find(message->hwnd);
+            if (it != g_states.end()) {
+                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+            }
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -193,13 +225,21 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     // thread-specific call-window hook executes in that owner thread without replacing Skiko's
     // procedure, and also provides the required COM apartment for ITaskbarList3 calls.
     const DWORD ownerThread = GetWindowThreadProcessId(hwnd, nullptr);
-    const HHOOK messageHook = SetWindowsHookExW(
+    const HHOOK callWindowHook = SetWindowsHookExW(
         WH_CALLWNDPROC, TaskbarMessageHook, nullptr, ownerThread);
-    if (messageHook == nullptr) {
+    if (callWindowHook == nullptr) {
         g_states.erase(hwnd);
         return 0;
     }
-    g_states.at(hwnd)->messageHook = messageHook;
+    const HHOOK getMessageHook = SetWindowsHookExW(
+        WH_GETMESSAGE, TaskbarGetMessageHook, nullptr, ownerThread);
+    if (getMessageHook == nullptr) {
+        UnhookWindowsHookEx(callWindowHook);
+        g_states.erase(hwnd);
+        return 0;
+    }
+    g_states.at(hwnd)->callWindowHook = callWindowHook;
+    g_states.at(hwnd)->getMessageHook = getMessageHook;
     // Keep the callback alive while the owner thread receives the posted apply request.
     UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
         pauseTooltip, nextTooltip, isPlaying);
@@ -219,6 +259,7 @@ extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) 
     KillTimer(hwnd, kRetryTimerId);
     const auto it = g_states.find(hwnd);
     if (it == g_states.end()) return;
-    if (it->second->messageHook != nullptr) UnhookWindowsHookEx(it->second->messageHook);
+    if (it->second->callWindowHook != nullptr) UnhookWindowsHookEx(it->second->callWindowHook);
+    if (it->second->getMessageHook != nullptr) UnhookWindowsHookEx(it->second->getMessageHook);
     g_states.erase(it);
 }
