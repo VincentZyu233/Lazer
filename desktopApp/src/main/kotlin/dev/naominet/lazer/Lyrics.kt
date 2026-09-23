@@ -1,115 +1,26 @@
 package dev.naominet.lazer
 
-/**
- * One timed lyric line. [timeMs] is the start offset within the track.
- * [translation] is the optional translated lyric for the same line.
- */
-data class TimedLyricLine(
-    val timeMs: Long,
-    val text: String,
-    val translation: String? = null,
-    val words: List<TimedLyricWord> = emptyList(),
-    val endTimeMs: Long? = null,
-)
+/** Compatibility names for the desktop surface; timeline logic lives in commonMain. */
+internal fun parseLrc(lrc: String?): List<TimedLyricLine> = parseTimedLrc(lrc)
 
-/**
- * Parses NetEase / standard LRC text into timed lines.
- * Supports multiple timestamps on one row: `[00:01.00][00:02.00]同一句`.
- */
-internal fun parseLrc(lrc: String?): List<TimedLyricLine> {
-    if (lrc.isNullOrBlank()) return emptyList()
-    val lines = mutableListOf<TimedLyricLine>()
-    for (raw in lrc.split('\n', '\r')) {
-        val trimmed = raw.trim()
-        if (trimmed.isEmpty()) continue
-        val (stamps, text) = parseLrcRow(trimmed) ?: continue
-        if (text.isEmpty()) continue
-        for (time in stamps) {
-            lines += TimedLyricLine(time, text)
-        }
-    }
-    return lines.sortedBy { it.timeMs }
-}
-
-internal fun parseDesktopWordLyrics(yrc: String?): List<TimedLyricLine> =
-    parseWordLyrics(yrc).map { line ->
-        TimedLyricLine(
-            timeMs = line.timeMillis,
-            text = line.text,
-            words = line.words,
-            endTimeMs = line.timeMillis + line.durationMillis,
-        )
-    }
+internal fun parseDesktopWordLyrics(yrc: String?): List<TimedLyricLine> = parseTimedWordLyrics(yrc)
 
 internal fun desktopLyricsWithInterludes(
     lines: List<TimedLyricLine>,
     durationMs: Long,
-): List<TimedLyricLine> = buildList {
-    val first = lines.firstOrNull() ?: return@buildList
-    if (first.timeMs >= 5_000L && first.text.isNotBlank()) {
-        add(TimedLyricLine(0L, "", endTimeMs = first.timeMs))
-    }
-    lines.forEachIndexed { index, line ->
-        val next = lines.getOrNull(index + 1)?.timeMs ?: durationMs
-        add(if (line.text.isBlank()) line.copy(endTimeMs = next) else line)
-        if (line.text.isNotBlank()) {
-            val end = line.endTimeMs ?: line.words.maxOfOrNull { it.startTimeMillis + it.durationMillis }
-            lyricInterludeStart(line.timeMs, end, next)?.let { start ->
-                add(TimedLyricLine(start, "", endTimeMs = next))
-            }
-        }
-    }
-}
+): List<TimedLyricLine> = timedLyricsWithInterludes(lines, durationMs)
 
 internal fun activeDesktopInterlude(
     lines: List<TimedLyricLine>,
     positionMs: Long,
-): TimedLyricLine? = lines.getOrNull(findCurrentLyricIndex(lines, positionMs))?.takeIf {
-    it.text.isBlank() && positionMs < (it.endTimeMs ?: Long.MAX_VALUE)
-}
+): TimedLyricLine? = activeTimedInterlude(lines, positionMs)
 
 internal fun desktopLyricDisplayLines(
     timeline: List<TimedLyricLine>,
     interlude: TimedLyricLine?,
-): List<TimedLyricLine> = timeline.filter { it.text.isNotBlank() || it === interlude }
+): List<TimedLyricLine> = displayTimedLyricLines(timeline, interlude)
 
-/**
- * Attaches translated lyric lines to their matching original lines.
- *
- * The Gateway returns the translation LRC as a separate [TimedLyricLine] list, usually with the
- * same timestamps as the original. When timestamps differ slightly, the nearest translation within
- * one second is used so the current line still has a useful translation.
- */
 internal fun mergeLyrics(
     lyrics: List<TimedLyricLine>,
     translatedLyrics: List<TimedLyricLine>,
-): List<TimedLyricLine> {
-    if (lyrics.isEmpty()) return emptyList()
-    if (translatedLyrics.isEmpty()) return lyrics
-    val sortedTranslations = translatedLyrics.sortedBy { it.timeMs }
-    return lyrics.map { line ->
-        val translation = sortedTranslations
-            .minByOrNull { kotlin.math.abs(it.timeMs - line.timeMs) }
-            ?.takeIf { kotlin.math.abs(it.timeMs - line.timeMs) <= 1_000L }
-            ?.text
-        line.copy(translation = translation)
-    }
-}
-
-/** Binary search: last line whose timeMs <= [positionMs], or -1. */
-internal fun findCurrentLyricIndex(lines: List<TimedLyricLine>, positionMs: Long): Int {
-    if (lines.isEmpty()) return -1
-    var lo = 0
-    var hi = lines.lastIndex
-    var result = -1
-    while (lo <= hi) {
-        val mid = (lo + hi) ushr 1
-        if (lines[mid].timeMs <= positionMs) {
-            result = mid
-            lo = mid + 1
-        } else {
-            hi = mid - 1
-        }
-    }
-    return result
-}
+): List<TimedLyricLine> = mergeTimedLyrics(lyrics, translatedLyrics)

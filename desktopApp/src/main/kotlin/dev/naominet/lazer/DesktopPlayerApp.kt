@@ -2,6 +2,7 @@ package dev.naominet.lazer
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -199,10 +200,16 @@ fun WindowScope.DesktopPlayerApp(
             mutableStateOf(false)
         }
         LaunchedEffect(window, osGlassRequested, controller.isDark, backgroundArgb) {
-            nativeGlassApplied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
-            // Retry once after the initial frame has created the native handle.
-            delay(300)
-            nativeGlassApplied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
+            nativeGlassApplied = false
+            val attempts = if (osGlassRequested) 8 else 1
+            repeat(attempts) { attempt ->
+                val applied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
+                nativeGlassApplied = osGlassRequested && applied
+                if (!osGlassRequested || applied || attempt == attempts - 1) return@LaunchedEffect
+                // The undecorated AWT window may not have an HWND during the first composition.
+                // Keep retrying briefly so acrylic does not stay disabled for the whole session.
+                delay(120L)
+            }
         }
         val osGlassActive = osGlassRequested && nativeGlassApplied
         val frameShape = RoundedCornerShape(0.dp)
@@ -481,9 +488,12 @@ private fun NavigationPanel(
     Surface(
         modifier = Modifier
             .fillMaxHeight()
+            .padding(start = 14.dp, top = 14.dp, bottom = 14.dp)
             .width(railWidth)
             .widthIn(max = railWidth),
-        color = colors.surface.copy(alpha = if (glass) 0f else 0.86f * uiAlpha),
+        shape = RoundedCornerShape(22.dp),
+        color = colors.surface.copy(alpha = if (glass) 0.18f else 0.90f * uiAlpha),
+        shadowElevation = if (glass) 0.dp else 5.dp,
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.45f)),
     ) {
         Column(
@@ -2368,18 +2378,19 @@ private fun DesktopNowPlayingPage(
 ) {
     val track = controller.nowPlaying ?: return
     val colors = MaterialTheme.colorScheme
+    val glass = LocalOsGlassActive.current
     val displayProgress by animateFloatAsState(
         targetValue = controller.progress.coerceIn(0f, 1f),
         animationSpec = if (controller.isSeeking || !controller.isPlaying) snap() else spring(stiffness = Spring.StiffnessHigh),
         label = "now-playing-progress",
     )
     val seekProgress = if (controller.isSeeking) controller.progress else displayProgress
-    Box(modifier.background(colors.background)) {
+    Box(modifier.background(colors.background.copy(alpha = if (glass) 0.22f else 1f))) {
         AlbumFlowBackground(
             colors = controller.lyricFlowColors,
             modifier = Modifier.fillMaxSize(),
             cornerRadius = 0.dp,
-            veil = colors.background.copy(alpha = 0.38f),
+            veil = colors.background.copy(alpha = if (glass) 0.22f else 0.38f),
         )
         BoxWithConstraints(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 18.dp)) {
             // Preserve the mobile landscape information structure, but scale its hero artwork for
@@ -2445,7 +2456,15 @@ private fun DesktopNowPlayingPage(
                     ) {
                     Column(
                         Modifier.widthIn(max = 600.dp).fillMaxWidth()
-                            .background(colors.surface.copy(alpha = 0.86f), RoundedCornerShape(26.dp))
+                            .background(
+                                colors.surface.copy(alpha = if (glass) 0.42f else 0.86f),
+                                RoundedCornerShape(26.dp),
+                            )
+                            .border(
+                                1.dp,
+                                colors.outlineVariant.copy(alpha = if (glass) 0.48f else 0.72f),
+                                RoundedCornerShape(26.dp),
+                            )
                             .padding(horizontal = 18.dp, vertical = 10.dp),
                     ) {
                         ThinSeekBar(
@@ -2535,8 +2554,14 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
     val glass = LocalOsGlassActive.current
     val uiAlpha = LocalLazerUiAlpha.current
     Surface(
-        modifier = Modifier.fillMaxWidth().height(84.dp),
-        color = colors.surface.copy(alpha = if (glass) 0f else 0.96f * uiAlpha),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 14.dp)
+            .height(88.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = colors.surface.copy(alpha = if (glass) 0.22f else 0.96f * uiAlpha),
+        shadowElevation = if (glass) 0.dp else 8.dp,
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.7f)),
     ) {
         Row(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -3535,6 +3560,13 @@ private fun relativeCommentTime(
     }
 }
 
+/** Temporary top safe area the sheet gains while the selection bar is up. */
+private val LyricSelectionSafeArea = 68.dp
+
+/** One control size and one readout width, so the selection bar never resizes itself. */
+private val LyricSelectionControlSize = 36.dp
+private val LyricSelectionStatusWidth = 132.dp
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun DesktopLyricsViewport(
@@ -3551,6 +3583,15 @@ private fun DesktopLyricsViewport(
     val timeline = remember(lines, controller.nowPlaying?.durationMillis) {
         desktopLyricsWithInterludes(lines, controller.nowPlaying?.durationMillis ?: 0L)
     }
+    val clipboard = LocalClipboard.current
+    var lyricSelection by remember(controller.nowPlaying?.id) {
+        mutableStateOf(LyricSelectionState())
+    }
+    var lyricSelectionCopied by remember(controller.nowPlaying?.id) {
+        mutableStateOf(false)
+    }
+    // Row a bulk change radiates from, so select-all lights up as a wave instead of a flash.
+    var lyricSelectionWaveOrigin by remember(controller.nowPlaying?.id) { mutableIntStateOf(-1) }
     val targetInterlude = activeDesktopInterlude(timeline, controller.positionMillis)
     var renderedInterlude by remember(controller.nowPlaying?.id, timeline) {
         mutableStateOf<TimedLyricLine?>(null)
@@ -3570,8 +3611,31 @@ private fun DesktopLyricsViewport(
     val displayLines = remember(timeline, renderedInterlude) {
         desktopLyricDisplayLines(timeline, renderedInterlude)
     }
+    val selectionKeys = remember(displayLines) { lyricLineKeys(displayLines) }
+    val selectionModeLight = animatedLyricSelectionPresence(
+        selected = lyricSelection.isActive,
+        speed = controller.lyricAnimationSpeed,
+    )
+    // The sheet gains a temporary safe area while the bar is up, so a marked line can rest clear of
+    // it rather than underneath it. It animates on the bar's own tempo so the two move as one.
+    val selectionInsetPx by animateFloatAsState(
+        targetValue = if (lyricSelection.isActive) with(density) { LyricSelectionSafeArea.toPx() } else 0f,
+        animationSpec = tween(340, easing = LazerTokens.Motion.pageEasing),
+        label = "lyric selection safe area",
+    )
     val activeIndex by remember(displayLines, controller) {
         derivedStateOf { findCurrentLyricIndex(displayLines, controller.positionMillis) }
+    }
+
+    fun copySelectedLyrics() {
+        val text = buildLyricClipboardText(displayLines, lyricSelection.selectedKeys)
+        if (text.isBlank()) return
+        clickGlowScope.launch {
+            clipboard.setClipEntry(ClipEntry(StringSelection(text)))
+            lyricSelectionCopied = true
+            delay(1_400L)
+            lyricSelectionCopied = false
+        }
     }
 
     val baseFontSp = controller.lyricFontSizeSp.sp
@@ -3663,7 +3727,9 @@ private fun DesktopLyricsViewport(
                 }
                 lyricMotionAtNs = now
 
-                if (!followPlayback && System.currentTimeMillis() - manualAtMs > controller.lyricFollowDelayMillis) {
+                if (!followPlayback && !lyricSelection.isActive &&
+                    System.currentTimeMillis() - manualAtMs > controller.lyricFollowDelayMillis
+                ) {
                     lyricLineMotion.snapTo(lyricScroll)
                     followPlayback = true
                     lyricWheelInertia.stop()
@@ -3775,7 +3841,7 @@ private fun DesktopLyricsViewport(
                         },
                 ) {
                     // Keep the active lyric centered in the available lyrics viewport.
-                    val centerYPx = with(density) { (maxHeight * 0.5f).toPx() }
+                    val centerYPx = with(density) { (maxHeight * 0.5f).toPx() } + selectionInsetPx / 2f
                     val heightPx = with(density) { maxHeight.toPx() }
 
                     when {
@@ -3825,21 +3891,45 @@ private fun DesktopLyricsViewport(
                                     animatedLyricFocus(index == activeIndex, controller.lyricAnimationSpeed)
                                 }
                                 val ambient = (1f - distance / 4f).coerceAtLeast(0f)
-                                val scale = amllLyricLineScale(focus)
+                                // Blur supplies depth; keep inactive rows readable instead of
+                                // multiplying a heavy blur by near-transparent text.
+                                val inactiveAlpha = 0.62f + ambient * 0.18f
+                                val rowLight = if (line.text.isBlank()) {
+                                    0f
+                                } else {
+                                    animatedLyricSelectionPresence(
+                                        selected = lyricSelection.isSelected(selectionKeys, index),
+                                        speed = controller.lyricAnimationSpeed,
+                                        cascadeDelayMillis = if (lyricSelectionWaveOrigin >= 0) {
+                                            lyricSelectionCascadeDelay(index, lyricSelectionWaveOrigin)
+                                        } else {
+                                            0
+                                        },
+                                    )
+                                }
+                                // A marked line borrows the singing line's focus, so the highlight is
+                                // the same lighting the sheet already knows how to animate.
+                                val highlight = lyricSelectionHighlight(focus, rowLight)
+                                val scale = amllLyricLineScale(highlight)
                                 val blurRadiusDp = amllLyricBlurRadiusDp(
                                     distance = distance,
-                                    focus = focus,
+                                    focus = highlight,
                                     narrowViewport = maxWidth <= 1024.dp,
                                     interactionSuspended = !followPlayback,
                                     // The desktop sheet is far larger than the phone one, so the
                                     // same depth reads as almost no blur at all.
                                     maxBlurDp = 9f,
                                 )
-                                // Blur supplies depth; keep inactive rows readable instead of
-                                // multiplying a heavy blur by near-transparent text.
-                                val inactiveAlpha = 0.62f + ambient * 0.18f
-                                val alpha = inactiveAlpha * (1f - focus) + focus
-                                val color = lerpColor(colors.onSurfaceVariant, colors.onSurface, focus)
+                                val alpha = lyricSelectionRowAlpha(
+                                    baseAlpha = inactiveAlpha * (1f - highlight) + highlight * LyricActiveLineAlpha,
+                                    modePresence = selectionModeLight,
+                                    rowPresence = rowLight,
+                                )
+                                val color = lyricSelectionColor(
+                                    base = lerpColor(colors.onSurfaceVariant, colors.onSurface, highlight),
+                                    presence = rowLight,
+                                    selection = colors.primary,
+                                )
                                 val clickGlowActive = clickGlowTokens.containsKey(line)
                                 // AMLL blur values are CSS pixels and map directly to desktop
                                 // render-effect pixels; the foreground owns this effect, not the
@@ -3879,20 +3969,41 @@ private fun DesktopLyricsViewport(
                                                 measuredRowHeightsPx[line] = size.height
                                             }
                                         }
-                                        .clickable {
-                                            val token = Any()
-                                            clickGlowTokens[line] = token
-                                            clickGlowScope.launch {
-                                                delay(500L)
-                                                if (clickGlowTokens[line] === token) {
-                                                    clickGlowTokens.remove(line)
+                                        .combinedClickable(
+                                            onClick = {
+                                                if (lyricSelection.isActive) {
+                                                    lyricSelectionWaveOrigin = -1
+                                                    lyricSelection = lyricSelection.toggle(selectionKeys, index)
+                                                } else {
+                                                    val token = Any()
+                                                    clickGlowTokens[line] = token
+                                                    clickGlowScope.launch {
+                                                        delay(500L)
+                                                        if (clickGlowTokens[line] === token) {
+                                                            clickGlowTokens.remove(line)
+                                                        }
+                                                    }
+                                                    lyricLineMotion.snapTo(lyricScroll)
+                                                    followPlayback = true
+                                                    lyricWheelInertia.stop()
+                                                    controller.seekToLyricTime(line.timeMs)
                                                 }
-                                            }
-                                            lyricLineMotion.snapTo(lyricScroll)
-                                            followPlayback = true
-                                            lyricWheelInertia.stop()
-                                            controller.seekToLyricTime(line.timeMs)
-                                        },
+                                            },
+                                            onLongClick = {
+                                                if (line.text.isNotBlank()) {
+                                                    lyricSelectionWaveOrigin = -1
+                                                    // The sheet holds still while a passage is marked,
+                                                    // so the line under the pointer cannot drift off.
+                                                    markManualScroll()
+                                                    lyricWheelInertia.stop()
+                                                    lyricSelection = if (lyricSelection.isActive) {
+                                                        lyricSelection.extendTo(selectionKeys, index)
+                                                    } else {
+                                                        lyricSelection.begin(selectionKeys, index)
+                                                    }
+                                                }
+                                            },
+                                        ),
                                     contentAlignment = Alignment.TopCenter,
                                 ) {
                                     Column(
@@ -3974,7 +4085,11 @@ private fun DesktopLyricsViewport(
                                                     lineHeight = translationLineHeightSp,
                                                     fontWeight = FontWeight.Normal,
                                                 ),
-                                                color = colors.onSurfaceVariant.copy(alpha = 0.96f),
+                                                color = lyricSelectionColor(
+                                                    base = colors.onSurfaceVariant.copy(alpha = 0.96f),
+                                                    presence = rowLight,
+                                                    selection = colors.primary,
+                                                ),
                                                 textAlign = TextAlign.Center,
                                                 maxLines = lyricMaxLines,
                                                 overflow = TextOverflow.Ellipsis,
@@ -3987,6 +4102,98 @@ private fun DesktopLyricsViewport(
                     }
                 }
 
+            }
+        }
+        AnimatedVisibility(
+            visible = lyricSelection.isActive,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = fadeIn(tween(220, easing = LazerTokens.Motion.pageEasing)) +
+                slideInVertically(tween(340, easing = LazerTokens.Motion.pageEasing), initialOffsetY = { -it / 2 }) +
+                scaleIn(tween(340, easing = LazerTokens.Motion.pageEasing), 0.92f),
+            exit = fadeOut(tween(160, easing = LazerTokens.Motion.pageEasing)) +
+                slideOutVertically(tween(240, easing = LazerTokens.Motion.pageEasing), targetOffsetY = { -it / 3 }) +
+                scaleOut(tween(240, easing = LazerTokens.Motion.pageEasing), 0.95f),
+            label = "lyric-selection-toolbar",
+        ) {
+            LyricSelectionToolbar(
+                selectedCount = lyricSelection.selectedCount,
+                copied = lyricSelectionCopied,
+                onSelectAll = {
+                    lyricSelectionWaveOrigin = selectionKeys.indexOf(lyricSelection.anchorKey)
+                        .takeIf { it >= 0 }
+                        ?: selectionKeys.indexOfFirst { it != null }
+                            .coerceAtLeast(0)
+                    lyricSelection = lyricSelection.selectAll(selectionKeys)
+                },
+                onCopy = ::copySelectedLyrics,
+                onDismiss = {
+                    lyricSelection = lyricSelection.clear()
+                    lyricSelectionWaveOrigin = -1
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun LyricSelectionToolbar(
+    selectedCount: Int,
+    copied: Boolean,
+    onSelectAll: () -> Unit,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val glass = LocalOsGlassActive.current
+    Surface(
+        modifier = Modifier.padding(top = 12.dp),
+        shape = RoundedCornerShape(18.dp),
+        color = colors.surface.copy(alpha = if (glass) 0.82f else 0.97f),
+        // Depth instead of a hairline: the bar floats over an animated sheet, and an outline reads
+        // as a table cell there.
+        shadowElevation = 12.dp,
+    ) {
+        Row(
+            Modifier.padding(start = 10.dp, end = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            // What is marked is a readout, not a control: fixed size, centred, no container that
+            // would make it look pressable, and it never resizes as the count grows.
+            Box(
+                modifier = Modifier.size(
+                    width = LyricSelectionStatusWidth,
+                    height = LyricSelectionControlSize,
+                ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Crossfade(
+                    targetState = if (copied) {
+                        tr("lyrics.select.copied")
+                    } else {
+                        tr("lyrics.select.count", selectedCount)
+                    },
+                    animationSpec = tween(220, easing = LazerTokens.Motion.pageEasing),
+                    label = "lyric-selection-status",
+                ) { status ->
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = colors.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+            IconButton(onClick = onSelectAll, modifier = Modifier.size(LyricSelectionControlSize)) {
+                Icon(Icons.Outlined.SelectAll, tr("lyrics.select.all"), Modifier.size(18.dp))
+            }
+            IconButton(onClick = onCopy, modifier = Modifier.size(LyricSelectionControlSize)) {
+                Icon(Icons.Outlined.ContentCopy, tr("lyrics.select.copy"), Modifier.size(18.dp), tint = colors.primary)
+            }
+            IconButton(onClick = onDismiss, modifier = Modifier.size(LyricSelectionControlSize)) {
+                Icon(Icons.Outlined.Close, tr("lyrics.select.close"), Modifier.size(18.dp), tint = colors.onSurfaceVariant)
             }
         }
     }

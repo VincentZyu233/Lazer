@@ -1,18 +1,39 @@
 package dev.naominet.lazer
 
+import android.content.ClipData
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.SelectAll
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -30,11 +52,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -42,9 +65,13 @@ import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,7 +83,34 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.first
 import androidx.compose.runtime.snapshotFlow
+import kotlin.math.abs
 import kotlin.math.roundToInt
+
+/** How long a released long press keeps the next drag reserved for extending the selection. */
+private const val SelectionDragWindowMillis = 900L
+
+/** Temporary bottom safe area the sheet gains while the selection bar is up. */
+private val LyricSelectionSafeArea = 86.dp
+
+/** One height for every control in the selection bar, and one width for its readout. */
+private val LyricSelectionControlHeight = 44.dp
+private val LyricSelectionStatusWidth = 108.dp
+
+/**
+ * Selected lines, the confirmation, and where a bulk change radiated from. It lives with the page
+ * rather than inside the sheet because the pill refracts the lyric layer, so it cannot be part of
+ * the layer it samples.
+ */
+private class AndroidLyricSelection {
+    var state by mutableStateOf(LyricSelectionState())
+    var copied by mutableStateOf(false)
+
+    /** Row a bulk change radiates from, so select-all lights up as a wave instead of a flash. */
+    var waveOrigin by mutableIntStateOf(-1)
+
+    /** Until when a released long press hands the next drag to selection instead of scrolling. */
+    var dragArmedAt by mutableLongStateOf(0L)
+}
 
 @Composable
 internal fun AndroidLyricsViewport(
@@ -71,6 +125,7 @@ internal fun AndroidLyricsViewport(
     lyricGlowEnabled: Boolean,
     lyricFontSizeSp: Int,
     showFullLyrics: Boolean,
+    glass: LazerLiquidGlass,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -94,24 +149,96 @@ internal fun AndroidLyricsViewport(
     val displayLines = remember(timeline, renderedInterlude) {
         androidLyricDisplayLines(timeline, renderedInterlude)
     }
+    val colors = MaterialTheme.colorScheme
+    val clipboard = LocalClipboard.current
+    val haptics = LocalHapticFeedback.current
+    val selectionScope = rememberCoroutineScope()
+    val selection = remember(track?.id) { AndroidLyricSelection() }
+    val selectionKeys = remember(displayLines) { lyricLineKeys(displayLines) }
+    // A second, separate backdrop: the pill sits outside the sheet's own layer, and a layer cannot
+    // sample itself without feeding its own previous frame back through the glass.
+    val sheetGlass = rememberLazerLiquidGlass(
+        enabled = glass.isEnabled,
+        backgroundColor = colors.background,
+        blurIntensity = glass.blurIntensity,
+    )
+
+    LaunchedEffect(selection.state.isActive) {
+        if (!selection.state.isActive) selection.copied = false
+    }
+
+    fun copySelectedLyrics() {
+        val text = buildLyricClipboardText(displayLines, selection.state.selectedKeys)
+        if (text.isBlank()) return
+        selectionScope.launch {
+            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(tr("lyrics.select.copy"), text)))
+            selection.copied = true
+            haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
+            delay(1_400L)
+            selection.copied = false
+        }
+    }
+
     when {
         track == null -> LyricEmpty(tr("lyrics.empty"), modifier)
         isLoading -> LyricEmpty(tr("lyrics.loading"), modifier)
         displayLines.isEmpty() -> LyricEmpty(message ?: tr("lyrics.none"), modifier)
-        else -> AnimatedLyricsViewport(
-            trackId = track.id,
-            lines = displayLines,
-            interludePresence = interludePresence.value,
-            positionMillis = positionMillis,
-            followDelayMillis = followDelayMillis,
-            animationSpeed = animationSpeed,
-            wordLyricsEnabled = wordLyricsEnabled,
-            lyricGlowEnabled = lyricGlowEnabled,
-            lyricFontSizeSp = lyricFontSizeSp,
-            showFullLyrics = showFullLyrics,
-            onSeek = onSeek,
-            modifier = modifier,
-        )
+        else -> Box(modifier) {
+            AnimatedLyricsViewport(
+                trackId = track.id,
+                lines = displayLines,
+                interludePresence = interludePresence.value,
+                positionMillis = positionMillis,
+                followDelayMillis = followDelayMillis,
+                animationSpeed = animationSpeed,
+                wordLyricsEnabled = wordLyricsEnabled,
+                lyricGlowEnabled = lyricGlowEnabled,
+                lyricFontSizeSp = lyricFontSizeSp,
+                showFullLyrics = showFullLyrics,
+                selection = selection,
+                onSeek = onSeek,
+                // Only while a passage is being picked: capturing a sheet that animates every frame
+                // would cost a full-screen layer copy for a pill that is not on screen.
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (selection.state.isActive) Modifier.captureLiquidGlass(sheetGlass) else Modifier,
+                    ),
+            )
+            AnimatedVisibility(
+                visible = selection.state.isActive,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                enter = fadeIn(tween(220, easing = LazerTokens.Motion.pageEasing)) +
+                    slideInVertically(tween(340, easing = LazerTokens.Motion.pageEasing)) { it + 28 } +
+                    scaleIn(tween(340, easing = LazerTokens.Motion.pageEasing), 0.9f),
+                exit = fadeOut(tween(160, easing = LazerTokens.Motion.pageEasing)) +
+                    slideOutVertically(tween(240, easing = LazerTokens.Motion.pageEasing)) { it + 28 } +
+                    scaleOut(tween(240, easing = LazerTokens.Motion.pageEasing), 0.94f),
+                label = "lyric-selection-pill",
+            ) {
+                LyricSelectionPill(
+                    glass = glass,
+                    sheetGlass = sheetGlass,
+                    selectedCount = selection.state.selectedCount,
+                    copied = selection.copied,
+                    onSelectAll = {
+                        selection.waveOrigin = selectionKeys.indexOf(selection.state.anchorKey)
+                            .takeIf { it >= 0 }
+                            ?: selectionKeys.indexOfFirst { it != null }
+                                .coerceAtLeast(0)
+                        selection.state = selection.state.selectAll(selectionKeys)
+                    },
+                    onCopy = ::copySelectedLyrics,
+                    onDismiss = {
+                        selection.state = selection.state.clear()
+                        selection.waveOrigin = -1
+                        selection.dragArmedAt = 0L
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -127,11 +254,13 @@ private fun AnimatedLyricsViewport(
     lyricGlowEnabled: Boolean,
     lyricFontSizeSp: Int,
     showFullLyrics: Boolean,
+    selection: AndroidLyricSelection,
     onSeek: (Long) -> Unit,
     modifier: Modifier,
 ) {
     val density = LocalDensity.current
     val colors = MaterialTheme.colorScheme
+    val haptics = LocalHapticFeedback.current
     val isDark = colors.background.luminance() < 0.5f
     // This is a value parameter, not snapshot state. Recompute from each playback update rather
     // than remembering a derived-state lambda that captures the first position for these lines.
@@ -196,6 +325,36 @@ private fun AnimatedLyricsViewport(
     val clickGlowTokens = remember(trackId, lyricGlowEnabled) {
         mutableStateMapOf<AndroidTimedLyricLine, Any>()
     }
+    var isExtendingSelection by remember(trackId) { mutableStateOf(false) }
+    val selectionKeys = remember(lines) { lyricLineKeys(lines) }
+    val currentSelectionKeys by rememberUpdatedState(selectionKeys)
+    val selectionModeLight = animatedLyricSelectionPresence(
+        selected = selection.state.isActive,
+        speed = animationSpeed,
+    )
+    // The sheet gains a temporary safe area while the pill is up, so a marked line can rest clear of
+    // the glass rather than underneath it. It animates on the pill's own tempo so the two move as
+    // one gesture.
+    val selectionInsetPx by animateFloatAsState(
+        targetValue = if (selection.state.isActive) with(density) { LyricSelectionSafeArea.toPx() } else 0f,
+        animationSpec = tween(340, easing = LazerTokens.Motion.pageEasing),
+        label = "lyric selection safe area",
+    )
+
+    // Freeze the sheet where it is painted; a selection must not slide out from under the finger.
+    fun holdSheetForSelection() {
+        // Only while following does the motion field hold the rendered position; a paused (manual)
+        // scroll is already the source of truth, so adopting the field there would snap the view
+        // back to the active line on the next touch.
+        if (followPlayback && currentActiveIndex >= 0) {
+            lyricScroll = lyricLineMotion.positionFor(currentActiveIndex).coerceIn(0f, currentMaxScroll)
+        }
+        lyricLineMotion.snapTo(lyricScroll)
+        followPlayback = false
+        isDragging = false
+        flingVelocity = 0f
+        manualAtMillis = System.currentTimeMillis()
+    }
 
     LaunchedEffect(trackId, lyricFontSizeSp, showFullLyrics) {
         followPlayback = true
@@ -232,7 +391,8 @@ private fun AnimatedLyricsViewport(
                     ((now - lastFrameNanos) / 1_000_000_000.0).toFloat().coerceIn(0.001f, 0.05f)
                 }
                 lastFrameNanos = now
-                if (!followPlayback && !isDragging && kotlin.math.abs(flingVelocity) < 8f &&
+                if (!followPlayback && !isDragging && !selection.state.isActive &&
+                    kotlin.math.abs(flingVelocity) < 8f &&
                     System.currentTimeMillis() - manualAtMillis > currentFollowDelayMillis
                 ) {
                     lyricLineMotion.snapTo(lyricScroll)
@@ -276,48 +436,72 @@ private fun AnimatedLyricsViewport(
             // A transient dot row must not cancel an ongoing drag. Read changing bounds through
             // rememberUpdatedState and restart the gesture detector only when the track changes.
             .pointerInput(trackId) {
+                /**
+                 * Row whose painted centre sits nearest to [y], or null while the finger is over the
+                 * transient interlude row. Centres rather than bounds keep a held drag free of dead
+                 * zones between lines, and pulling past either end holds the edge line.
+                 */
+                fun rowNearestTo(y: Float): Int? {
+                    val centers = currentLineCentersPx
+                    if (centers.isEmpty()) return null
+                    val sheetCenterY = size.height * 0.5f
+                    var nearest = 0
+                    var nearestDistance = Float.MAX_VALUE
+                    for (index in centers.indices) {
+                        val distance = abs(sheetCenterY + centers[index] - lyricScroll - y)
+                        if (distance < nearestDistance) {
+                            nearestDistance = distance
+                            nearest = index
+                        }
+                    }
+                    return nearest.takeIf { currentSelectionKeys.getOrElse(index = it) { null } != null }
+                }
                 detectVerticalDragGestures(
                     onDragStart = {
-                        // Only while following does the motion field hold the rendered position; a
-                        // paused (manual) scroll is already the source of truth, so adopting the
-                        // field there would snap the view back to the active line on the next touch.
-                        if (followPlayback && currentActiveIndex >= 0) {
-                            lyricScroll = lyricLineMotion.positionFor(currentActiveIndex)
-                                .coerceIn(0f, currentMaxScroll)
+                        if (selection.state.isActive &&
+                            System.currentTimeMillis() - selection.dragArmedAt < SelectionDragWindowMillis
+                        ) {
+                            isExtendingSelection = true
+                        } else {
+                            holdSheetForSelection()
+                            isDragging = true
+                            lastDragNanos = 0L
                         }
-                        lyricLineMotion.snapTo(lyricScroll)
-                        followPlayback = false
-                        isDragging = true
-                        flingVelocity = 0f
-                        lastDragNanos = 0L
-                        manualAtMillis = System.currentTimeMillis()
                     },
                     onDragEnd = {
                         isDragging = false
+                        isExtendingSelection = false
                         manualAtMillis = System.currentTimeMillis()
                     },
                     onDragCancel = {
                         isDragging = false
+                        isExtendingSelection = false
                         flingVelocity = 0f
                         manualAtMillis = System.currentTimeMillis()
                     },
                     onVerticalDrag = { change, dragAmount ->
                         change.consume()
-                        val now = change.uptimeMillis * 1_000_000L
-                        if (lastDragNanos != 0L) {
-                            val deltaSeconds = ((now - lastDragNanos) / 1_000_000_000f).coerceAtLeast(0.001f)
-                            val measuredVelocity = -dragAmount / deltaSeconds
-                            flingVelocity = flingVelocity * 0.65f + measuredVelocity * 0.35f
+                        if (isExtendingSelection) {
+                            val row = rowNearestTo(change.position.y)
+                            if (row != null) selection.state = selection.state.extendTo(currentSelectionKeys, row)
+                        } else {
+                            val now = change.uptimeMillis * 1_000_000L
+                            if (lastDragNanos != 0L) {
+                                val deltaSeconds = ((now - lastDragNanos) / 1_000_000_000f).coerceAtLeast(0.001f)
+                                val measuredVelocity = -dragAmount / deltaSeconds
+                                flingVelocity = flingVelocity * 0.65f + measuredVelocity * 0.35f
+                            }
+                            lastDragNanos = now
+                            manualAtMillis = System.currentTimeMillis()
+                            lyricScroll = (lyricScroll - dragAmount).coerceIn(0f, currentMaxScroll)
                         }
-                        lastDragNanos = now
-                        manualAtMillis = System.currentTimeMillis()
-                        lyricScroll = (lyricScroll - dragAmount).coerceIn(0f, currentMaxScroll)
                     },
                 )
             },
     ) {
-        // Keep the active lyric centered in the available lyrics viewport.
-        val centerYPx = with(density) { (maxHeight * 0.5f).toPx() }
+        // Keep the active lyric centered in the available lyrics viewport, less the space the
+        // selection pill is borrowing at the bottom.
+        val centerYPx = with(density) { (maxHeight * 0.5f).toPx() } - selectionInsetPx / 2f
         val heightPx = with(density) { maxHeight.toPx() }
         val rowHeightMarginPx = with(density) { 160.dp.toPx() }
         // lyricScroll is written every frame while dragging, flinging, or following. The offset
@@ -357,14 +541,36 @@ private fun AnimatedLyricsViewport(
                 animatedLyricFocus(index == activeIndexValue, animationSpeed)
             }
             val ambient = (1f - distance / 4f).coerceAtLeast(0f)
-            val scale = amllLyricLineScale(focus)
+            val rowLight = if (line.text.isBlank()) {
+                0f
+            } else {
+                animatedLyricSelectionPresence(
+                    selected = selection.state.isSelected(selectionKeys, index),
+                    speed = animationSpeed,
+                    cascadeDelayMillis = if (selection.waveOrigin >= 0) {
+                        lyricSelectionCascadeDelay(index, selection.waveOrigin)
+                    } else {
+                        0
+                    },
+                )
+            }
+            // A marked line borrows the singing line's focus, so the highlight is the same lighting
+            // the sheet already knows how to animate rather than a second way of painting text.
+            val highlight = lyricSelectionHighlight(focus, rowLight)
+            val scale = amllLyricLineScale(highlight)
             val blurRadiusDp = amllLyricBlurRadiusDp(
                 distance = distance,
-                focus = focus,
+                focus = highlight,
                 narrowViewport = maxWidth <= 1024.dp,
                 interactionSuspended = !followPlayback,
             )
-            val alpha = (0.24f + ambient * 0.20f) * (1f - focus) + focus
+            val alpha = lyricSelectionRowAlpha(
+                baseAlpha = (0.24f + ambient * 0.20f) * (1f - highlight) + highlight * LyricActiveLineAlpha,
+                modePresence = selectionModeLight,
+                rowPresence = rowLight,
+            )
+            val lineColor = lyricSelectionColor(colors.onBackground, rowLight, colors.primary)
+            val translationColor = lyricSelectionColor(colors.onSurfaceVariant, rowLight, colors.primary)
             val clickGlowActive = clickGlowTokens.containsKey(line)
             val contentBlurRadiusPx = with(density) { blurRadiusDp.dp.toPx() }
             val hasTranslation = !line.translation.isNullOrBlank()
@@ -417,19 +623,47 @@ private fun AnimatedLyricsViewport(
                             measuredRowHeightsPx[line] = size.height
                         }
                     }
-                    .clickable(interactionSource = null, indication = null) {
-                        val token = Any()
-                        clickGlowTokens[line] = token
-                        clickGlowScope.launch {
-                            delay(500L)
-                            if (clickGlowTokens[line] === token) {
-                                clickGlowTokens.remove(line)
+                    .combinedClickable(
+                        interactionSource = null,
+                        indication = null,
+                        onClick = {
+                            if (selection.state.isActive) {
+                                if (line.text.isNotBlank()) {
+                                    selection.waveOrigin = -1
+                                    selection.state = selection.state.toggle(selectionKeys, index)
+                                }
+                            } else {
+                                val token = Any()
+                                clickGlowTokens[line] = token
+                                clickGlowScope.launch {
+                                    delay(500L)
+                                    if (clickGlowTokens[line] === token) {
+                                        clickGlowTokens.remove(line)
+                                    }
+                                }
+                                lyricLineMotion.snapTo(lyricScroll)
+                                followPlayback = true
+                                onSeek(line.timeMillis)
                             }
-                        }
-                        lyricLineMotion.snapTo(lyricScroll)
-                        followPlayback = true
-                        onSeek(line.timeMillis)
-                    },
+                        },
+                        onLongClick = {
+                            if (line.text.isNotBlank()) {
+                                if (!selection.state.isActive) {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                                selection.waveOrigin = -1
+                                selection.dragArmedAt = System.currentTimeMillis()
+                                // The sheet holds still the moment the marking starts; otherwise the
+                                // line under the finger would drift away mid-gesture.
+                                holdSheetForSelection()
+                                selection.state = if (selection.state.isActive) {
+                                    selection.state.extendTo(selectionKeys, index)
+                                } else {
+                                    selection.state.begin(selectionKeys, index)
+                                }
+                            }
+                        },
+                    ),
                 contentAlignment = Alignment.TopCenter,
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -463,7 +697,7 @@ private fun AnimatedLyricsViewport(
                             positionMillis = if (index == activeIndexValue) positionMillis else line.timeMillis,
                             active = wordLyricsEnabled && index == activeIndexValue,
                             currentLine = index == activeIndexValue,
-                            color = colors.onBackground,
+                            color = lineColor,
                             shadowColor = if (isDark) Color.White else Color.Black,
                             glowEnabled = lyricGlowEnabled,
                             temporaryGlow = clickGlowActive,
@@ -513,7 +747,7 @@ private fun AnimatedLyricsViewport(
                                 clip = false
                                 transformOrigin = TransformOrigin.Center
                             },
-                            color = colors.onSurfaceVariant,
+                            color = translationColor,
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontSize = translationFontSp,
                                 lineHeight = translationLineHeightSp,
@@ -525,6 +759,102 @@ private fun AnimatedLyricsViewport(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Selection's one control: a full-width glass bar on the same geometry as the transport card, so it
+ * reads as part of the page rather than a floating chip. It states how much is marked and what
+ * copying does, and it rides the page's own easing.
+ */
+@Composable
+private fun LyricSelectionPill(
+    glass: LazerLiquidGlass,
+    sheetGlass: LazerLiquidGlass,
+    selectedCount: Int,
+    copied: Boolean,
+    onSelectAll: () -> Unit,
+    onCopy: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(28.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .widthIn(max = 480.dp)
+            .shadow(12.dp, shape, ambientColor = Color.Black, spotColor = Color.Black)
+            .clip(shape)
+            .background(colors.surface.copy(alpha = if (glass.isEnabled) 0.66f else 0.97f), shape)
+            .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 12.dp)
+            // Second sample of its own backdrop: the lyric sheet. A layer cannot sample itself, so
+            // the sheet is captured into a separate glass and refracted over the cover-art one;
+            // without it the lines the bar actually covers vanish underneath.
+            .liquidGlassSurface(sheetGlass, shape, Color.Transparent, blurRadius = 12.dp)
+            .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        // What is marked keeps a fixed box so the bar never twitches as the count grows.
+        Box(
+            modifier = Modifier.size(
+                width = LyricSelectionStatusWidth,
+                height = LyricSelectionControlHeight,
+            ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Crossfade(
+                targetState = if (copied) {
+                    tr("lyrics.select.copied")
+                } else {
+                    tr("lyrics.select.count", selectedCount)
+                },
+                animationSpec = tween(220, easing = LazerTokens.Motion.pageEasing),
+                label = "lyric-selection-status",
+            ) { status ->
+                Text(
+                    status,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+        LiquidGlassIconButton(
+            onClick = onSelectAll,
+            contentDescription = tr("lyrics.select.all"),
+            glass = glass,
+            size = LyricSelectionControlHeight,
+            tint = colors.onSurfaceVariant,
+        ) {
+            Icon(Icons.Outlined.SelectAll, null, Modifier.size(22.dp))
+        }
+        // The action takes whatever width is left. Row measures unweighted children first, so a
+        // button sized by its own text would leave the close control with nothing and clip it.
+        LiquidGlassPillButton(
+            onClick = onCopy,
+            glass = glass,
+            modifier = Modifier.weight(1f),
+            minHeight = LyricSelectionControlHeight,
+        ) {
+            Text(
+                tr("lyrics.select.copy"),
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        LiquidGlassIconButton(
+            onClick = onDismiss,
+            contentDescription = tr("lyrics.select.close"),
+            glass = glass,
+            size = LyricSelectionControlHeight,
+            tint = colors.onSurfaceVariant,
+        ) {
+            Icon(Icons.Outlined.Close, null, Modifier.size(22.dp))
         }
     }
 }

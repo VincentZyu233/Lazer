@@ -22,13 +22,13 @@ import org.junit.Test
 class DesktopMediaAndCacheTest {
     @Test
     fun `acrylic tint follows the app theme instead of Windows appearance`() {
-        // Native acrylic uses AABBGGRR. Day mode is the light paper (#F7F5EF) with an 80% tint,
+        // Native acrylic uses AABBGGRR. Day mode is the light paper (#F7F5EF) with a balanced tint,
         // leaving just enough blurred desktop to retain the acrylic character.
-        assertEquals(0xCCEFF5F7.toInt(), windowsAcrylicTint(0xFFF7F5EF.toInt(), isDark = false))
-        assertEquals(0x662D281D.toInt(), windowsAcrylicTint(0xFF1D282D.toInt(), isDark = true))
+        assertEquals(0xB8EFF5F7.toInt(), windowsAcrylicTint(0xFFF7F5EF.toInt(), isDark = false))
+        assertEquals(0x982D281D.toInt(), windowsAcrylicTint(0xFF1D282D.toInt(), isDark = true))
         // Custom/engine palettes must use their actual paper RGB, with native tint opacity.
-        assertEquals(0xCC563412.toInt(), windowsAcrylicTint(0xFF123456.toInt(), isDark = false))
-        assertEquals(0x66563412.toInt(), windowsAcrylicTint(0xFF123456.toInt(), isDark = true))
+        assertEquals(0xB8563412.toInt(), windowsAcrylicTint(0xFF123456.toInt(), isDark = false))
+        assertEquals(0x98563412.toInt(), windowsAcrylicTint(0xFF123456.toInt(), isDark = true))
     }
 
     @Test

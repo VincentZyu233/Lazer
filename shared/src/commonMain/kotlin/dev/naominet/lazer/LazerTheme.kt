@@ -1,5 +1,6 @@
 package dev.naominet.lazer
 
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -281,6 +282,9 @@ object LazerTokens {
     /** One navigation tempo keeps every page change feeling like part of the same product. */
     object Motion {
         const val pageMillis = 280
+
+        /** The curve every surface uses when it answers a direct action. */
+        val pageEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
     }
     val Paper = Color(0xFFF7F5EF)
     val PaperRaised = Color(0xFFFCFAF5)

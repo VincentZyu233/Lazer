@@ -125,7 +125,7 @@ private fun Color.toHsl(): FloatArray {
     return floatArrayOf(hue, saturation, lightness)
 }
 
-internal fun hslToColor(hue: Float, saturation: Float, lightness: Float): Color {
+fun hslToColor(hue: Float, saturation: Float, lightness: Float): Color {
     val normalizedHue = ((hue % 360f) + 360f) % 360f
     val safeSaturation = saturation.coerceIn(0f, 1f)
     val safeLightness = lightness.coerceIn(0f, 1f)
