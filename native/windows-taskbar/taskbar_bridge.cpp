@@ -16,6 +16,8 @@ constexpr int kActionPlayPause = 2;
 constexpr int kActionNext = 3;
 constexpr int kActionThemeChanged = 4;
 constexpr UINT_PTR kSubclassId = 0x4C617A65;
+constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
+constexpr UINT kRetryIntervalMillis = 100;
 
 using ActionCallback = void(__stdcall*)(int action);
 
@@ -102,8 +104,15 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPA
 
     if (message == g_taskbarButtonCreated) {
         state.buttonsAdded = false;
-        ApplyButtons(hwnd, state);
+        if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
         return DefSubclassProc(hwnd, message, wParam, lParam);
+    }
+    if (message == WM_TIMER && wParam == kRetryTimerId) {
+        // Compose can create its AWT peer after Explorer already emitted TaskbarButtonCreated.
+        // Keep retrying the documented AddButtons call from this window's own message thread
+        // until Explorer has a taskbar button for the window.
+        if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
+        return 0;
     }
     if (message == WM_SETTINGCHANGE) {
         if (state.callback != nullptr) state.callback(kActionThemeChanged);
@@ -165,8 +174,10 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     // initial call is merely an opportunistic fast path; the installed subclass will retry when
     // that message arrives. Report success once the subclass is active so Kotlin keeps the
     // bridge and its callback alive even when this early add is rejected.
-    UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
-        pauseTooltip, nextTooltip, isPlaying);
+    if (!UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
+            pauseTooltip, nextTooltip, isPlaying)) {
+        SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
+    }
     return 1;
 }
 
@@ -180,6 +191,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_update(HWND hwnd,
 
 extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) {
     if (hwnd == nullptr) return;
+    KillTimer(hwnd, kRetryTimerId);
     RemoveWindowSubclass(hwnd, TaskbarSubclassProc, kSubclassId);
     g_states.erase(hwnd);
 }
