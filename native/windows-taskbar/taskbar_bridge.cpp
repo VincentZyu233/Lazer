@@ -161,8 +161,13 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
         g_states.erase(hwnd);
         return 0;
     }
-    return UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
-        pauseTooltip, nextTooltip, isPlaying) ? 1 : 0;
+    // Explorer accepts ThumbBarAddButtons only after it has sent TaskbarButtonCreated. The
+    // initial call is merely an opportunistic fast path; the installed subclass will retry when
+    // that message arrives. Report success once the subclass is active so Kotlin keeps the
+    // bridge and its callback alive even when this early add is rejected.
+    UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
+        pauseTooltip, nextTooltip, isPlaying);
+    return 1;
 }
 
 extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_update(HWND hwnd,

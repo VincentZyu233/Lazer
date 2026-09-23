@@ -5,6 +5,7 @@ import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.WString
+import java.awt.EventQueue
 import java.awt.Window
 import java.io.File
 
@@ -37,13 +38,11 @@ internal class WindowsThumbar(
     // A native DLL never retains a JVM callback automatically.
     private val callback = object : WindowsTaskbarBridge.ActionCallback {
         override fun callback(action: Int) {
-            // The callback runs in the subclassed window's message thread, which is also where
-            // ITaskbarList3 was created. Do not hop threads and break COM apartment affinity.
             when (action) {
-                ACTION_PREVIOUS -> onAction(MediaControlAction.Previous)
-                ACTION_PLAY_PAUSE -> onAction(MediaControlAction.PlayPause)
-                ACTION_NEXT -> onAction(MediaControlAction.Next)
-                ACTION_THEME_CHANGED -> refreshTheme()
+                ACTION_PREVIOUS -> dispatchAction(MediaControlAction.Previous)
+                ACTION_PLAY_PAUSE -> dispatchAction(MediaControlAction.PlayPause)
+                ACTION_NEXT -> dispatchAction(MediaControlAction.Next)
+                ACTION_THEME_CHANGED -> EventQueue.invokeLater(::refreshTheme)
             }
         }
     }
@@ -97,6 +96,22 @@ internal class WindowsThumbar(
         updateButtons()
         WindowsJumpList.install(isPlaying)
         PlaybackDebugLog.event("taskbar-media-icons-theme-refreshed")
+    }
+
+    /**
+     * Explorer sends thumbnail-button commands through AWT's native window thread, not Compose's
+     * event queue. Mutating the player state there races Compose and made clicks appear to do
+     * nothing. Queue the action onto the same AWT event queue used by the desktop UI.
+     */
+    private fun dispatchAction(action: MediaControlAction) {
+        PlaybackDebugLog.event("thumbar-action-received", action.name)
+        EventQueue.invokeLater {
+            runCatching { onAction(action) }
+                .onSuccess { PlaybackDebugLog.event("thumbar-action-dispatched", action.name) }
+                .onFailure { error ->
+                    PlaybackDebugLog.event("thumbar-action-error", error.playbackDebugSummary())
+                }
+        }
     }
 
     private fun updateButtons() {
