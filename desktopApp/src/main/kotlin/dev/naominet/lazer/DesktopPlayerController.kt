@@ -905,6 +905,7 @@ class DesktopPlayerController(
 
     fun updateVolume(value: Float) {
         volume = value.coerceIn(0f, 1f)
+        PlaybackDebugLog.event("volume-updated", volume.toString())
         audioPlayer.setVolume(volume)
         systemMediaSession.setVolume(volume)
     }

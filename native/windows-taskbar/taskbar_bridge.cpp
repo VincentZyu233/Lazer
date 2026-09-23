@@ -25,6 +25,7 @@ constexpr int kActionSubclassCommandObserved = 0x30000000;
 constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
 constexpr UINT kRetryIntervalMillis = 100;
 constexpr UINT kApplyButtonsMessage = WM_APP + 0x4C61;
+constexpr UINT kInstallInputSubclassMessage = WM_APP + 0x4C62;
 constexpr UINT_PTR kTaskbarSubclassId = 0x4C617A72;
 
 using ActionCallback = void(__stdcall*)(int action);
@@ -42,8 +43,14 @@ struct TaskbarState {
     std::wstring nextTooltip;
     HHOOK callWindowHook = nullptr;
     HHOOK getMessageHook = nullptr;
+    HHOOK inputCallWindowHook = nullptr;
+    HHOOK inputGetMessageHook = nullptr;
+    HWND taskbarHwnd = nullptr;
+    HWND inputHwnd = nullptr;
     DWORD ownerThread = 0;
+    DWORD inputThread = 0;
     bool subclassInstalled = false;
+    bool inputSubclassInstalled = false;
     bool isPlaying = false;
     bool buttonsAdded = false;
 
@@ -57,6 +64,7 @@ struct TaskbarState {
 };
 
 std::unordered_map<HWND, std::unique_ptr<TaskbarState>> g_states;
+std::unordered_map<HWND, HWND> g_inputWindows;
 UINT g_taskbarButtonCreated = 0;
 
 HWND ResolveTaskbarWindow(HWND hwnd) {
@@ -141,13 +149,27 @@ bool IsTaskbarMediaMessage(UINT message, WPARAM wParam, LPARAM lParam) {
     return MediaActionForMessage(message, wParam, lParam) != 0;
 }
 
+TaskbarState* FindStateForWindow(HWND messageHwnd, HWND& taskbarHwnd) {
+    const auto stateIt = g_states.find(messageHwnd);
+    if (stateIt != g_states.end()) {
+        taskbarHwnd = messageHwnd;
+        return stateIt->second.get();
+    }
+    const auto inputIt = g_inputWindows.find(messageHwnd);
+    if (inputIt == g_inputWindows.end()) return nullptr;
+    const auto taskbarIt = g_states.find(inputIt->second);
+    if (taskbarIt == g_states.end()) return nullptr;
+    taskbarHwnd = inputIt->second;
+    return taskbarIt->second.get();
+}
+
 // The shell can deliver a thumbnail WM_COMMAND to the taskbar-visible parent/proxy HWND rather
 // than the Compose child HWND passed to ThumbBarAddButtons. The owner thread and private command
 // IDs are stable across those peer windows, so use them to recover the registered taskbar state.
 TaskbarState* FindStateForCommand(HWND& hwnd) {
     const DWORD currentThread = GetCurrentThreadId();
     for (auto& [stateHwnd, state] : g_states) {
-        if (state->ownerThread == currentThread) {
+        if (state->ownerThread == currentThread || state->inputThread == currentThread) {
             hwnd = stateHwnd;
             return state.get();
         }
@@ -204,22 +226,25 @@ void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM w
 // with AWT/Skiko owning the underlying procedure.
 LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
     UINT_PTR, DWORD_PTR) {
-    const auto it = g_states.find(hwnd);
-    if (it != g_states.end()) {
+    HWND taskbarHwnd = nullptr;
+    if (TaskbarState* state = FindStateForWindow(hwnd, taskbarHwnd); state != nullptr) {
         if (message == WM_COMMAND) {
-            ReportObservedCommand(it->second.get(), kActionSubclassCommandObserved, wParam);
+            ReportObservedCommand(state, kActionSubclassCommandObserved, wParam);
         }
-        HandleTaskbarMessage(hwnd, *it->second, message, wParam, lParam);
+        HandleTaskbarMessage(taskbarHwnd, *state, message, wParam, lParam);
     }
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state) {
-    if (state.subclassInstalled) return;
-    state.subclassInstalled = SetWindowSubclass(
+    bool& installed = hwnd == state.inputHwnd && hwnd != state.taskbarHwnd
+        ? state.inputSubclassInstalled
+        : state.subclassInstalled;
+    if (installed) return;
+    installed = SetWindowSubclass(
         hwnd, TaskbarSubclassProc, kTaskbarSubclassId, 0) != FALSE;
     if (state.callback != nullptr) {
-        state.callback(state.subclassInstalled ? kActionSubclassInstalled : kActionSubclassInstallFailed);
+        state.callback(installed ? kActionSubclassInstalled : kActionSubclassInstallFailed);
     }
 }
 
@@ -230,23 +255,19 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
         if (message->message == WM_COMMAND) {
-            const auto stateIt = g_states.find(message->hwnd);
-            if (stateIt != g_states.end()) {
-                ReportObservedCommand(stateIt->second.get(), kActionCallWindowCommandObserved, message->wParam);
-            } else {
-                HWND stateHwnd = nullptr;
-                ReportObservedCommand(FindStateForCommand(stateHwnd), kActionCallWindowCommandObserved, message->wParam);
-            }
+            HWND stateHwnd = nullptr;
+            TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd);
+            if (state == nullptr) state = FindStateForCommand(stateHwnd);
+            ReportObservedCommand(state, kActionCallWindowCommandObserved, message->wParam);
         }
         const bool shouldHandle = message->message == g_taskbarButtonCreated ||
             message->message == WM_SETTINGCHANGE || message->message == WM_COMMAND ||
             message->message == WM_APPCOMMAND;
         if (shouldHandle) {
-            const auto it = g_states.find(message->hwnd);
-            if (it != g_states.end()) {
-                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam, message->lParam);
+            HWND stateHwnd = nullptr;
+            if (TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd); state != nullptr) {
+                HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
             } else if (IsTaskbarMediaMessage(message->message, message->wParam, message->lParam)) {
-                HWND stateHwnd = nullptr;
                 if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
                     HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
                 }
@@ -263,27 +284,26 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         auto* message = reinterpret_cast<MSG*>(lParam);
         if (message->message == WM_COMMAND) {
-            const auto stateIt = g_states.find(message->hwnd);
-            if (stateIt != g_states.end()) {
-                ReportObservedCommand(stateIt->second.get(), kActionQueuedCommandObserved, message->wParam);
-            } else {
-                HWND stateHwnd = nullptr;
-                ReportObservedCommand(FindStateForCommand(stateHwnd), kActionQueuedCommandObserved, message->wParam);
-            }
+            HWND stateHwnd = nullptr;
+            TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd);
+            if (state == nullptr) state = FindStateForCommand(stateHwnd);
+            ReportObservedCommand(state, kActionQueuedCommandObserved, message->wParam);
         }
         const bool isApplyMessage = message->message == kApplyButtonsMessage;
+        const bool isInputSubclassMessage = message->message == kInstallInputSubclassMessage;
         const bool isRetryTimer = message->message == WM_TIMER && message->wParam == kRetryTimerId;
         const bool isTaskbarCommand = IsTaskbarMediaMessage(message->message, message->wParam, message->lParam);
-        if (isApplyMessage || isRetryTimer || isTaskbarCommand) {
-            const auto it = g_states.find(message->hwnd);
-            if (it != g_states.end()) {
-                if (isApplyMessage) EnsureTaskbarSubclass(message->hwnd, *it->second);
-                HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam, message->lParam);
+        if (isApplyMessage || isInputSubclassMessage || isRetryTimer || isTaskbarCommand) {
+            HWND stateHwnd = nullptr;
+            if (TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd); state != nullptr) {
+                if (isApplyMessage || isInputSubclassMessage) EnsureTaskbarSubclass(message->hwnd, *state);
+                if (!isInputSubclassMessage) {
+                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
+                }
                 // Our registration/timer messages and private command IDs have no meaning to
                 // AWT. Prevent a queued thumbnail command from being dispatched a second time.
                 message->message = WM_NULL;
             } else if (isTaskbarCommand) {
-                HWND stateHwnd = nullptr;
                 if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
                     HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam, message->lParam);
                     message->message = WM_NULL;
@@ -321,6 +341,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     const wchar_t* previous, const wchar_t* play, const wchar_t* pause, const wchar_t* next,
     const wchar_t* previousTooltip, const wchar_t* playTooltip, const wchar_t* pauseTooltip,
     const wchar_t* nextTooltip, int isPlaying, ActionCallback callback) {
+    const HWND inputHwnd = hwnd;
     hwnd = ResolveTaskbarWindow(hwnd);
     if (hwnd == nullptr) return 0;
     if (g_taskbarButtonCreated == 0) g_taskbarButtonCreated = RegisterWindowMessageW(L"TaskbarButtonCreated");
@@ -329,30 +350,48 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     auto state = std::make_unique<TaskbarState>();
     state->callback = callback;
     state->isPlaying = isPlaying != 0;
+    state->taskbarHwnd = hwnd;
+    state->inputHwnd = inputHwnd;
     g_states.emplace(hwnd, std::move(state));
     // The Compose call is on AWT-EventQueue-0, but the HWND belongs to AWT-Windows. A
     // thread-specific call-window hook executes in that owner thread without replacing Skiko's
     // procedure, and also provides the required COM apartment for ITaskbarList3 calls.
     const DWORD ownerThread = GetWindowThreadProcessId(hwnd, nullptr);
     g_states.at(hwnd)->ownerThread = ownerThread;
+    const DWORD inputThread = GetWindowThreadProcessId(inputHwnd, nullptr);
+    g_states.at(hwnd)->inputThread = inputThread;
+    if (inputHwnd != hwnd) g_inputWindows.emplace(inputHwnd, hwnd);
     const HHOOK callWindowHook = SetWindowsHookExW(
         WH_CALLWNDPROC, TaskbarMessageHook, nullptr, ownerThread);
     if (callWindowHook == nullptr) {
-        g_states.erase(hwnd);
+        lazer_taskbar_remove(hwnd);
         return 0;
     }
     const HHOOK getMessageHook = SetWindowsHookExW(
         WH_GETMESSAGE, TaskbarGetMessageHook, nullptr, ownerThread);
     if (getMessageHook == nullptr) {
-        UnhookWindowsHookEx(callWindowHook);
-        g_states.erase(hwnd);
+        lazer_taskbar_remove(hwnd);
         return 0;
     }
     g_states.at(hwnd)->callWindowHook = callWindowHook;
     g_states.at(hwnd)->getMessageHook = getMessageHook;
+    if (inputHwnd != hwnd && inputThread != ownerThread) {
+        const HHOOK inputCallWindowHook = SetWindowsHookExW(
+            WH_CALLWNDPROC, TaskbarMessageHook, nullptr, inputThread);
+        const HHOOK inputGetMessageHook = inputCallWindowHook == nullptr ? nullptr : SetWindowsHookExW(
+            WH_GETMESSAGE, TaskbarGetMessageHook, nullptr, inputThread);
+        if (inputGetMessageHook == nullptr) {
+            if (inputCallWindowHook != nullptr) UnhookWindowsHookEx(inputCallWindowHook);
+            lazer_taskbar_remove(hwnd);
+            return 0;
+        }
+        g_states.at(hwnd)->inputCallWindowHook = inputCallWindowHook;
+        g_states.at(hwnd)->inputGetMessageHook = inputGetMessageHook;
+    }
     // Keep the callback alive while the owner thread receives the posted apply request.
     UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
         pauseTooltip, nextTooltip, isPlaying);
+    if (inputHwnd != hwnd) PostMessageW(inputHwnd, kInstallInputSubclassMessage, 0, 0);
     return 1;
 }
 
@@ -370,7 +409,11 @@ extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) 
     KillTimer(hwnd, kRetryTimerId);
     const auto it = g_states.find(hwnd);
     if (it == g_states.end()) return;
+    const HWND inputHwnd = it->second->inputHwnd;
     if (it->second->callWindowHook != nullptr) UnhookWindowsHookEx(it->second->callWindowHook);
     if (it->second->getMessageHook != nullptr) UnhookWindowsHookEx(it->second->getMessageHook);
+    if (it->second->inputCallWindowHook != nullptr) UnhookWindowsHookEx(it->second->inputCallWindowHook);
+    if (it->second->inputGetMessageHook != nullptr) UnhookWindowsHookEx(it->second->inputGetMessageHook);
+    if (inputHwnd != hwnd) g_inputWindows.erase(inputHwnd);
     g_states.erase(it);
 }
