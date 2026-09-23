@@ -15,9 +15,9 @@ constexpr int kActionPrevious = 1;
 constexpr int kActionPlayPause = 2;
 constexpr int kActionNext = 3;
 constexpr int kActionThemeChanged = 4;
-constexpr UINT_PTR kSubclassId = 0x4C617A65;
 constexpr UINT_PTR kRetryTimerId = 0x4C617A66;
 constexpr UINT kRetryIntervalMillis = 100;
+constexpr UINT kApplyButtonsMessage = WM_APP + 0x4C61;
 
 using ActionCallback = void(__stdcall*)(int action);
 
@@ -32,6 +32,7 @@ struct TaskbarState {
     std::wstring playTooltip;
     std::wstring pauseTooltip;
     std::wstring nextTooltip;
+    WNDPROC previousWindowProc = nullptr;
     bool isPlaying = false;
     bool buttonsAdded = false;
 
@@ -96,16 +97,19 @@ HRESULT ApplyButtons(HWND hwnd, TaskbarState& state) {
     return result;
 }
 
-LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
-    UINT_PTR, DWORD_PTR) {
+void RequestButtonApply(HWND hwnd) {
+    PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
+}
+
+LRESULT CALLBACK TaskbarWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     const auto it = g_states.find(hwnd);
-    if (it == g_states.end()) return DefSubclassProc(hwnd, message, wParam, lParam);
+    if (it == g_states.end()) return DefWindowProcW(hwnd, message, wParam, lParam);
     TaskbarState& state = *it->second;
 
     if (message == g_taskbarButtonCreated) {
         state.buttonsAdded = false;
         if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
-        return DefSubclassProc(hwnd, message, wParam, lParam);
+        return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
     }
     if (message == WM_TIMER && wParam == kRetryTimerId) {
         // Compose can create its AWT peer after Explorer already emitted TaskbarButtonCreated.
@@ -114,9 +118,14 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPA
         if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
         return 0;
     }
+    if (message == kApplyButtonsMessage) {
+        if (SUCCEEDED(ApplyButtons(hwnd, state))) KillTimer(hwnd, kRetryTimerId);
+        else SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
+        return 0;
+    }
     if (message == WM_SETTINGCHANGE) {
         if (state.callback != nullptr) state.callback(kActionThemeChanged);
-        return DefSubclassProc(hwnd, message, wParam, lParam);
+        return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
     }
     if (message == WM_COMMAND && HIWORD(wParam) == THBN_CLICKED) {
         const UINT command = LOWORD(wParam);
@@ -129,7 +138,7 @@ LRESULT CALLBACK TaskbarSubclassProc(HWND hwnd, UINT message, WPARAM wParam, LPA
             return 0;
         }
     }
-    return DefSubclassProc(hwnd, message, wParam, lParam);
+    return CallWindowProcW(state.previousWindowProc, hwnd, message, wParam, lParam);
 }
 
 bool UpdateState(HWND hwnd, const wchar_t* previous, const wchar_t* play, const wchar_t* pause,
@@ -147,7 +156,8 @@ bool UpdateState(HWND hwnd, const wchar_t* previous, const wchar_t* play, const 
     state.pauseTooltip = pauseTooltip == nullptr ? L"" : pauseTooltip;
     state.nextTooltip = nextTooltip == nullptr ? L"" : nextTooltip;
     state.isPlaying = isPlaying;
-    return SUCCEEDED(ApplyButtons(hwnd, state));
+    RequestButtonApply(hwnd);
+    return true;
 }
 
 } // namespace
@@ -166,18 +176,21 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     state->callback = callback;
     state->isPlaying = isPlaying != 0;
     g_states.emplace(hwnd, std::move(state));
-    if (!SetWindowSubclass(hwnd, TaskbarSubclassProc, kSubclassId, 0)) {
+    // SetWindowSubclass may only be called from the HWND's creator thread. Compose invokes this
+    // entry point from AWT-EventQueue-0 while the native peer is owned by AWT-Windows, so install
+    // a native procedure directly and marshal taskbar COM work back with PostMessage.
+    SetLastError(0);
+    const auto previousWindowProc = reinterpret_cast<WNDPROC>(
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TaskbarWindowProc)));
+    if (previousWindowProc == nullptr && GetLastError() != 0) {
         g_states.erase(hwnd);
         return 0;
     }
-    // Explorer accepts ThumbBarAddButtons only after it has sent TaskbarButtonCreated. The
-    // initial call is merely an opportunistic fast path; the installed subclass will retry when
-    // that message arrives. Report success once the subclass is active so Kotlin keeps the
-    // bridge and its callback alive even when this early add is rejected.
-    if (!UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
-            pauseTooltip, nextTooltip, isPlaying)) {
-        SetTimer(hwnd, kRetryTimerId, kRetryIntervalMillis, nullptr);
-    }
+    g_states.at(hwnd)->previousWindowProc = previousWindowProc;
+    // Report success once the procedure is active so Kotlin keeps the bridge and its callback
+    // alive while the owner thread receives the posted apply request.
+    UpdateState(hwnd, previous, play, pause, next, previousTooltip, playTooltip,
+        pauseTooltip, nextTooltip, isPlaying);
     return 1;
 }
 
@@ -192,6 +205,12 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_update(HWND hwnd,
 extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) {
     if (hwnd == nullptr) return;
     KillTimer(hwnd, kRetryTimerId);
-    RemoveWindowSubclass(hwnd, TaskbarSubclassProc, kSubclassId);
-    g_states.erase(hwnd);
+    const auto it = g_states.find(hwnd);
+    if (it == g_states.end()) return;
+    const WNDPROC previousWindowProc = it->second->previousWindowProc;
+    const auto currentWindowProc = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(hwnd, GWLP_WNDPROC));
+    if (currentWindowProc == TaskbarWindowProc && previousWindowProc != nullptr) {
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(previousWindowProc));
+    }
+    g_states.erase(it);
 }
