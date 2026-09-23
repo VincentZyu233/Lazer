@@ -52,7 +52,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "dev.naominet.lazer"
-            packageVersion = "1.2.0"
+            packageVersion = rootProject.extra["lazerPackageVersion"] as String
             windows {
                 iconFile = project.file("src/main/resources/icon.ico")
             }

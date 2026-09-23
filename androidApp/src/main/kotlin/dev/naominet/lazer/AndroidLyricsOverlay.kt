@@ -66,13 +66,11 @@ import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -152,7 +150,7 @@ internal fun AndroidLyricsViewport(
     }
     val colors = MaterialTheme.colorScheme
     val clipboard = LocalClipboard.current
-    val haptics = LocalHapticFeedback.current
+    val answerTap = rememberTapAnswer()
     val selectionScope = rememberCoroutineScope()
     val selection = remember(track?.id) { AndroidLyricSelection() }
     val selectionKeys = remember(displayLines) { lyricLineKeys(displayLines) }
@@ -174,7 +172,7 @@ internal fun AndroidLyricsViewport(
         selectionScope.launch {
             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(tr("lyrics.select.copy"), text)))
             selection.copied = true
-            haptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
+            answerTap()
             delay(1_400L)
             selection.copied = false
         }
@@ -261,7 +259,7 @@ private fun AnimatedLyricsViewport(
 ) {
     val density = LocalDensity.current
     val colors = MaterialTheme.colorScheme
-    val haptics = LocalHapticFeedback.current
+    val answerTap = rememberTapAnswer()
     val isDark = colors.background.luminance() < 0.5f
     // This is a value parameter, not snapshot state. Recompute from each playback update rather
     // than remembering a derived-state lambda that captures the first position for these lines.
@@ -650,7 +648,7 @@ private fun AnimatedLyricsViewport(
                         onLongClick = {
                             if (line.text.isNotBlank()) {
                                 if (!selection.state.isActive) {
-                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    answerTap()
                                 }
                                 selection.waveOrigin = -1
                                 selection.dragArmedAt = System.currentTimeMillis()

@@ -161,6 +161,8 @@ class AndroidGatewayController(context: Context) {
         private set
     var isSettingsVisible by mutableStateOf(false)
         private set
+    var isAboutVisible by mutableStateOf(false)
+        private set
     var isDark by mutableStateOf(settings.isDark)
         private set
     var useSystemMonetColors by mutableStateOf(settings.useSystemMonetColors)
@@ -204,6 +206,8 @@ class AndroidGatewayController(context: Context) {
     var playbackInterface by mutableStateOf(settings.playbackInterface)
         private set
     var audioReactiveLevels by mutableStateOf(settings.audioReactiveLevels)
+        private set
+    var hapticLevel by mutableStateOf(settings.hapticLevel)
         private set
     val independentPlayback: Boolean
         get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
@@ -974,6 +978,7 @@ class AndroidGatewayController(context: Context) {
         }
         destination = value
         isSettingsVisible = false
+        isAboutVisible = false
         closeArtist()
         closePlaylist()
         message = null
@@ -985,6 +990,15 @@ class AndroidGatewayController(context: Context) {
 
     fun closeSettings() {
         isSettingsVisible = false
+        isAboutVisible = false
+    }
+
+    fun openAbout() {
+        isAboutVisible = true
+    }
+
+    fun closeAbout() {
+        isAboutVisible = false
     }
 
     fun toggleTheme() {
@@ -1059,6 +1073,11 @@ class AndroidGatewayController(context: Context) {
         audioReactiveLevels = enabled
         settings.audioReactiveLevels = enabled
         AndroidPlaybackConnection.updateAudioLevels(appContext)
+    }
+
+    fun updateHapticLevel(level: AndroidHapticLevel) {
+        hapticLevel = level
+        settings.hapticLevel = level
     }
 
     /** Shown when the user asks for the audio-reactive indicator but withholds the permission. */

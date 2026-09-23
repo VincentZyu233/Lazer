@@ -1226,6 +1226,9 @@ private fun DesktopSettingsPage(
                         Text(tr("settings.cookie.read"))
                     }
                 }
+                // The same sheet the phone shows, ending the settings column instead of pushing a
+                // page: on a desktop window there is nothing to navigate back from.
+                LazerAboutSection(heading = tr("about.title"))
         }
     }
     if (cacheDialogVisible) {
