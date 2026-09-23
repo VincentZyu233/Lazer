@@ -418,19 +418,18 @@ internal fun LiquidGlassIconButton(
 }
 
 @Composable
-internal fun LiquidGlassPillButton(
+private fun LiquidGlassPillButton(
     onClick: () -> Unit,
     glass: LazerLiquidGlass,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    minHeight: Dp = 50.dp,
     tint: Color = MaterialTheme.colorScheme.primary,
     content: @Composable RowScope.() -> Unit,
 ) {
     if (!glass.isEnabled) {
         Button(
             onClick = onClick,
-            modifier = modifier.heightIn(min = minHeight),
+            modifier = modifier,
             enabled = enabled,
             shape = RoundedCornerShape(100.dp),
             content = content,
@@ -462,7 +461,7 @@ internal fun LiquidGlassPillButton(
                     tint = tint,
                     pressProgress = pressProgress,
                 )
-                .heightIn(min = minHeight)
+                .heightIn(min = 50.dp)
                 .then(
                     if (focused) Modifier.border(2.dp, colors.onPrimary, shape) else Modifier,
                 )

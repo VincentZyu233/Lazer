@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material.icons.outlined.Close
@@ -823,6 +824,7 @@ private fun LyricSelectionPill(
                 )
             }
         }
+        Spacer(Modifier.weight(1f))
         LiquidGlassIconButton(
             onClick = onSelectAll,
             contentDescription = tr("lyrics.select.all"),
@@ -832,20 +834,26 @@ private fun LyricSelectionPill(
         ) {
             Icon(Icons.Outlined.SelectAll, null, Modifier.size(22.dp))
         }
-        // The action takes whatever width is left. Row measures unweighted children first, so a
-        // button sized by its own text would leave the close control with nothing and clip it.
-        LiquidGlassPillButton(
+        // The action is an icon like its neighbours: a text capsule has to be measured before the
+        // close control gets its turn, and at large font scales it ate the space the icons needed.
+        LiquidGlassIconButton(
             onClick = onCopy,
+            contentDescription = tr("lyrics.select.copy"),
             glass = glass,
-            modifier = Modifier.weight(1f),
-            minHeight = LyricSelectionControlHeight,
+            size = LyricSelectionControlHeight,
+            tint = colors.primary,
         ) {
-            Text(
-                tr("lyrics.select.copy"),
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Crossfade(
+                targetState = copied,
+                animationSpec = tween(220, easing = LazerTokens.Motion.pageEasing),
+                label = "lyric-selection-copy-icon",
+            ) { done ->
+                Icon(
+                    if (done) Icons.Filled.Check else Icons.Outlined.ContentCopy,
+                    null,
+                    Modifier.size(22.dp),
+                )
+            }
         }
         LiquidGlassIconButton(
             onClick = onDismiss,
