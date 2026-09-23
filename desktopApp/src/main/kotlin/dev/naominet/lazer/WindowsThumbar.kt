@@ -9,9 +9,9 @@ import java.awt.EventQueue
 import java.awt.Window
 import java.io.File
 
-internal const val THUMBAR_CMD_PREVIOUS = 0x1001
-internal const val THUMBAR_CMD_PLAYPAUSE = 0x1002
-internal const val THUMBAR_CMD_NEXT = 0x1003
+internal const val THUMBAR_CMD_PREVIOUS = 40001
+internal const val THUMBAR_CMD_PLAYPAUSE = 40002
+internal const val THUMBAR_CMD_NEXT = 40003
 
 internal fun thumbarActionFromCommand(commandId: Int): MediaControlAction? = when (commandId) {
     THUMBAR_CMD_PREVIOUS -> MediaControlAction.Previous

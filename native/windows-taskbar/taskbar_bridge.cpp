@@ -10,9 +10,13 @@
 
 namespace {
 
-constexpr UINT kCommandPrevious = 0x1001;
-constexpr UINT kCommandPlayPause = 0x1002;
-constexpr UINT kCommandNext = 0x1003;
+// Keep these in Chromium/Electron's thumbar range. The IDs only need to be
+// unique for the target HWND, but using the established range avoids AWT's
+// command IDs and matches the Shell integration used by Electron.
+constexpr UINT kCommandPrevious = 40001;
+constexpr UINT kCommandPlayPause = 40002;
+constexpr UINT kCommandNext = 40003;
+constexpr size_t kMaxThumbbarButtons = 7;
 constexpr int kActionPrevious = 1;
 constexpr int kActionPlayPause = 2;
 constexpr int kActionNext = 3;
@@ -74,11 +78,12 @@ std::unordered_map<HWND, HWND> g_peerWindows;
 UINT g_taskbarButtonCreated = 0;
 
 HWND ResolveTaskbarWindow(HWND hwnd) {
-    if (hwnd == nullptr) return nullptr;
-    // Native.getWindowPointer can expose a Compose rendering child. The shell owns thumbnail
-    // buttons on the taskbar-visible root owner and sends its commands to that top-level peer.
-    const HWND rootOwner = GetAncestor(hwnd, GA_ROOTOWNER);
-    return rootOwner == nullptr ? hwnd : rootOwner;
+    // ITaskbarList3 delivers THBN_CLICKED to the exact HWND supplied to
+    // ThumbBarAddButtons. Native.getWindowPointer(Window) is the AWT window
+    // peer that owns that taskbar entry. Promoting it to GA_ROOTOWNER can make
+    // the toolbar visible while redirecting the notification to a different
+    // AWT window, so deliberately retain the original peer HWND here.
+    return IsWindow(hwnd) ? hwnd : nullptr;
 }
 
 HICON LoadIconFile(const wchar_t* path) {
@@ -119,11 +124,19 @@ HRESULT ApplyButtons(HWND hwnd, TaskbarState& state) {
     const HRESULT taskbarResult = EnsureTaskbar(state);
     if (FAILED(taskbarResult)) return taskbarResult;
 
-    THUMBBUTTON buttons[3]{};
+    // Windows fixes the button count after the initial AddButtons call. Claim
+    // all seven supported slots just as Chromium does; unused slots stay
+    // hidden and do not affect the three visible media controls.
+    THUMBBUTTON buttons[kMaxThumbbarButtons]{};
     FillButton(buttons[0], kCommandPrevious, state.previousIcon, state.previousTooltip.c_str());
     FillButton(buttons[1], kCommandPlayPause, state.isPlaying ? state.pauseIcon : state.playIcon,
         (state.isPlaying ? state.pauseTooltip : state.playTooltip).c_str());
     FillButton(buttons[2], kCommandNext, state.nextIcon, state.nextTooltip.c_str());
+    for (size_t index = 3; index < kMaxThumbbarButtons; ++index) {
+        buttons[index].iId = kCommandPrevious + static_cast<UINT>(index);
+        buttons[index].dwMask = THB_FLAGS;
+        buttons[index].dwFlags = THBF_HIDDEN;
+    }
 
     const HRESULT result = state.buttonsAdded
         ? state.taskbar->ThumbBarUpdateButtons(hwnd, ARRAYSIZE(buttons), buttons)
