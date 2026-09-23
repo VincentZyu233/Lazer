@@ -27,7 +27,6 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
@@ -258,7 +257,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 private const val PAGE_TRANSITION_MILLIS = LazerTokens.Motion.pageMillis
-private val LazerMotionEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
+private val LazerMotionEasing = LazerTokens.Motion.pageEasing
 
 // Extra bottom content padding for scrollable pages so their last rows stay reachable behind the
 // floating liquid-glass bottom controls.
@@ -266,8 +265,12 @@ private val LocalAndroidContentBottomInset = compositionLocalOf { 0.dp }
 
 private data class AndroidCoverSaveRequest(val url: String, val title: String)
 
+/** A text field a long press offers to the clipboard. The sheet asks first, as saving a cover does. */
+private data class AndroidCopyTextRequest(val titleKey: String, val value: String)
+
 private val LocalAndroidOpenArtists = androidx.compose.runtime.staticCompositionLocalOf<(List<Artist>) -> Unit> { {} }
 private val LocalAndroidRequestCoverSave = androidx.compose.runtime.staticCompositionLocalOf<(AndroidCoverSaveRequest) -> Unit> { {} }
+private val LocalAndroidRequestCopyText = androidx.compose.runtime.staticCompositionLocalOf<(AndroidCopyTextRequest) -> Unit> { {} }
 
 private enum class AndroidMainPageKind(val depth: Int) {
     ROOT(0),
@@ -346,7 +349,7 @@ private fun AdaptiveDetailHeader(artwork: @Composable () -> Unit, content: @Comp
 }
 
 @Composable
-private fun LiquidGlassIconButton(
+internal fun LiquidGlassIconButton(
     onClick: () -> Unit,
     contentDescription: String,
     glass: LazerLiquidGlass,
@@ -415,18 +418,19 @@ private fun LiquidGlassIconButton(
 }
 
 @Composable
-private fun LiquidGlassPillButton(
+internal fun LiquidGlassPillButton(
     onClick: () -> Unit,
     glass: LazerLiquidGlass,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    minHeight: Dp = 50.dp,
     tint: Color = MaterialTheme.colorScheme.primary,
     content: @Composable RowScope.() -> Unit,
 ) {
     if (!glass.isEnabled) {
         Button(
             onClick = onClick,
-            modifier = modifier,
+            modifier = modifier.heightIn(min = minHeight),
             enabled = enabled,
             shape = RoundedCornerShape(100.dp),
             content = content,
@@ -458,7 +462,7 @@ private fun LiquidGlassPillButton(
                     tint = tint,
                     pressProgress = pressProgress,
                 )
-                .heightIn(min = 50.dp)
+                .heightIn(min = minHeight)
                 .then(
                     if (focused) Modifier.border(2.dp, colors.onPrimary, shape) else Modifier,
                 )
@@ -595,19 +599,19 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     val context = LocalContext.current
     val controller = remember(context.applicationContext) { AndroidGatewayController(context.applicationContext) }
     var pendingQrAuthorizationUrl by remember { mutableStateOf<String?>(null) }
-    var scanMessage by remember { mutableStateOf<String?>(null) }
+    var rootMessage by remember { mutableStateOf<String?>(null) }
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         when (val target = result.contents?.let(::classifyScannedCode)) {
             is ScannedCode.ListenTogether -> controller.joinListenTogether(target.raw)
             is ScannedCode.ClientLogin -> {
                 if (controller.currentSessionCookie == null) {
-                    scanMessage = tr("scan.login_required")
+                    rootMessage = tr("scan.login_required")
                     controller.openLogin()
                 } else {
                     pendingQrAuthorizationUrl = target.url
                 }
             }
-            ScannedCode.Unsupported -> scanMessage = tr("scan.unsupported")
+            ScannedCode.Unsupported -> rootMessage = tr("scan.unsupported")
             null -> Unit
         }
     }
@@ -620,6 +624,9 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
     var coverSaveRequest by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
     var coverSaveTarget by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
+    var copyTextRequest by remember { mutableStateOf<AndroidCopyTextRequest?>(null) }
+    val clipboard = LocalClipboard.current
+    val clipboardScope = rememberCoroutineScope()
     val coverDocumentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
         val request = coverSaveTarget
         coverSaveTarget = null
@@ -656,10 +663,10 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     LaunchedEffect(initialListenTogetherInvitation) {
         initialListenTogetherInvitation?.let(controller::joinListenTogether)
     }
-    LaunchedEffect(scanMessage) {
-        val shown = scanMessage ?: return@LaunchedEffect
+    LaunchedEffect(rootMessage) {
+        val shown = rootMessage ?: return@LaunchedEffect
         kotlinx.coroutines.delay(3_000L)
-        if (scanMessage == shown) scanMessage = null
+        if (rootMessage == shown) rootMessage = null
     }
     LaunchedEffect(playback.track?.id) { playback.track?.id?.let(controller::loadLyrics) }
 
@@ -744,6 +751,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                 }
             },
             LocalAndroidRequestCoverSave provides { coverSaveRequest = it },
+            LocalAndroidRequestCopyText provides { copyTextRequest = it },
         ) {
         val colors = MaterialTheme.colorScheme
         val launchScanner = {
@@ -770,9 +778,10 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             )
         }
         val view = LocalView.current
+        // Picking a song is a playback decision, not a navigation one: the mini player already shows
+        // what is playing, and the reader opens the full page from there when they want it.
         val playFromQueue: (List<AndroidTrack>, AndroidTrack) -> Unit = { queue, track ->
             controller.play(queue, track)
-            playerVisible = true
         }
         val shareListenTogether: (String) -> Unit = { url ->
             context.startActivity(
@@ -1084,7 +1093,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                     glass = liquidGlass,
                 )
             }
-            scanMessage?.let { text ->
+            rootMessage?.let { text ->
                 MessageBanner(
                     text = text,
                     modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(16.dp),
@@ -1179,6 +1188,19 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                     coverSaveRequest = null
                     coverSaveTarget = request
                     coverDocumentLauncher.launch(androidCoverFileName(request.title))
+                },
+            )
+            CopyTextSheet(
+                request = copyTextRequest,
+                onDismiss = { copyTextRequest = null },
+                onConfirm = { request ->
+                    copyTextRequest = null
+                    clipboardScope.launch {
+                        clipboard.setClipEntry(
+                            ClipEntry(ClipData.newPlainText(tr(request.titleKey), request.value)),
+                        )
+                        rootMessage = tr("song.copy.done", request.value)
+                    }
                 },
             )
             if ((context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
@@ -3966,22 +3988,34 @@ private fun artworkGestures(
         onLongClick = onLongPress,
         onClick = onClick,
     )
-    onLongPress != null -> Modifier.pointerInput(url, label) {
-        awaitEachGesture {
-            val down = awaitFirstDown(requireUnconsumed = false)
-            if (awaitLongPressOrCancellation(down.id) == null) return@awaitEachGesture
-            onLongPress()
-            // Consume through the release: the clickable around the artwork would otherwise start
-            // playing the track as the finger leaves the screen.
-            var pressed = true
-            while (pressed) {
-                val event = awaitPointerEvent()
-                pressed = event.changes.any { it.pressed }
-                event.changes.forEach { it.consume() }
-            }
+    onLongPress != null -> Modifier.onLongPressOnly(url + label, onLongPress)
+    else -> Modifier
+}
+
+/**
+ * A long press that owns the gesture through the release, so the release is never read as a tap by
+ * the clickable around it — which would otherwise start playing the track or open the artist page.
+ */
+private fun Modifier.onLongPressOnly(key: Any, onLongPress: () -> Unit): Modifier = pointerInput(key) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        if (awaitLongPressOrCancellation(down.id) == null) return@awaitEachGesture
+        onLongPress()
+        var pressed = true
+        while (pressed) {
+            val event = awaitPointerEvent()
+            pressed = event.changes.any { it.pressed }
+            event.changes.forEach { it.consume() }
         }
     }
-    else -> Modifier
+}
+
+/** Long press on a piece of text worth copying. It asks first, exactly as saving a cover does. */
+@Composable
+private fun Modifier.copyOnLongPress(titleKey: String, value: String): Modifier {
+    val requestCopy = LocalAndroidRequestCopyText.current
+    val request = rememberUpdatedState(AndroidCopyTextRequest(titleKey, value))
+    return onLongPressOnly(value) { requestCopy(request.value) }
 }
 
 @Composable
@@ -4486,12 +4520,18 @@ private fun AndroidArtistNames(
     style: TextStyle,
     color: Color,
     modifier: Modifier = Modifier,
+    offerCopy: Boolean = false,
 ) {
     val available = artists.filter { it.id > 0L && it.name.isNotBlank() }
     val openArtists = LocalAndroidOpenArtists.current
+    val names = available.joinToString(" / ") { it.name }.ifBlank { fallback }
     Text(
-        text = available.joinToString(" / ") { it.name }.ifBlank { fallback },
-        modifier = modifier.then(if (available.isNotEmpty()) Modifier.clickable { openArtists(available) } else Modifier),
+        text = names,
+        modifier = modifier
+            .then(if (available.isNotEmpty()) Modifier.clickable { openArtists(available) } else Modifier)
+            .then(
+                if (offerCopy) Modifier.copyOnLongPress("song.copy.artist", names) else Modifier,
+            ),
         style = style,
         color = color,
         maxLines = 1,
@@ -4601,6 +4641,7 @@ private fun NowPlayingPage(
                         Spacer(Modifier.height(6.dp))
                         Text(
                             track.title,
+                            modifier = Modifier.copyOnLongPress("song.copy.title", track.title),
                             color = colors.onBackground,
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
@@ -4608,7 +4649,11 @@ private fun NowPlayingPage(
                             textAlign = TextAlign.Center,
                         )
                         TranslatedTrackTitle(track.translatedTitle)
-                        AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant)
+                        AndroidArtistNames(
+                            track.artists, track.artist,
+                            MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant,
+                            offerCopy = true,
+                        )
                         Spacer(Modifier.weight(1f))
                         Column(
                             Modifier.fillMaxWidth()
@@ -4683,6 +4728,7 @@ private fun NowPlayingPage(
                         lyricGlowEnabled = lyricGlowEnabled,
                         lyricFontSizeSp = lyricFontSizeSp,
                         showFullLyrics = showFullLyrics,
+                        glass = glass,
                         onSeek = onSeek,
                         modifier = Modifier.weight(0.56f).fillMaxHeight().padding(horizontal = 4.dp),
                     )
@@ -4697,10 +4743,19 @@ private fun NowPlayingPage(
             var coverExpandedRect by remember { mutableStateOf<Rect?>(null) }
             var coverCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
             var coverExpanded by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+            // Once the reader picks a layout for this song, the page stops second-guessing it.
+            var coverLayoutPicked by remember(track.id) { mutableStateOf(false) }
+            // A song with nothing to sing rests with the cover open instead of a small artwork above
+            // an empty pane. This is derived, not written into state: right after a track change the
+            // previous song's lines are still in `lyricLines`, and a still-fetching song looks empty
+            // too. Deciding from either would fly the cover open and snap it back once the fetch
+            // lands, tearing the lyric sheet out of composition and rebuilding it in between.
+            val coverOpen = coverExpanded ||
+                (!coverLayoutPicked && !lyricsLoading && lyricLines.isEmpty() && lyricsMessage != null)
             val coverProgress = remember { Animatable(0f) }
-            LaunchedEffect(coverExpanded) {
+            LaunchedEffect(coverOpen) {
                 coverProgress.animateTo(
-                    if (coverExpanded) 1f else 0f,
+                    if (coverOpen) 1f else 0f,
                     tween(durationMillis = 420, easing = LazerMotionEasing),
                 )
             }
@@ -4749,6 +4804,7 @@ private fun NowPlayingPage(
                         ) {
                             Text(
                                 track.title,
+                                modifier = Modifier.copyOnLongPress("song.copy.title", track.title),
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -4757,6 +4813,7 @@ private fun NowPlayingPage(
                             AndroidArtistNames(
                                 track.artists, track.artist,
                                 MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
+                                offerCopy = true,
                             )
                         }
                         // The liked state belongs to the song, so it stays beside its title
@@ -4795,7 +4852,8 @@ private fun NowPlayingPage(
                                 lyricGlowEnabled = lyricGlowEnabled,
                                 lyricFontSizeSp = lyricFontSizeSp,
                                 showFullLyrics = showFullLyrics,
-                                onSeek = { if (!coverExpanded) onSeek(it) },
+                                glass = glass,
+                                onSeek = { if (!coverOpen) onSeek(it) },
                                 modifier = Modifier.fillMaxSize()
                                     .padding(top = 15.dp, bottom = 15.dp)
                                     .graphicsLayer {
@@ -4928,8 +4986,11 @@ private fun NowPlayingPage(
                             }
                             .combinedClickable(
                                 role = Role.Button,
-                                onClickLabel = tr(if (coverExpanded) "player.cover.collapse" else "player.cover.expand"),
-                                onClick = { coverExpanded = !coverExpanded },
+                                onClickLabel = tr(if (coverOpen) "player.cover.collapse" else "player.cover.expand"),
+                                onClick = {
+                                    coverLayoutPicked = true
+                                    coverExpanded = !coverOpen
+                                },
                                 onLongClick = {
                                     val url = track.coverUrl
                                     if (!url.isNullOrBlank()) {
@@ -5070,6 +5131,44 @@ private fun CoverSaveSheet(
                 ThemeTextButton(onClick = onDismiss) { Text(tr("cover.save.cancel")) }
                 ThemeButton(onClick = { onConfirm(request) }, cornerRadius = 12.dp) {
                     Text(tr("cover.save.confirm"))
+                }
+            }
+        }
+    }
+}
+
+/** The same question the artwork asks, for the song title and the artist names. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun CopyTextSheet(
+    request: AndroidCopyTextRequest?,
+    onDismiss: () -> Unit,
+    onConfirm: (AndroidCopyTextRequest) -> Unit,
+) {
+    request ?: return
+    val colors = MaterialTheme.colorScheme
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = colors.surface,
+        contentColor = colors.onSurface,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(tr(request.titleKey), style = MaterialTheme.typography.headlineSmall)
+            Text(
+                tr("song.copy.hint", request.value),
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                ThemeTextButton(onClick = onDismiss) { Text(tr("song.copy.cancel")) }
+                ThemeButton(onClick = { onConfirm(request) }, cornerRadius = 12.dp) {
+                    Text(tr("song.copy.confirm"))
                 }
             }
         }

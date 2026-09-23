@@ -12,7 +12,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -47,6 +46,18 @@ import kotlin.math.roundToLong
 
 private val MinimumLyricGlowOverflow = 36.dp
 
+/** Brightness of the line being sung. Below opaque so glow and cover art still read through it. */
+const val LyricActiveLineAlpha = 0.85f
+
+/**
+ * AMLL's line-focus spring: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so
+ * stiffness and damping are divided by mass. Selection ink uses the same pair, which is what makes
+ * marking a line feel like the same mechanism as the sheet following the song.
+ */
+internal const val LyricFocusDampingRatio = 0.884f
+internal fun lyricFocusStiffness(speed: LyricAnimationSpeed): Float =
+    50f * speed.scrollMultiplier.toFloat()
+
 /** Enlarges only the render layer; the lyric keeps its original measured row size. */
 private fun Modifier.expandLayerForGlow(padding: Dp): Modifier = layout { measurable, constraints ->
     val paddingPx = padding.roundToPx()
@@ -67,11 +78,9 @@ private fun Modifier.expandLayerForGlow(padding: Dp): Modifier = layout { measur
 fun animatedLyricFocus(active: Boolean, speed: LyricAnimationSpeed): Float {
     val focus by animateFloatAsState(
         if (active) 1f else 0f,
-        // AMLL: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so divide
-        // stiffness/damping by mass and use the equivalent damping ratio.
         spring(
-            dampingRatio = 0.884f,
-            stiffness = (50.0 * speed.scrollMultiplier).toFloat(),
+            dampingRatio = LyricFocusDampingRatio,
+            stiffness = lyricFocusStiffness(speed),
         ),
         label = "lyric focus",
     )
@@ -117,8 +126,11 @@ fun AmllLyricText(
         shaderShadowRadius.times(3f),
         MinimumLyricGlowOverflow,
     )
-    var layoutResult by remember(text, style, textAlign, maxLines, overflow) {
-        mutableStateOf<TextLayoutResult?>(null)
+    // onTextLayout is called during measure, before the draw pass. Keep the result in a stable
+    // holder so custom drawing sees the layout measured for this frame instead of the state value
+    // from the previous frame.
+    val layoutResult = remember(text, style, textAlign, maxLines, overflow) {
+        LatestLyricLayout()
     }
     val glyphs = remember(text, words) { buildTimedLyricGlyphs(text, words) }
     // AMLL pauses a line's word/mask animation when that line is disabled. Keep the last active
@@ -158,30 +170,12 @@ fun AmllLyricText(
         TextStyle(textAlign = textAlign ?: TextAlign.Unspecified),
     )
     val layoutStyle = alignedStyle.merge(TextStyle(color = Color.Transparent))
-    val laidOutGlyphs = remember(layoutResult, glyphs) {
-        layoutResult?.let { buildLaidOutGlyphs(it, glyphs) }.orEmpty()
-    }
-    val timedGlyphs = remember(laidOutGlyphs) {
-        laidOutGlyphs.filter { it.timing.wordIndex >= 0 }
-    }
-    val laidOutWords = remember(layoutResult, timedGlyphs, words) {
-        layoutResult?.let { buildLaidOutWords(it, timedGlyphs, words) }.orEmpty()
-    }
-    // AMLL gives every timed word its own moving mask. The fade is half a word-height wide and
-    // travels linearly from the word's start to end time, rather than clipping one global line.
-    val maskWords = remember(laidOutWords) {
-        var cachedPosition = Long.MIN_VALUE
-        var cachedMasks = emptyList<LyricWordMask>()
-        val compute: () -> List<LyricWordMask> = {
-            val position = animatedPosition.value.roundToLong()
-            if (position != cachedPosition) {
-                cachedPosition = position
-                cachedMasks = buildWordMasks(laidOutWords, position)
-            }
-            cachedMasks
-        }
-        compute
-    }
+    // onTextLayout fires during measure, after composition has already read layoutResult, so any
+    // data derived from that state in composition lags the text on the canvas by a frame. Both
+    // shortcuts were visible at a line change: drawing unmasked flashed the line bright, holding it
+    // at its dim base flashed it grey. Resolving against the layout actually being drawn keeps the
+    // mask and the glyphs in the same frame.
+    val timedLayout = remember { TimedLyricLayout() }
 
     Box(modifier) {
         if (temporaryGlow || (glowEnabled && (currentLine || lineFocus > 0.001f))) {
@@ -202,15 +196,20 @@ fun AmllLyricText(
                     }
                     .drawBehind {
                         if (!temporaryGlow && lineFocus <= 0.001f) return@drawBehind
-                        val measured = layoutResult ?: return@drawBehind
+                        val measured = layoutResult.value ?: return@drawBehind
                         drawRect(color = Color.Transparent, blendMode = BlendMode.Clear)
+                        val timed = timedLayout.resolve(measured, glyphs, words)
                         val inset = glowOverflowPadding.toPx()
                         translate(left = inset, top = inset) {
                             drawLyricShaderShadow(
                                 layout = measured,
                                 // Click feedback lights the whole line, including before seek completes.
-                                hasTimedGlyphs = !temporaryGlow && timedGlyphs.isNotEmpty(),
-                                wordMasks = if (temporaryGlow) emptyList() else maskWords(),
+                                hasTimedGlyphs = !temporaryGlow && timed.hasTimedGlyphs,
+                                wordMasks = if (temporaryGlow) {
+                                    emptyList()
+                                } else {
+                                    timed.masksAt(animatedPosition.value.roundToLong(), speed)
+                                },
                                 shadowColor = shadowColor,
                             )
                         }
@@ -234,30 +233,85 @@ fun AmllLyricText(
                     clip = false
                 }
                 .drawWithContent {
-                val measured = layoutResult
+                val measured = layoutResult.value
                 if (measured == null) {
                     drawContent()
-                } else if (words.isEmpty() || laidOutGlyphs.none { it.timing.wordIndex >= 0 }) {
-                    drawText(measured, color = color)
-                } else if (!active && effectStrength.value <= 0.001f) {
-                    drawText(measured, color = color)
                 } else {
-                    drawAmllGlyphs(
-                        layout = measured,
-                        hasTimedGlyphs = timedGlyphs.isNotEmpty(),
-                        wordMasks = maskWords(),
-                        color = color,
-                        effectStrength = effectStrength.value,
-                    )
+                    val timed = timedLayout.resolve(measured, glyphs, words)
+                    if (words.isEmpty() || !timed.hasTimedGlyphs) {
+                        drawText(measured, color = color)
+                    } else if (!active && effectStrength.value <= 0.001f) {
+                        drawText(measured, color = color)
+                    } else {
+                        drawAmllGlyphs(
+                            layout = measured,
+                            hasTimedGlyphs = true,
+                            wordMasks = timed.masksAt(animatedPosition.value.roundToLong(), speed),
+                            color = color,
+                            effectStrength = effectStrength.value,
+                        )
+                    }
                 }
             },
             style = layoutStyle,
             overflow = overflow,
             maxLines = maxLines,
             onTextLayout = { result ->
-                if (layoutResult != result) layoutResult = result
+                layoutResult.value = result
             },
         )
+    }
+}
+
+private class LatestLyricLayout {
+    var value: TextLayoutResult? = null
+}
+
+/**
+ * Lazily resolves the timed glyph geometry against the layout that is actually being drawn.
+ * Keeping this out of composition prevents a layout callback from leaving the mask one frame
+ * behind the BasicText content.
+ */
+private class TimedLyricLayout {
+    private var sourceLayout: TextLayoutResult? = null
+    private var sourceGlyphs: List<TimedLyricGlyph> = emptyList()
+    private var sourceWords: List<TimedLyricWord> = emptyList()
+    private var timedGlyphs: List<LaidOutLyricGlyph> = emptyList()
+    private var laidOutWords: List<LaidOutLyricWord> = emptyList()
+    private var cachedPosition = Long.MIN_VALUE
+    private var cachedSpeed: LyricAnimationSpeed? = null
+    private var cachedMasks = emptyList<LyricWordMask>()
+
+    var hasTimedGlyphs: Boolean = false
+        private set
+
+    fun resolve(
+        layout: TextLayoutResult,
+        glyphs: List<TimedLyricGlyph>,
+        words: List<TimedLyricWord>,
+    ): TimedLyricLayout {
+        if (sourceLayout !== layout || sourceGlyphs !== glyphs || sourceWords !== words) {
+            sourceLayout = layout
+            sourceGlyphs = glyphs
+            sourceWords = words
+            val laidOutGlyphs = buildLaidOutGlyphs(layout, glyphs)
+            timedGlyphs = laidOutGlyphs.filter { it.timing.wordIndex >= 0 }
+            laidOutWords = buildLaidOutWords(layout, timedGlyphs, words)
+            hasTimedGlyphs = timedGlyphs.isNotEmpty()
+            cachedPosition = Long.MIN_VALUE
+            cachedSpeed = null
+            cachedMasks = emptyList()
+        }
+        return this
+    }
+
+    fun masksAt(positionMillis: Long, speed: LyricAnimationSpeed): List<LyricWordMask> {
+        if (cachedPosition != positionMillis || cachedSpeed != speed) {
+            cachedPosition = positionMillis
+            cachedSpeed = speed
+            cachedMasks = buildWordMasks(laidOutWords, positionMillis, speed)
+        }
+        return cachedMasks
     }
 }
 
@@ -332,13 +386,16 @@ private fun DrawScope.drawLyricShaderShadow(
 private fun buildWordMasks(
     laidOutWords: List<LaidOutLyricWord>,
     positionMillis: Long,
+    speed: LyricAnimationSpeed,
 ): List<LyricWordMask> {
     if (laidOutWords.isEmpty()) return emptyList()
     val masks = ArrayList<LyricWordMask>(laidOutWords.size)
     for (laidOutWord in laidOutWords) {
         val bounds = laidOutWord.bounds
         val fadeWidth = bounds.height * 0.5f
-        val progress = lyricWordMaskProgress(laidOutWord.word, positionMillis)
+        // Start the fade band slightly before the source timestamp. Without this lead, the dim
+        // base is the only paint for the first frame of every word and briefly flashes grey.
+        val progress = lyricWordVisualProgress(laidOutWord.word, positionMillis, speed)
         val edgeX = bounds.left + lyricWordMaskEdge(progress, bounds.width, fadeWidth)
         val fadeStartX = edgeX - fadeWidth
         masks += LyricWordMask(

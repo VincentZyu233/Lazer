@@ -16,13 +16,19 @@ import java.awt.Window
 
 private const val WCA_ACCENT_POLICY = 19
 private const val ACCENT_DISABLED = 0
+private const val ACCENT_ENABLE_BLURBEHIND = 3
 private const val ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+
+// Native acrylic expects AABBGGRR. These alphas leave enough room for the app's paper hierarchy
+// while avoiding the washed-out white veil that the old 0xCC light tint produced.
+private const val LIGHT_ACRYLIC_ALPHA = 0xB8
+private const val DARK_ACRYLIC_ALPHA = 0x98
 
 /** Uses the resolved theme paper, retaining the tuned dark/light native tint opacity.
  * The native gradient format is AABBGGRR, unlike Compose's ARGB colour values.
  */
 internal fun windowsAcrylicTint(backgroundArgb: Int, isDark: Boolean): Int =
-    ((if (isDark) 0x66 else 0xCC) shl 24) or
+    ((if (isDark) DARK_ACRYLIC_ALPHA else LIGHT_ACRYLIC_ALPHA) shl 24) or
         ((backgroundArgb and 0xFF) shl 16) or
         (backgroundArgb and 0xFF00) or
         ((backgroundArgb ushr 16) and 0xFF)
@@ -105,18 +111,31 @@ internal fun applyWindowsAcrylic(
         hwnd.putInt(DWMWA_WINDOW_CORNER_PREFERENCE, 1)
         hwnd.putInt(DWMWA_USE_IMMERSIVE_DARK_MODE, if (enabled && isDark) 1 else 0)
 
-        val accent = AccentPolicy().apply {
-            accentState = if (enabled) ACCENT_ENABLE_ACRYLICBLURBEHIND else ACCENT_DISABLED
-            accentFlags = if (enabled) 2 else 0
-            gradientColor = if (enabled) windowsAcrylicTint(backgroundArgb, isDark) else 0
+        fun applyPolicy(state: Int): Boolean {
+            val accent = AccentPolicy().apply {
+                accentState = state
+                accentFlags = if (state == ACCENT_DISABLED) 0 else 2
+                gradientColor = if (state == ACCENT_DISABLED) 0 else {
+                    windowsAcrylicTint(backgroundArgb, isDark)
+                }
+            }
+            accent.write()
+            val data = WindowCompositionAttributeData().apply {
+                attribute = WCA_ACCENT_POLICY
+                this.data = accent.pointer
+                sizeOfData = WindowsSizeT(accent.size().toLong())
+            }
+            data.write()
+            return user32.SetWindowCompositionAttribute(hwnd, data) != 0
         }
-        accent.write()
-        val data = WindowCompositionAttributeData().apply {
-            attribute = WCA_ACCENT_POLICY
-            this.data = accent.pointer
-            sizeOfData = WindowsSizeT(accent.size().toLong())
+
+        if (!enabled || applyPolicy(ACCENT_ENABLE_ACRYLICBLURBEHIND)) {
+            true
+        } else {
+            // Some Windows builds expose the accent API but reject acrylic for an undecorated
+            // window. A normal DWM blur still gives a stable translucent surface instead of a
+            // black frame or a one-frame transparent flash.
+            applyPolicy(ACCENT_ENABLE_BLURBEHIND)
         }
-        data.write()
-        user32.SetWindowCompositionAttribute(hwnd, data) != 0
     }.getOrDefault(false)
 }

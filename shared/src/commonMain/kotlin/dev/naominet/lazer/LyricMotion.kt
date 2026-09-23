@@ -10,7 +10,11 @@ import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-private const val AMLL_BASE_MASK_ALPHA = 0.40f
+// AMLL's scanner keeps the not-yet-sung part of the active line at 40% of its own colour. That has
+// to stay above the brightest neighbour, which sits at 0.24 + 0.75 * 0.20 = 0.39 of the row alpha:
+// at 0.40 the active line's 0.85 ceiling multiplied by the floor falls under the rows beside it, and
+// the line being sung reads dimmer than the ones it should dominate.
+private const val AMLL_BASE_MASK_ALPHA = 0.56f
 
 /**
  * Stateless fallback retained for callers that only need a single eased value. Lyrics pages use

@@ -8,8 +8,8 @@ import org.junit.Test
 class AndroidLyricInterludeTest {
     @Test fun interludeIsInsertedOnlyWhileItsIntervalIsActive() {
         val timeline = androidLyricsWithInterludes(
-            listOf(AndroidTimedLyricLine(0, "first", endTimeMillis = 2_000),
-                AndroidTimedLyricLine(12_000, "second", endTimeMillis = 14_000)), 20_000,
+            listOf(AndroidTimedLyricLine(0, "first", endTimeMs = 2_000),
+                AndroidTimedLyricLine(12_000, "second", endTimeMs = 14_000)), 20_000,
         )
         fun display(at: Long) = androidLyricDisplayLines(timeline, activeAndroidInterlude(timeline, at))
         assertEquals(listOf("first", "second"), display(1_999).map { it.text })
@@ -51,7 +51,7 @@ class AndroidLyricInterludeTest {
     }
 
     @Test fun unknownDurationDoesNotInventAnOutro() {
-        val lines = androidLyricsWithInterludes(listOf(AndroidTimedLyricLine(0, "last", endTimeMillis = 2_000)), 0)
+        val lines = androidLyricsWithInterludes(listOf(AndroidTimedLyricLine(0, "last", endTimeMs = 2_000)), 0)
         assertEquals(1, lines.size)
         assertTrue(androidLyricsWithInterludes(emptyList(), 20_000).isEmpty())
     }
