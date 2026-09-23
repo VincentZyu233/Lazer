@@ -17,6 +17,8 @@ constexpr int kActionNext = 3;
 constexpr int kActionThemeChanged = 4;
 constexpr int kActionButtonsApplied = 5;
 constexpr int kActionButtonsApplyFailed = 6;
+constexpr int kActionSubclassInstalled = 7;
+constexpr int kActionSubclassInstallFailed = 8;
 constexpr int kActionCallWindowCommandObserved = 0x10000000;
 constexpr int kActionQueuedCommandObserved = 0x20000000;
 constexpr int kActionSubclassCommandObserved = 0x30000000;
@@ -208,6 +210,9 @@ void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state) {
     if (state.subclassInstalled) return;
     state.subclassInstalled = SetWindowSubclass(
         hwnd, TaskbarSubclassProc, kTaskbarSubclassId, 0) != FALSE;
+    if (state.callback != nullptr) {
+        state.callback(state.subclassInstalled ? kActionSubclassInstalled : kActionSubclassInstallFailed);
+    }
 }
 
 // Compose/Skiko owns and can replace its AWT window procedure after the Kotlin side has obtained
