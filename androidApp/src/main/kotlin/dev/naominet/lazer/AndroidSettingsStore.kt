@@ -21,6 +21,20 @@ enum class AndroidPlaybackInterface {
     INDEPENDENT,
 }
 
+/**
+ * Strength of the answer a landed tap gives. These map onto the platform's own haptic categories
+ * rather than onto a raw vibration amplitude, so the system's haptic volume still has the last word.
+ */
+enum class AndroidHapticLevel {
+    OFF,
+    LIGHT,
+    STANDARD,
+    STRONG,
+}
+
+internal fun parseAndroidHapticLevel(value: String?): AndroidHapticLevel =
+    AndroidHapticLevel.entries.firstOrNull { it.name == value } ?: AndroidHapticLevel.STANDARD
+
 internal fun parseAndroidPlaybackInterface(value: String?): AndroidPlaybackInterface =
     AndroidPlaybackInterface.entries.firstOrNull { it.name == value }
         ?: AndroidPlaybackInterface.SYSTEM_MEDIA
@@ -185,6 +199,11 @@ internal class AndroidSettingsStore(context: Context) {
         get() = preferences.getBoolean(KEY_AUDIO_REACTIVE_LEVELS, false)
         set(value) = preferences.edit().putBoolean(KEY_AUDIO_REACTIVE_LEVELS, value).apply()
 
+    /** How strongly a tap that lands answers on the hand. */
+    var hapticLevel: AndroidHapticLevel
+        get() = parseAndroidHapticLevel(preferences.getString(KEY_HAPTIC_LEVEL, null))
+        set(value) = preferences.edit().putString(KEY_HAPTIC_LEVEL, value.name).apply()
+
     private companion object {
         const val PREFERENCES_NAME = "lazer.android.settings"
         const val KEY_DARK_THEME = "appearance.dark"
@@ -212,5 +231,6 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"
+        const val KEY_HAPTIC_LEVEL = "interaction.haptic_level"
     }
 }

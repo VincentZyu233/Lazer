@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Base64
+import android.view.RoundedCorner
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -184,7 +185,9 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -212,6 +215,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
@@ -266,7 +270,11 @@ private val LocalAndroidContentBottomInset = compositionLocalOf { 0.dp }
 private data class AndroidCoverSaveRequest(val url: String, val title: String)
 
 /** A text field a long press offers to the clipboard. The sheet asks first, as saving a cover does. */
-private data class AndroidCopyTextRequest(val titleKey: String, val value: String)
+private data class AndroidCopyTextRequest(
+    val titleKey: String,
+    val hintKey: String,
+    val value: String,
+)
 
 private val LocalAndroidOpenArtists = androidx.compose.runtime.staticCompositionLocalOf<(List<Artist>) -> Unit> { {} }
 private val LocalAndroidRequestCoverSave = androidx.compose.runtime.staticCompositionLocalOf<(AndroidCoverSaveRequest) -> Unit> { {} }
@@ -277,6 +285,7 @@ private enum class AndroidMainPageKind(val depth: Int) {
     PLAYLIST(1),
     SETTINGS(1),
     ARTIST(2),
+    ABOUT(2),
 }
 
 private data class AndroidMainPage(
@@ -294,11 +303,86 @@ private data class AndroidMainPage(
         }
 }
 
+/**
+ * The strength every control answers a landed tap with, or null for a silent app. Provided once at
+ * the root so a setting change reaches every control without threading it through call sites.
+ */
+internal val LocalTapHaptic = androidx.compose.runtime.staticCompositionLocalOf<HapticFeedbackType?> {
+    HapticFeedbackType.VirtualKey
+}
+
+/**
+ * The platform's own haptic categories, ordered by weight. A raw vibration amplitude was the other
+ * option, but it would talk over the system haptic volume the reader already set.
+ */
+internal fun AndroidHapticLevel.feedbackType(): HapticFeedbackType? = when (this) {
+    AndroidHapticLevel.OFF -> null
+    AndroidHapticLevel.LIGHT -> HapticFeedbackType.KeyboardTap
+    AndroidHapticLevel.STANDARD -> HapticFeedbackType.VirtualKey
+    AndroidHapticLevel.STRONG -> HapticFeedbackType.LongPress
+}
+
+internal fun hapticLevelLabel(level: AndroidHapticLevel): String = when (level) {
+    AndroidHapticLevel.OFF -> tr("settings.haptic.off")
+    AndroidHapticLevel.LIGHT -> tr("settings.haptic.light")
+    AndroidHapticLevel.STANDARD -> tr("settings.haptic.standard")
+    AndroidHapticLevel.STRONG -> tr("settings.haptic.strong")
+}
+
+/** Answers a gesture that landed, at the strength the reader chose. Silent when they chose none. */
+@Composable
+internal fun rememberTapAnswer(): () -> Unit {
+    val haptics = LocalHapticFeedback.current
+    val strength = LocalTapHaptic.current
+    return { if (strength != null) haptics.performHapticFeedback(strength) }
+}
+
+/**
+ * Wraps a click so a tap that lands answers with a buzz. A press that turns into a scroll, or that
+ * is lifted off the control, never reaches the callback and stays quiet. Applied to the shared
+ * controls rather than to every call site, so one change covers the whole app.
+ */
+@Composable
+internal fun tapFeedback(onClick: () -> Unit): () -> Unit {
+    val answer = rememberTapAnswer()
+    return {
+        answer()
+        onClick()
+    }
+}
+
 private enum class AndroidBackLayer {
     ARTIST,
     PLAYLIST,
     SETTINGS,
+    ABOUT,
     PLAYER,
+}
+
+/**
+ * The screen's own corner radius. Predictive back scales a page down and shows its corners, and a
+ * square there reads as a pasted screenshot instead of a window of the same shape as the display.
+ * A device whose corners really are square keeps square pages.
+ */
+@Composable
+private fun rememberScreenCornerRadius(): Dp {
+    val view = LocalView.current
+    val density = LocalDensity.current
+    // Insets only exist once the window has been laid out, so the container size keys the recompute.
+    val containerSize = LocalWindowInfo.current.containerSize
+    return remember(view, density, containerSize) {
+        val insets =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) view.rootWindowInsets else null
+        val radiusPx = insets?.let { windowInsets ->
+            intArrayOf(
+                RoundedCorner.POSITION_TOP_LEFT,
+                RoundedCorner.POSITION_TOP_RIGHT,
+                RoundedCorner.POSITION_BOTTOM_LEFT,
+                RoundedCorner.POSITION_BOTTOM_RIGHT,
+            ).maxOf { position -> windowInsets.getRoundedCorner(position)?.radius ?: 0 }
+        } ?: 0
+        with(density) { radiusPx.toFloat().toDp() }
+    }
 }
 
 private fun Modifier.predictiveBackTransform(
@@ -359,9 +443,10 @@ internal fun LiquidGlassIconButton(
     size: Dp = 48.dp,
     content: @Composable () -> Unit,
 ) {
+    val tapped = tapFeedback(onClick)
     if (!glass.isEnabled) {
         IconButton(
-            onClick = onClick,
+            onClick = tapped,
             modifier = modifier.size(size).semantics { this.contentDescription = contentDescription },
             enabled = enabled,
             content = content,
@@ -407,7 +492,7 @@ internal fun LiquidGlassIconButton(
                     indication = null,
                     enabled = enabled,
                     role = Role.Button,
-                    onClick = onClick,
+                    onClick = tapped,
                 )
                 .semantics { this.contentDescription = contentDescription },
             contentAlignment = Alignment.Center,
@@ -426,9 +511,10 @@ private fun LiquidGlassPillButton(
     tint: Color = MaterialTheme.colorScheme.primary,
     content: @Composable RowScope.() -> Unit,
 ) {
+    val tapped = tapFeedback(onClick)
     if (!glass.isEnabled) {
         Button(
-            onClick = onClick,
+            onClick = tapped,
             modifier = modifier,
             enabled = enabled,
             shape = RoundedCornerShape(100.dp),
@@ -472,7 +558,7 @@ private fun LiquidGlassPillButton(
                     indication = null,
                     enabled = enabled,
                     role = Role.Button,
-                    onClick = onClick,
+                    onClick = tapped,
                 )
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -490,6 +576,7 @@ private fun ThemeButton(
     cornerRadius: Dp? = null,
     content: @Composable RowScope.() -> Unit,
 ) {
+    val tapped = tapFeedback(onClick)
     if (LocalLazerThemeEngine.current == LazerThemeEngine.MIUIX) {
         val colors = MiuixButtonDefaults.buttonColorsPrimary()
         CompositionLocalProvider(
@@ -497,7 +584,7 @@ private fun ThemeButton(
                 if (enabled) colors.contentColor else colors.disabledContentColor,
         ) {
             MiuixButton(
-                onClick = onClick,
+                onClick = tapped,
                 modifier = modifier,
                 enabled = enabled,
                 cornerRadius = cornerRadius ?: MiuixButtonDefaults.CornerRadius,
@@ -507,14 +594,14 @@ private fun ThemeButton(
         }
     } else if (cornerRadius != null) {
         Button(
-            onClick = onClick,
+            onClick = tapped,
             modifier = modifier,
             enabled = enabled,
             shape = RoundedCornerShape(cornerRadius),
             content = content,
         )
     } else {
-        Button(onClick = onClick, modifier = modifier, enabled = enabled, content = content)
+        Button(onClick = tapped, modifier = modifier, enabled = enabled, content = content)
     }
 }
 
@@ -525,6 +612,7 @@ private fun ThemeTextButton(
     enabled: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
+    val tapped = tapFeedback(onClick)
     if (LocalLazerThemeEngine.current == LazerThemeEngine.MIUIX) {
         val textColors = MiuixButtonDefaults.textButtonColors()
         val colors = MiuixButtonColors(
@@ -538,7 +626,7 @@ private fun ThemeTextButton(
                 if (enabled) colors.contentColor else colors.disabledContentColor,
         ) {
             MiuixButton(
-                onClick = onClick,
+                onClick = tapped,
                 modifier = modifier,
                 enabled = enabled,
                 colors = colors,
@@ -546,7 +634,7 @@ private fun ThemeTextButton(
             )
         }
     } else {
-        TextButton(onClick = onClick, modifier = modifier, enabled = enabled, content = content)
+        TextButton(onClick = tapped, modifier = modifier, enabled = enabled, content = content)
     }
 }
 
@@ -635,9 +723,11 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     var isPredictiveBackRunning by remember { mutableStateOf(false) }
     var backSwipeEdge by remember { mutableStateOf(BackEventCompat.EDGE_LEFT) }
     var transformedBackLayer by remember { mutableStateOf<AndroidBackLayer?>(null) }
+    val screenCornerRadius = rememberScreenCornerRadius()
 
     val activeBackLayer = when {
         playerVisible -> AndroidBackLayer.PLAYER
+        controller.isAboutVisible -> AndroidBackLayer.ABOUT
         controller.activeArtist != null -> AndroidBackLayer.ARTIST
         controller.isSettingsVisible -> AndroidBackLayer.SETTINGS
         controller.activePlaylist != null -> AndroidBackLayer.PLAYLIST
@@ -684,6 +774,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                 AndroidBackLayer.PLAYER -> playerVisible = false
                 AndroidBackLayer.ARTIST -> controller.closeArtist()
                 AndroidBackLayer.SETTINGS -> controller.closeSettings()
+                AndroidBackLayer.ABOUT -> controller.closeAbout()
                 AndroidBackLayer.PLAYLIST -> controller.closePlaylist()
             }
         } finally {
@@ -693,6 +784,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     }
 
     val mainPage = when {
+        controller.isAboutVisible -> AndroidMainPage(AndroidMainPageKind.ABOUT)
         controller.isSettingsVisible -> AndroidMainPage(AndroidMainPageKind.SETTINGS)
         controller.activeArtist != null -> AndroidMainPage(
             kind = AndroidMainPageKind.ARTIST,
@@ -751,6 +843,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             },
             LocalAndroidRequestCoverSave provides { coverSaveRequest = it },
             LocalAndroidRequestCopyText provides { copyTextRequest = it },
+            LocalTapHaptic provides controller.hapticLevel.feedbackType(),
         ) {
         val colors = MaterialTheme.colorScheme
         val launchScanner = {
@@ -950,6 +1043,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                                         AndroidMainPageKind.ARTIST -> transformedBackLayer == AndroidBackLayer.ARTIST
                                         AndroidMainPageKind.PLAYLIST -> transformedBackLayer == AndroidBackLayer.PLAYLIST
                                         AndroidMainPageKind.SETTINGS -> transformedBackLayer == AndroidBackLayer.SETTINGS
+                                        AndroidMainPageKind.ABOUT -> transformedBackLayer == AndroidBackLayer.ABOUT
                                         AndroidMainPageKind.ROOT -> false
                                     },
                                     progress = renderedBackProgress,
@@ -966,9 +1060,11 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                             // it hides sibling content without adding a second translucent scrim.
                             color = if (hasVisualBackground) Color.Transparent else colors.background,
                             contentColor = colors.onBackground,
+                            shape = RoundedCornerShape(screenCornerRadius),
                         ) {
                             when (page.kind) {
                                 AndroidMainPageKind.SETTINGS -> SettingsPage(controller)
+                                AndroidMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
                                 AndroidMainPageKind.ARTIST -> page.artist?.let { artist ->
                                     ArtistPage(
                                         artist = artist,
@@ -1198,7 +1294,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                         clipboard.setClipEntry(
                             ClipEntry(ClipData.newPlainText(tr(request.titleKey), request.value)),
                         )
-                        rootMessage = tr("song.copy.done", request.value)
+                        rootMessage = tr("song.copy.done")
                     }
                 },
             )
@@ -1574,6 +1670,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
     var isCookieSheetVisible by remember { mutableStateOf(false) }
     var cookieCopied by remember { mutableStateOf(false) }
     val clipboard = LocalClipboard.current
+    val haptics = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
     var followDelaySliderValue by remember(controller.lyricFollowDelayMillis) {
         mutableFloatStateOf(controller.lyricFollowDelayMillis.toFloat())
@@ -1979,6 +2076,33 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 }
             }
         }
+        item {
+            SettingsCard {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(tr("settings.haptic.title"), style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                tr("settings.haptic.hint"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        SettingsDropdown(
+                            options = AndroidHapticLevel.entries,
+                            selected = controller.hapticLevel,
+                            label = ::hapticLevelLabel,
+                            onSelected = { level ->
+                                controller.updateHapticLevel(level)
+                                // Feel the choice straight away, including when it is silence.
+                                level.feedbackType()?.let { haptics.performHapticFeedback(it) }
+                            },
+                        )
+                    }
+                }
+            }
+        }
         item { SectionTitle(tr("settings.lyrics")) }
         item {
             SettingsCard(
@@ -2298,6 +2422,26 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         } else {
             item { SignInInvitation(controller::openLogin) }
         }
+        item {
+            SettingsCard {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { controller.openAbout() }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("about.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("about.version", LazerRelease.versionName, LazerRelease.versionCode),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
     }
     if (isAudioQualitySheetVisible) {
         AudioQualitySheet(
@@ -2336,6 +2480,24 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
             },
             onDismiss = { isCookieSheetVisible = false },
         )
+    }
+}
+
+/** What this build is, and what it stands on. Reached from the foot of the settings list. */
+@Composable
+private fun AboutPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp + LocalAndroidContentBottomInset.current),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back"))
+        }
+        LazerAboutSection()
     }
 }
 
@@ -2594,11 +2756,12 @@ private fun PlayerCardAction(
     label: String,
     onClick: () -> Unit,
 ) {
+    val tapped = tapFeedback(onClick)
     val colors = MaterialTheme.colorScheme
     Row(
         Modifier
             .clip(RoundedCornerShape(12.dp))
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(role = Role.Button, onClick = tapped)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -3075,7 +3238,11 @@ private fun SongCommentRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(comment.content, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                comment.content,
+                modifier = Modifier.copyOnLongPress("comment.copy.title", "comment.copy.hint", comment.content),
+                style = MaterialTheme.typography.bodyLarge,
+            )
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -3137,7 +3304,7 @@ private fun CommentAction(
     Row(
         Modifier
             .clip(RoundedCornerShape(10.dp))
-            .clickable(role = Role.Button, onClick = onClick)
+            .clickable(role = Role.Button, onClick = tapFeedback(onClick))
             .then(
                 if (contentDescription != null) {
                     Modifier.semantics { this.contentDescription = contentDescription }
@@ -3838,7 +4005,7 @@ private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlay
                             interactionSource = null,
                             indication = tileRipple,
                             role = Role.Button,
-                            onClick = { onOpen(playlist) },
+                            onClick = tapFeedback { onOpen(playlist) },
                         )
                         .padding(bottom = 4.dp),
                 ) {
@@ -3863,6 +4030,7 @@ private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlay
 
 @Composable
 private fun PlaylistListRow(playlist: AndroidPlaylist, onOpen: (AndroidPlaylist) -> Unit) {
+    val tapped = tapFeedback { onOpen(playlist) }
     // The stock bounded ripple dies at the row's half diagonal; the oversized radius lets a tap
     // anywhere light the full row width, matching the playlist strip tiles.
     val rowRipple = ripple(bounded = true, radius = 260.dp)
@@ -3871,7 +4039,7 @@ private fun PlaylistListRow(playlist: AndroidPlaylist, onOpen: (AndroidPlaylist)
             interactionSource = null,
             indication = rowRipple,
             role = Role.Button,
-            onClick = { onOpen(playlist) },
+            onClick = tapped,
         ).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -3887,11 +4055,12 @@ private fun PlaylistListRow(playlist: AndroidPlaylist, onOpen: (AndroidPlaylist)
 
 @Composable
 private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit) {
+    val tapped = tapFeedback(onClick)
     val colors = MaterialTheme.colorScheme
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp))
             .background(if (current) colors.primaryContainer.copy(alpha = 0.58f) else Color.Transparent)
-            .clickable(role = Role.Button, onClick = onClick).padding(horizontal = 8.dp, vertical = 8.dp),
+            .clickable(role = Role.Button, onClick = tapped).padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         MobileArtwork(track.coverUrl, track.title, Modifier.size(48.dp), 12.dp, saveOnLongPress = true)
@@ -4011,9 +4180,9 @@ private fun Modifier.onLongPressOnly(key: Any, onLongPress: () -> Unit): Modifie
 
 /** Long press on a piece of text worth copying. It asks first, exactly as saving a cover does. */
 @Composable
-private fun Modifier.copyOnLongPress(titleKey: String, value: String): Modifier {
+private fun Modifier.copyOnLongPress(titleKey: String, hintKey: String, value: String): Modifier {
     val requestCopy = LocalAndroidRequestCopyText.current
-    val request = rememberUpdatedState(AndroidCopyTextRequest(titleKey, value))
+    val request = rememberUpdatedState(AndroidCopyTextRequest(titleKey, hintKey, value))
     return onLongPressOnly(value) { requestCopy(request.value) }
 }
 
@@ -4080,7 +4249,7 @@ private fun MiniPlayer(
                 }
             }
             IconButton(
-                onClick = onToggle,
+                onClick = tapFeedback(onToggle),
                 modifier = Modifier.size(42.dp),
                 colors = IconButtonDefaults.iconButtonColors(
                     containerColor = if (glass.isEnabled) Color.Transparent else colors.primaryContainer,
@@ -4104,7 +4273,7 @@ private fun MiniPlayer(
                 .height(if (compact) 60.dp else 72.dp)
                 .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 10.dp)
                 .clip(shape)
-                .clickable(role = Role.Button, onClick = onOpen)
+                .clickable(role = Role.Button, onClick = tapFeedback(onOpen))
                 .semantics { contentDescription = tr("player.now_playing") },
             contentAlignment = Alignment.Center,
         ) {
@@ -4112,7 +4281,7 @@ private fun MiniPlayer(
         }
     } else {
         Surface(
-            modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).clickable(role = Role.Button, onClick = onOpen),
+            modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).clickable(role = Role.Button, onClick = tapFeedback(onOpen)),
             color = colors.surface.copy(alpha = 0.98f * LocalLazerUiAlpha.current),
             border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.78f)),
             content = content,
@@ -4137,7 +4306,7 @@ private fun BottomDock(
             AndroidRootDestination.entries.forEach { destination ->
                 MiuixNavigationBarItem(
                     selected = selected == destination,
-                    onClick = { onSelect(destination) },
+                    onClick = tapFeedback { onSelect(destination) },
                     icon = destination.icon(),
                     label = destination.label,
                 )
@@ -4158,7 +4327,7 @@ private fun BottomDock(
         AndroidRootDestination.entries.forEach { destination ->
             NavigationBarItem(
                 selected = selected == destination,
-                onClick = { onSelect(destination) },
+                onClick = tapFeedback { onSelect(destination) },
                 icon = { Icon(destination.icon(), contentDescription = destination.label) },
                 label = {
                     Text(
@@ -4529,7 +4698,7 @@ private fun AndroidArtistNames(
         modifier = modifier
             .then(if (available.isNotEmpty()) Modifier.clickable { openArtists(available) } else Modifier)
             .then(
-                if (offerCopy) Modifier.copyOnLongPress("song.copy.artist", names) else Modifier,
+                if (offerCopy) Modifier.copyOnLongPress("song.copy.artist", "song.copy.hint", names) else Modifier,
             ),
         style = style,
         color = color,
@@ -4640,7 +4809,7 @@ private fun NowPlayingPage(
                         Spacer(Modifier.height(6.dp))
                         Text(
                             track.title,
-                            modifier = Modifier.copyOnLongPress("song.copy.title", track.title),
+                            modifier = Modifier.copyOnLongPress("song.copy.title", "song.copy.hint", track.title),
                             color = colors.onBackground,
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
@@ -4803,7 +4972,7 @@ private fun NowPlayingPage(
                         ) {
                             Text(
                                 track.title,
-                                modifier = Modifier.copyOnLongPress("song.copy.title", track.title),
+                                modifier = Modifier.copyOnLongPress("song.copy.title", "song.copy.hint", track.title),
                                 style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -5159,7 +5328,7 @@ private fun CopyTextSheet(
         ) {
             Text(tr(request.titleKey), style = MaterialTheme.typography.headlineSmall)
             Text(
-                tr("song.copy.hint", request.value),
+                tr(request.hintKey, request.value),
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurfaceVariant,
             )

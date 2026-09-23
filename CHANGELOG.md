@@ -1,5 +1,45 @@
 # Changelog / 更新日志
 
+## v1.3 — 2026-09-24
+
+### English
+
+**Highlights**
+
+- **Lyric passage selection** — long press a line to start marking, keep holding to drag down the sheet, tap to add or drop a line, select all, then copy the passage with its translations. Marked lines borrow the singing line's own focus spring, so the highlight moves the way a lyric change does and no row changes size; the sheet holds still and gives the control bar a temporary safe area while a passage is picked.
+- **Long press to copy** — the song title, the artist names and a comment body offer the same confirmation sheet that saving a cover does.
+- **About page** — version, source repository, acknowledgements, license and the third-party notice. The version is defined once, in `shared/.../LazerRelease.kt`, which both Gradle scripts and the iOS build configuration read, so the number on screen is the number the artefacts carry.
+- **Playback stops hijacking navigation** — tapping a song switches what is playing instead of forcing the full player open, and a song with nothing to sing rests with the large cover instead of an empty lyric pane.
+- **Tap feedback you can set** — off, light, standard or strong, applied to every control that answers a landed tap.
+- **Predictive back keeps the screen's own corners**, so a page scaled mid-gesture is no longer a square cut-out.
+
+**Interface and fixes**
+
+- The line being sung is capped at 0.85 alpha, and its not-yet-sung part now stays brighter than its neighbours instead of dimmer.
+- Desktop lyric selection uses the same highlight, and an interlude row entering or leaving no longer clears the lines already marked.
+- Album-flow backgrounds moved into the shared module, and Windows acrylic handling was updated.
+
+---
+
+### 中文
+
+**重点更新**
+
+- **歌词划段复制** —— 长按一行开始标记,按住不放可以继续往下拖选,点按加选或减选,全选后连同译文一起复制。被标记的行借用“正在唱的那行”自己的弹簧,所以高亮和切歌词是同一种运动,行高不变;选择期间歌词面板保持静止,并为控制条让出临时安全区。
+- **长按复制** —— 歌名、歌手名、评论正文都会弹出和长按封面一样的确认层,确认后复制到剪贴板。
+- **关于页** —— 版本、开源仓库、致谢、许可证与第三方声明。版本号只写在 `shared/.../LazerRelease.kt`,两个 Gradle 脚本和 iOS 构建配置都从这里读,页面上的数字和包里的数字不会不一致。
+- **播放不再抢导航** —— 点歌曲只切换正在播放,不再自动打开正在播放页;没有歌词的歌直接以大封面呈现,不留一块空歌词区。
+- **触感强度可调** —— 关闭 / 轻 / 标准 / 强,对所有“落下的点击”生效。
+- **预测式返回按设备屏幕圆角裁切页面**,手势缩放中的页面不再是直角切片。
+
+**界面与修复**
+
+- 当前歌词亮度上限改为 0.85,并抬高未唱到部分的地平线,不再出现“正在唱的行比旁边更暗”。
+- 桌面端歌词选择使用同一套高亮;间奏行进出不再清空已经选好的行。
+- 流动封面背景重构进 shared 模块,Windows 亚克力处理更新。
+
+---
+
 ## v1.2 — 2026-09-20
 
 ### English
