@@ -104,6 +104,11 @@ void RequestButtonApply(HWND hwnd) {
     PostMessageW(hwnd, kApplyButtonsMessage, 0, 0);
 }
 
+bool IsTaskbarCommand(WPARAM wParam) {
+    const UINT command = LOWORD(wParam);
+    return command == kCommandPrevious || command == kCommandPlayPause || command == kCommandNext;
+}
+
 void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
     const HRESULT result = ApplyButtons(hwnd, state);
     if (SUCCEEDED(result)) KillTimer(hwnd, kRetryTimerId);
@@ -168,18 +173,22 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-// Posted WM_APP messages and WM_TIMER messages are retrieved from the AWT message queue before
-// they reach a window procedure. Use this hook for taskbar registration/retry work; Explorer's
-// sent WM_COMMAND notifications remain handled by TaskbarMessageHook above.
+// Posted WM_APP messages, WM_TIMER messages, and some Explorer WM_COMMAND notifications are
+// retrieved from the AWT queue before they reach a window procedure. The call-window hook above
+// covers sent commands; this hook covers queued commands and consumes only our private IDs.
 LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
-        const auto* message = reinterpret_cast<const MSG*>(lParam);
+        auto* message = reinterpret_cast<MSG*>(lParam);
         const bool isApplyMessage = message->message == kApplyButtonsMessage;
         const bool isRetryTimer = message->message == WM_TIMER && message->wParam == kRetryTimerId;
-        if (isApplyMessage || isRetryTimer) {
+        const bool isTaskbarCommand = message->message == WM_COMMAND && IsTaskbarCommand(message->wParam);
+        if (isApplyMessage || isRetryTimer || isTaskbarCommand) {
             const auto it = g_states.find(message->hwnd);
             if (it != g_states.end()) {
                 HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+                // Our registration/timer messages and private command IDs have no meaning to
+                // AWT. Prevent a queued thumbnail command from being dispatched a second time.
+                message->message = WM_NULL;
             }
         }
     }
