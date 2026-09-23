@@ -36,6 +36,7 @@ struct TaskbarState {
     std::wstring nextTooltip;
     HHOOK callWindowHook = nullptr;
     HHOOK getMessageHook = nullptr;
+    DWORD ownerThread = 0;
     bool isPlaying = false;
     bool buttonsAdded = false;
 
@@ -109,6 +110,20 @@ bool IsTaskbarCommand(WPARAM wParam) {
     return command == kCommandPrevious || command == kCommandPlayPause || command == kCommandNext;
 }
 
+// The shell can deliver a thumbnail WM_COMMAND to the taskbar-visible parent/proxy HWND rather
+// than the Compose child HWND passed to ThumbBarAddButtons. The owner thread and private command
+// IDs are stable across those peer windows, so use them to recover the registered taskbar state.
+TaskbarState* FindStateForCommand(HWND& hwnd) {
+    const DWORD currentThread = GetCurrentThreadId();
+    for (auto& [stateHwnd, state] : g_states) {
+        if (state->ownerThread == currentThread) {
+            hwnd = stateHwnd;
+            return state.get();
+        }
+    }
+    return nullptr;
+}
+
 void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
     const HRESULT result = ApplyButtons(hwnd, state);
     if (SUCCEEDED(result)) KillTimer(hwnd, kRetryTimerId);
@@ -167,6 +182,11 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
             const auto it = g_states.find(message->hwnd);
             if (it != g_states.end()) {
                 HandleTaskbarMessage(message->hwnd, *it->second, message->message, message->wParam);
+            } else if (message->message == WM_COMMAND && IsTaskbarCommand(message->wParam)) {
+                HWND stateHwnd = nullptr;
+                if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
+                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam);
+                }
             }
         }
     }
@@ -189,6 +209,12 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
                 // Our registration/timer messages and private command IDs have no meaning to
                 // AWT. Prevent a queued thumbnail command from being dispatched a second time.
                 message->message = WM_NULL;
+            } else if (isTaskbarCommand) {
+                HWND stateHwnd = nullptr;
+                if (TaskbarState* state = FindStateForCommand(stateHwnd); state != nullptr) {
+                    HandleTaskbarMessage(stateHwnd, *state, message->message, message->wParam);
+                    message->message = WM_NULL;
+                }
             }
         }
     }
@@ -234,6 +260,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     // thread-specific call-window hook executes in that owner thread without replacing Skiko's
     // procedure, and also provides the required COM apartment for ITaskbarList3 calls.
     const DWORD ownerThread = GetWindowThreadProcessId(hwnd, nullptr);
+    g_states.at(hwnd)->ownerThread = ownerThread;
     const HHOOK callWindowHook = SetWindowsHookExW(
         WH_CALLWNDPROC, TaskbarMessageHook, nullptr, ownerThread);
     if (callWindowHook == nullptr) {
