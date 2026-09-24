@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Build
+import android.provider.Settings
 import android.util.Base64
 import android.view.RoundedCorner
 import android.webkit.CookieManager
@@ -147,6 +148,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -185,6 +187,7 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -304,37 +307,73 @@ private data class AndroidMainPage(
 }
 
 /**
- * The strength every control answers a landed tap with, or null for a silent app. Provided once at
- * the root so a setting change reaches every control without threading it through call sites.
+ * Whether a control answers a landed tap at all. Provided once at the root, so the setting reaches
+ * every control without threading it through call sites.
  */
-internal val LocalTapHaptic = androidx.compose.runtime.staticCompositionLocalOf<HapticFeedbackType?> {
-    HapticFeedbackType.VirtualKey
+internal val LocalTapHapticsEnabled = androidx.compose.runtime.staticCompositionLocalOf { true }
+
+/**
+ * Where the reader turned system haptics off, the app stays quiet too. The key is deprecated on 31+,
+ * but it remains the one every skin writes and there is no replacement that covers them all.
+ */
+@Suppress("DEPRECATION")
+private fun hapticsAllowedBySystem(context: Context): Boolean =
+    Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0
+
+// Both answers below go through the platform's own haptic categories rather than a duration and an
+// amplitude. Raw values can be graded into strengths, but they bypass the waveform each maker tunes
+// for its own motor, and that tuning is the whole of what reads as a click instead of a thud. One
+// strength, set by the system, is the honest offer.
+
+/** The click a landed tap gets. */
+private fun answerTap(viewHaptics: HapticFeedback) {
+    viewHaptics.performHapticFeedback(HapticFeedbackType.VirtualKey)
+}
+
+/** One drag notch, lighter than the tap on purpose so a run of them reads as grain. */
+private fun answerDetentTick(viewHaptics: HapticFeedback) {
+    viewHaptics.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
 }
 
 /**
- * The platform's own haptic categories, ordered by weight. A raw vibration amplitude was the other
- * option, but it would talk over the system haptic volume the reader already set.
+ * Cells a drag is divided into. The seek rail is divided by the length of what is playing rather
+ * than by distance, so a full-travel drag passes under the same number of notches whether the track
+ * runs two minutes or twenty.
  */
-internal fun AndroidHapticLevel.feedbackType(): HapticFeedbackType? = when (this) {
-    AndroidHapticLevel.OFF -> null
-    AndroidHapticLevel.LIGHT -> HapticFeedbackType.KeyboardTap
-    AndroidHapticLevel.STANDARD -> HapticFeedbackType.VirtualKey
-    AndroidHapticLevel.STRONG -> HapticFeedbackType.LongPress
+private const val SEEK_DETENTS = 40
+private const val SLIDER_DETENTS = 20
+
+/**
+ * Gives a drag the damping of a track of cells. [quantize] maps a 0f..1f position to the cell it
+ * sits in, and the answer fires only when the position moves into a different cell — which is the
+ * difference between notches under the finger and a rattle, since a drag reports a position at every
+ * frame. Reaching for the track answers once when the finger lands away from the last notch it was
+ * left in, the way a knob clicks into place; a drag that starts where the last one ended stays quiet.
+ */
+@Composable
+internal fun rememberDetentAnswer(quantize: (Float) -> Int): (Float) -> Unit {
+    val context = LocalContext.current
+    val viewHaptics = LocalHapticFeedback.current
+    val answer = LocalTapHapticsEnabled.current && hapticsAllowedBySystem(context)
+    val latestQuantize by rememberUpdatedState(quantize)
+    val lastCell = remember { mutableIntStateOf(Int.MIN_VALUE) }
+    return { fraction ->
+        val cell = latestQuantize(fraction)
+        val previous = lastCell.intValue
+        lastCell.intValue = cell
+        if (answer && previous != cell && previous != Int.MIN_VALUE) {
+            answerDetentTick(viewHaptics)
+        }
+    }
 }
 
-internal fun hapticLevelLabel(level: AndroidHapticLevel): String = when (level) {
-    AndroidHapticLevel.OFF -> tr("settings.haptic.off")
-    AndroidHapticLevel.LIGHT -> tr("settings.haptic.light")
-    AndroidHapticLevel.STANDARD -> tr("settings.haptic.standard")
-    AndroidHapticLevel.STRONG -> tr("settings.haptic.strong")
-}
-
-/** Answers a gesture that landed, at the strength the reader chose. Silent when they chose none. */
+/** Answers a gesture that landed. Silent when the reader asked for no answer. */
 @Composable
 internal fun rememberTapAnswer(): () -> Unit {
-    val haptics = LocalHapticFeedback.current
-    val strength = LocalTapHaptic.current
-    return { if (strength != null) haptics.performHapticFeedback(strength) }
+    val context = LocalContext.current
+    val viewHaptics = LocalHapticFeedback.current
+    val answer = LocalTapHapticsEnabled.current && hapticsAllowedBySystem(context)
+    return { if (answer) answerTap(viewHaptics) }
 }
 
 /**
@@ -349,6 +388,81 @@ internal fun tapFeedback(onClick: () -> Unit): () -> Unit {
         answer()
         onClick()
     }
+}
+
+// The two modifiers below exist so that no call site has to remember the haptic on its own. A raw
+// `Modifier.clickable` or `Modifier.selectable` is the one way to miss a control, so the build fails
+// on it. Material controls take too many shapes to wrap, so those answer through `tapFeedback`.
+
+/** A clickable surface that answers a landed tap. */
+@Composable
+internal fun Modifier.tapClickable(
+    role: Role? = null,
+    onClickLabel: String? = null,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+): Modifier = clickable(
+    enabled = enabled,
+    onClickLabel = onClickLabel,
+    role = role,
+    onClick = tapFeedback(onClick),
+)
+
+/** A selectable row that answers the choice it just committed. */
+@Composable
+internal fun Modifier.tapSelectable(
+    selected: Boolean,
+    role: Role? = null,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+): Modifier = selectable(
+    selected = selected,
+    enabled = enabled,
+    role = role,
+    onClick = tapFeedback(onClick),
+)
+
+/**
+ * A slider that notches under the finger and answers where the finger left. Buzzing on every frame
+ * of [LazerSlider.onValueChange] turns a drag into a rattle, so the travel is answered by cell and
+ * the landing by one firmer click.
+ */
+@Composable
+internal fun TapSlider(
+    engine: LazerThemeEngine,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    valueRange: ClosedFloatingPointRange<Float> = 0f..1f,
+    steps: Int = 0,
+    onValueChangeFinished: (() -> Unit)? = null,
+) {
+    val answer = rememberTapAnswer()
+    // A stepped track notches at its own detents, so a tick lands where the knob actually snaps. A
+    // continuous one is given a grid, because it would otherwise travel end to end in silence.
+    val cells = if (steps > 0) steps + 2 else SLIDER_DETENTS
+    val detent = rememberDetentAnswer { fraction ->
+        if (steps > 0) (fraction * (cells - 1)).roundToInt()
+        else (fraction * cells).toInt().coerceAtMost(cells - 1)
+    }
+    val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(1e-4f)
+    LazerSlider(  // haptic-raw -- the wrapper above is what answers; every call site goes through it
+        engine = engine,
+        value = value,
+        onValueChange = { next ->
+            detent(((next - valueRange.start) / span).coerceIn(0f, 1f))
+            onValueChange(next)
+        },
+        modifier = modifier,
+        enabled = enabled,
+        valueRange = valueRange,
+        steps = steps,
+        onValueChangeFinished = {
+            answer()
+            onValueChangeFinished?.invoke()
+        },
+    )
 }
 
 private enum class AndroidBackLayer {
@@ -843,7 +957,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             },
             LocalAndroidRequestCoverSave provides { coverSaveRequest = it },
             LocalAndroidRequestCopyText provides { copyTextRequest = it },
-            LocalTapHaptic provides controller.hapticLevel.feedbackType(),
+            LocalTapHapticsEnabled provides controller.hapticsEnabled,
         ) {
         val colors = MaterialTheme.colorScheme
         val launchScanner = {
@@ -1430,7 +1544,7 @@ private fun LandscapeNavigationRail(
                         controller.activeArtist == null && controller.activePlaylist == null &&
                         controller.destination == destination
                     IconButton(
-                        onClick = { controller.selectDestination(destination) },
+                        onClick = tapFeedback { controller.selectDestination(destination) },
                         modifier = Modifier.size(48.dp).semantics { selected = selectedDestination },
                         colors = IconButtonDefaults.iconButtonColors(
                             containerColor = if (selectedDestination) colors.primaryContainer else Color.Transparent,
@@ -1440,19 +1554,19 @@ private fun LandscapeNavigationRail(
                 }
             }
             IconButton(
-                onClick = onScan,
+                onClick = tapFeedback(onScan),
                 modifier = Modifier.size(48.dp),
                 colors = IconButtonDefaults.iconButtonColors(contentColor = colors.onSurfaceVariant),
             ) { Icon(Icons.Outlined.QrCodeScanner, tr("scan.open")) }
             IconButton(
-                onClick = controller::openListenTogether,
+                onClick = tapFeedback(controller::openListenTogether),
                 modifier = Modifier.size(48.dp),
                 colors = IconButtonDefaults.iconButtonColors(
                     contentColor = if (controller.listenTogether != null) colors.primary else colors.onSurfaceVariant,
                 ),
             ) { Icon(Icons.Outlined.Headphones, tr("listen_together.open")) }
             IconButton(
-                onClick = controller::openSettings,
+                onClick = tapFeedback(controller::openSettings),
                 modifier = Modifier.size(48.dp),
                 colors = IconButtonDefaults.iconButtonColors(
                     containerColor = if (controller.isSettingsVisible) colors.primaryContainer else Color.Transparent,
@@ -1670,7 +1784,6 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
     var isCookieSheetVisible by remember { mutableStateOf(false) }
     var cookieCopied by remember { mutableStateOf(false) }
     val clipboard = LocalClipboard.current
-    val haptics = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
     var followDelaySliderValue by remember(controller.lyricFollowDelayMillis) {
         mutableFloatStateOf(controller.lyricFollowDelayMillis.toFloat())
@@ -1691,7 +1804,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Text(tr("settings.title"), style = MaterialTheme.typography.headlineSmall)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = controller::closeSettings) {
+                    IconButton(onClick = tapFeedback(controller::closeSettings)) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back"))
                     }
                     Spacer(Modifier.width(4.dp))
@@ -1749,7 +1862,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             )
                         }
                         Spacer(Modifier.height(8.dp))
-                        LazerSlider(
+                        TapSlider(
                             engine = controller.themeEngine,
                             value = controller.liquidGlassBlurIntensity,
                             onValueChange = controller::updateLiquidGlassBlurIntensity,
@@ -1884,7 +1997,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(tr("settings.background.surface_alpha"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                             Spacer(Modifier.width(12.dp))
-                            LazerSlider(
+                            TapSlider(
                                 engine = controller.themeEngine,
                                 value = controller.backgroundAlpha,
                                 onValueChange = controller::updateBackgroundAlpha,
@@ -1901,7 +2014,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable(role = Role.Switch) {
+                                .tapClickable(role = Role.Switch) {
                                     controller.updateBackgroundImageBlurEnabled(!controller.backgroundImageBlurEnabled)
                                 }
                                 .padding(vertical = 6.dp),
@@ -1925,7 +2038,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(tr("settings.background.blur.strength"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                                 Spacer(Modifier.width(12.dp))
-                                LazerSlider(
+                                TapSlider(
                                     engine = controller.themeEngine,
                                     value = controller.backgroundImageBlurIntensity,
                                     onValueChange = controller::updateBackgroundImageBlurIntensity,
@@ -1955,7 +2068,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(role = Role.Button) { isAudioQualitySheetVisible = true }
+                        .tapClickable(role = Role.Button) { isAudioQualitySheetVisible = true }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -1981,7 +2094,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(role = Role.Switch) {
+                        .tapClickable(role = Role.Switch) {
                             controller.updateIndependentPlayback(!controller.independentPlayback)
                         }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -2013,7 +2126,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(
+                        .tapClickable(
                             enabled = !controller.independentPlayback,
                             role = Role.Switch,
                         ) { controller.updateExclusiveAudio(!controller.exclusiveAudio) }
@@ -2049,7 +2162,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(role = Role.Switch) {
+                        .tapClickable(role = Role.Switch) {
                             when {
                                 audioLevelsEnabled -> controller.updateAudioReactiveLevels(false)
                                 microphoneGranted -> controller.updateAudioReactiveLevels(true)
@@ -2077,36 +2190,36 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
             }
         }
         item {
-            SettingsCard {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text(tr("settings.haptic.title"), style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                tr("settings.haptic.hint"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.onSurfaceVariant,
-                            )
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        SettingsDropdown(
-                            options = AndroidHapticLevel.entries,
-                            selected = controller.hapticLevel,
-                            label = ::hapticLevelLabel,
-                            onSelected = { level ->
-                                controller.updateHapticLevel(level)
-                                // Feel the choice straight away, including when it is silence.
-                                level.feedbackType()?.let { haptics.performHapticFeedback(it) }
-                            },
+            SettingsCard(
+                modifier = Modifier.tapClickable(role = Role.Switch) {
+                    controller.updateHapticsEnabled(!controller.hapticsEnabled)
+                },
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.haptic.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("settings.haptic.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
                         )
                     }
+                    Spacer(Modifier.width(12.dp))
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = controller.hapticsEnabled,
+                        onCheckedChange = null,
+                    )
                 }
             }
         }
         item { SectionTitle(tr("settings.lyrics")) }
         item {
             SettingsCard(
-                modifier = Modifier.clickable(role = Role.Switch) {
+                modifier = Modifier.tapClickable(role = Role.Switch) {
                     controller.updateWordLyricsEnabled(!controller.wordLyricsEnabled)
                 },
             ) {
@@ -2133,7 +2246,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard(
-                modifier = Modifier.clickable(role = Role.Switch) {
+                modifier = Modifier.tapClickable(role = Role.Switch) {
                     controller.updateLyricGlowEnabled(!controller.lyricGlowEnabled)
                 },
             ) {
@@ -2176,7 +2289,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             color = colors.primary,
                         )
                     }
-                    LazerSlider(
+                    TapSlider(
                         engine = controller.themeEngine,
                         value = controller.lyricAnimationSpeed.ordinal.toFloat(),
                         onValueChange = { value ->
@@ -2227,7 +2340,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             color = colors.primary,
                         )
                     }
-                    LazerSlider(
+                    TapSlider(
                         engine = controller.themeEngine,
                         value = lyricFontSizeSliderValue,
                         onValueChange = {
@@ -2257,7 +2370,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         }
         item {
             SettingsCard(
-                modifier = Modifier.clickable(role = Role.Switch) {
+                modifier = Modifier.tapClickable(role = Role.Switch) {
                     controller.updateShowFullLyrics(!controller.showFullLyrics)
                 },
             ) {
@@ -2304,7 +2417,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             color = colors.primary,
                         )
                     }
-                    LazerSlider(
+                    TapSlider(
                         engine = controller.themeEngine,
                         value = followDelaySliderValue,
                         onValueChange = {
@@ -2338,7 +2451,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(role = Role.Button) { isCacheSheetVisible = true }
+                        .tapClickable(role = Role.Button) { isCacheSheetVisible = true }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -2377,7 +2490,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
         item { SectionTitle(tr("settings.account")) }
         item {
             SettingsCard(
-                modifier = Modifier.clickable(role = Role.Button) {
+                modifier = Modifier.tapClickable(role = Role.Button) {
                     cookieCopied = false
                     isCookieSheetVisible = true
                 },
@@ -2427,7 +2540,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { controller.openAbout() }
+                        .tapClickable { controller.openAbout() }
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -2494,7 +2607,7 @@ private fun AboutPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
             .padding(bottom = 28.dp + LocalAndroidContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        IconButton(onClick = onBack) {
+        IconButton(onClick = tapFeedback(onBack)) {
             Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back"))
         }
         LazerAboutSection()
@@ -2518,6 +2631,10 @@ private fun <T> SettingsDropdown(
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { option ->
+                val select: () -> Unit = {
+                    onSelected(option)
+                    expanded = false
+                }
                 DropdownMenuItem(
                     text = {
                         Text(
@@ -2525,10 +2642,7 @@ private fun <T> SettingsDropdown(
                             color = if (option == selected) colors.primary else colors.onSurface,
                         )
                     },
-                    onClick = {
-                        onSelected(option)
-                        expanded = false
-                    },
+                    onClick = tapFeedback(select),
                 )
             }
         }
@@ -2705,7 +2819,7 @@ private fun AudioQualitySheet(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
-                        .selectable(
+                        .tapSelectable(
                             selected = isSelected,
                             role = Role.RadioButton,
                             onClick = { onSelected(quality) },
@@ -2761,7 +2875,7 @@ private fun PlayerCardAction(
     Row(
         Modifier
             .clip(RoundedCornerShape(12.dp))
-            .clickable(role = Role.Button, onClick = tapped)
+            .tapClickable(role = Role.Button, onClick = tapped)
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -2856,7 +2970,7 @@ private fun PlayQueueSheet(
                     AndroidPlayMode.entries.forEach { mode ->
                         FilterChip(
                             selected = queue.mode == mode,
-                            onClick = { controller.setPlayMode(mode) },
+                            onClick = tapFeedback { controller.setPlayMode(mode) },
                             label = { Text(tr(mode.labelKey)) },
                         )
                         Spacer(Modifier.width(8.dp))
@@ -2963,7 +3077,7 @@ private fun ReorderableQueueList(
                     isPlaying = isPlaying,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable(role = Role.Button) { onPlayAt(index) }
+                        .tapClickable(role = Role.Button) { onPlayAt(index) }
                         .semantics {
                             customActions = listOf(
                                 CustomAccessibilityAction(tr("player.queue.move_up")) {
@@ -3064,7 +3178,7 @@ private fun QueueRowBody(
         }
         handle?.invoke()
         if (onRemove != null) {
-            IconButton(onClick = onRemove, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = tapFeedback(onRemove), modifier = Modifier.size(40.dp)) {
                 Icon(
                     Icons.Filled.Close,
                     tr("player.queue.remove"),
@@ -3128,7 +3242,7 @@ private fun SongCommentSheet(
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.onSurfaceVariant,
                     )
-                    TextButton(onClick = controller::retrySongComments) { Text(tr("comment.retry")) }
+                    TextButton(onClick = tapFeedback(controller::retrySongComments)) { Text(tr("comment.retry")) }
                 }
                 state.loading -> Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -3170,7 +3284,7 @@ private fun SongCommentSheet(
                             Modifier.size(18.dp).align(Alignment.CenterHorizontally),
                             strokeWidth = 2.dp,
                         )
-                        state.hasMore -> TextButton(onClick = controller::loadMoreSongComments) {
+                        state.hasMore -> TextButton(onClick = tapFeedback(controller::loadMoreSongComments)) {
                             Text(tr("comment.more"))
                         }
                         else -> Text(
@@ -3304,7 +3418,7 @@ private fun CommentAction(
     Row(
         Modifier
             .clip(RoundedCornerShape(10.dp))
-            .clickable(role = Role.Button, onClick = tapFeedback(onClick))
+            .tapClickable(role = Role.Button, onClick = onClick)
             .then(
                 if (contentDescription != null) {
                     Modifier.semantics { this.contentDescription = contentDescription }
@@ -3369,9 +3483,9 @@ private fun CommentReplyComposer(
                 color = colors.onSurfaceVariant,
             )
             Spacer(Modifier.weight(1f))
-            TextButton(onClick = onCancel, enabled = !sending) { Text(tr("comment.reply_cancel")) }
+            TextButton(onClick = tapFeedback(onCancel), enabled = !sending) { Text(tr("comment.reply_cancel")) }
             Spacer(Modifier.width(8.dp))
-            Button(onClick = onSend, enabled = draft.isNotBlank() && !sending) {
+            Button(onClick = tapFeedback(onSend), enabled = draft.isNotBlank() && !sending) {
                 if (sending) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                 } else {
@@ -3417,7 +3531,7 @@ private fun ArtistPage(
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back")) }
+                IconButton(onClick = tapFeedback(onBack)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("common.back")) }
                 Text(tr("artist.title"), style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
             }
         }
@@ -3536,7 +3650,7 @@ private fun StandardPlaylistDetail(
         ) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("playlist.back")) }
+                    IconButton(onClick = tapFeedback(onBack)) { Icon(Icons.AutoMirrored.Filled.ArrowBack, tr("playlist.back")) }
                     Text(tr("playlist.title"), style = MaterialTheme.typography.labelLarge, color = colors.onSurfaceVariant)
                 }
             }
@@ -3563,7 +3677,7 @@ private fun StandardPlaylistDetail(
                 scope.launch { listState.animateScrollToItem(currentTrackIndex + 2) }
             }
             ExtendedFloatingActionButton(
-                onClick = locateCurrent,
+                onClick = tapFeedback(locateCurrent),
                 modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 20.dp),
                 shape = RoundedCornerShape(16.dp),
                 containerColor = colors.surfaceContainerHigh,
@@ -3787,7 +3901,7 @@ private fun LiquidGlassPlaylistTrackRow(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(18.dp))
                 .background(if (current) Color.White.copy(alpha = 0.09f) else Color.Transparent)
-                .clickable(role = Role.Button, onClick = onClick)
+                .tapClickable(role = Role.Button, onClick = onClick)
                 .padding(start = 20.dp, end = 22.dp, top = 13.dp, bottom = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -3948,10 +4062,10 @@ private fun MobileHeader(
             Text("Lazer", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
         }
         if (showControls) {
-            IconButton(onClick = onScan) {
+            IconButton(onClick = tapFeedback(onScan)) {
                 Icon(Icons.Outlined.QrCodeScanner, tr("scan.open"))
             }
-            IconButton(onClick = onListenTogether) {
+            IconButton(onClick = tapFeedback(onListenTogether)) {
                 Icon(
                     Icons.Outlined.Headphones,
                     tr("listen_together.open"),
@@ -3962,13 +4076,13 @@ private fun MobileHeader(
                     },
                 )
             }
-            IconButton(onClick = controller::toggleTheme) {
+            IconButton(onClick = tapFeedback(controller::toggleTheme)) {
                 Icon(
                     if (controller.isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
                     tr("player.toggle_theme"),
                 )
             }
-            IconButton(onClick = controller::openSettings) {
+            IconButton(onClick = tapFeedback(controller::openSettings)) {
                 Icon(Icons.Outlined.Settings, tr("player.open_settings"))
             }
         }
@@ -4060,7 +4174,7 @@ private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit)
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp))
             .background(if (current) colors.primaryContainer.copy(alpha = 0.58f) else Color.Transparent)
-            .clickable(role = Role.Button, onClick = tapped).padding(horizontal = 8.dp, vertical = 8.dp),
+            .tapClickable(role = Role.Button, onClick = tapped).padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         MobileArtwork(track.coverUrl, track.title, Modifier.size(48.dp), 12.dp, saveOnLongPress = true)
@@ -4145,6 +4259,7 @@ private fun MobileArtwork(
  * only fires [onLongPress] and swallows the rest of the gesture so the release is never read as a
  * tap by either.
  */
+@Composable
 private fun artworkGestures(
     url: String?,
     label: String,
@@ -4154,7 +4269,7 @@ private fun artworkGestures(
     onClick != null -> Modifier.combinedClickable(
         role = Role.Button,
         onLongClick = onLongPress,
-        onClick = onClick,
+        onClick = tapFeedback(onClick),
     )
     onLongPress != null -> Modifier.onLongPressOnly(url + label, onLongPress)
     else -> Modifier
@@ -4185,7 +4300,7 @@ private fun Modifier.copyOnLongPress(titleKey: String, hintKey: String, value: S
     val answer = rememberTapAnswer()
     val request = rememberUpdatedState(AndroidCopyTextRequest(titleKey, hintKey, value))
     return onLongPressOnly(value) {
-        // The sheet is a response to the hand, so it answers it — at the strength the reader chose.
+        // The sheet is a response to the hand, so it answers it the way a tap does.
         answer()
         requestCopy(request.value)
     }
@@ -4278,7 +4393,7 @@ private fun MiniPlayer(
                 .height(if (compact) 60.dp else 72.dp)
                 .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 10.dp)
                 .clip(shape)
-                .clickable(role = Role.Button, onClick = tapFeedback(onOpen))
+                .tapClickable(role = Role.Button, onClick = onOpen)
                 .semantics { contentDescription = tr("player.now_playing") },
             contentAlignment = Alignment.Center,
         ) {
@@ -4286,7 +4401,7 @@ private fun MiniPlayer(
         }
     } else {
         Surface(
-            modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).clickable(role = Role.Button, onClick = tapFeedback(onOpen)),
+            modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).tapClickable(role = Role.Button, onClick = onOpen),
             color = colors.surface.copy(alpha = 0.98f * LocalLazerUiAlpha.current),
             border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.78f)),
             content = content,
@@ -4701,7 +4816,7 @@ private fun AndroidArtistNames(
     Text(
         text = names,
         modifier = modifier
-            .then(if (available.isNotEmpty()) Modifier.clickable { openArtists(available) } else Modifier)
+            .then(if (available.isNotEmpty()) Modifier.tapClickable { openArtists(available) } else Modifier)
             .then(
                 if (offerCopy) Modifier.copyOnLongPress("song.copy.artist", "song.copy.hint", names) else Modifier,
             ),
@@ -4796,7 +4911,7 @@ private fun NowPlayingPage(
                                 size = 40.dp,
                             ) { Icon(Icons.Filled.Close, null, tint = colors.onSurface) }
                             Spacer(Modifier.weight(1f))
-                            IconButton(onClick = onToggleLiked, modifier = Modifier.size(44.dp)) {
+                            IconButton(onClick = tapFeedback(onToggleLiked), modifier = Modifier.size(44.dp)) {
                                 Icon(
                                     if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                                     if (isLiked) tr("player.like.remove") else tr("player.like.add"),
@@ -4868,11 +4983,11 @@ private fun NowPlayingPage(
                                 ),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                IconButton(onClick = onPrevious, modifier = Modifier.size(44.dp)) {
+                                IconButton(onClick = tapFeedback(onPrevious), modifier = Modifier.size(44.dp)) {
                                     Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(27.dp))
                                 }
                                 IconButton(
-                                    onClick = onToggle,
+                                    onClick = tapFeedback(onToggle),
                                     modifier = Modifier.size(52.dp),
                                     colors = IconButtonDefaults.iconButtonColors(containerColor = colors.primary, contentColor = colors.onPrimary),
                                 ) {
@@ -4882,7 +4997,7 @@ private fun NowPlayingPage(
                                         Modifier.size(29.dp),
                                     )
                                 }
-                                IconButton(onClick = onNext, modifier = Modifier.size(44.dp)) {
+                                IconButton(onClick = tapFeedback(onNext), modifier = Modifier.size(44.dp)) {
                                     Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(27.dp))
                                 }
                             }
@@ -4991,7 +5106,7 @@ private fun NowPlayingPage(
                         }
                         // The liked state belongs to the song, so it stays beside its title
                         // instead of travelling with the transport controls below.
-                        IconButton(onClick = onToggleLiked, modifier = Modifier.size(44.dp)) {
+                        IconButton(onClick = tapFeedback(onToggleLiked), modifier = Modifier.size(44.dp)) {
                             Icon(
                                 if (isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                                 if (isLiked) tr("player.like.remove") else tr("player.like.add"),
@@ -5085,11 +5200,11 @@ private fun NowPlayingPage(
                             ),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            IconButton(onClick = onPrevious, modifier = Modifier.size(48.dp)) {
+                            IconButton(onClick = tapFeedback(onPrevious), modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(30.dp))
                             }
                             IconButton(
-                                onClick = onToggle,
+                                onClick = tapFeedback(onToggle),
                                 modifier = Modifier.size(64.dp),
                                 colors = IconButtonDefaults.iconButtonColors(
                                     containerColor = colors.primary,
@@ -5102,7 +5217,7 @@ private fun NowPlayingPage(
                                     Modifier.size(34.dp),
                                 )
                             }
-                            IconButton(onClick = onNext, modifier = Modifier.size(48.dp)) {
+                            IconButton(onClick = tapFeedback(onNext), modifier = Modifier.size(48.dp)) {
                                 Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(30.dp))
                             }
                         }
@@ -5160,7 +5275,7 @@ private fun NowPlayingPage(
                             .combinedClickable(
                                 role = Role.Button,
                                 onClickLabel = tr(if (coverOpen) "player.cover.collapse" else "player.cover.expand"),
-                                onClick = {
+                                onClick = tapFeedback {
                                     coverLayoutPicked = true
                                     coverExpanded = !coverOpen
                                 },
@@ -5199,25 +5314,39 @@ private fun ThinSeekBar(
     val buffered = maxOf(fraction, bufferedProgress.coerceIn(0f, 1f))
     val latestSeek by androidx.compose.runtime.rememberUpdatedState(onSeek)
     val latestFinished by androidx.compose.runtime.rememberUpdatedState(onFinished)
+    // Divided by the length of the track rather than by distance; see SEEK_DETENTS.
+    val detent = rememberDetentAnswer { position ->
+        (position * SEEK_DETENTS).toInt().coerceAtMost(SEEK_DETENTS - 1)
+    }
+    val landedTap = rememberTapAnswer()
+    // A gesture that is already running holds on to the callbacks it started with unless these say
+    // otherwise, which would leave a drag that outlives a settings change answering at the old level.
+    val latestDetent by rememberUpdatedState(detent)
+    val latestLanded by rememberUpdatedState(landedTap)
     BoxWithConstraints(
         Modifier.height(48.dp).fillMaxWidth().semantics {
             progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
             setProgress { value ->
                 latestSeek(value.coerceIn(0f, 1f))
                 latestFinished()
+                latestLanded()
                 true
             }
         }.pointerInput(Unit) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val width = size.width.coerceAtLeast(1)
-                latestSeek((down.position.x / width).coerceIn(0f, 1f)); down.consume()
+                val grabbed = (down.position.x / width).coerceIn(0f, 1f)
+                latestSeek(grabbed); latestDetent(grabbed); down.consume()
                 while (true) {
                     val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                    latestSeek((change.position.x / width).coerceIn(0f, 1f)); change.consume()
+                    val moved = (change.position.x / width).coerceIn(0f, 1f)
+                    latestSeek(moved); latestDetent(moved); change.consume()
                     if (!change.pressed) break
                 }
                 latestFinished()
+                // Letting go is the seek, so it answers with the tap click rather than a notch.
+                latestLanded()
             }
         },
         contentAlignment = Alignment.CenterStart,
@@ -5259,7 +5388,7 @@ private fun ArtistChoiceSheet(
             Spacer(Modifier.height(4.dp))
             artists.forEach { artist ->
                 Surface(
-                    modifier = Modifier.fillMaxWidth().clickable { onChoose(artist) },
+                    modifier = Modifier.fillMaxWidth().tapClickable { onChoose(artist) },
                     shape = RoundedCornerShape(14.dp),
                     color = colors.surfaceVariant.copy(alpha = 0.48f),
                 ) {

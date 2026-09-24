@@ -154,7 +154,7 @@ private fun SignedOutListenTogether(controller: AndroidGatewayController) {
             style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(onClick = controller::openLogin, modifier = Modifier.fillMaxWidth()) {
+        Button(onClick = tapFeedback(controller::openLogin), modifier = Modifier.fillMaxWidth()) {
             Text(tr("listen_together.login_action"))
         }
     }
@@ -182,7 +182,7 @@ private fun ListenTogetherLobby(
             ListenTogetherRoomKind.entries.forEach { kind ->
                 FilterChip(
                     selected = roomKind == kind,
-                    onClick = { roomKind = kind },
+                    onClick = tapFeedback { roomKind = kind },
                     label = { Text(tr(kind.labelKey)) },
                 )
                 Spacer(Modifier.width(8.dp))
@@ -199,7 +199,7 @@ private fun ListenTogetherLobby(
             color = colors.onSurfaceVariant,
         )
         Button(
-            onClick = { onCreate(roomKind) },
+            onClick = tapFeedback { onCreate(roomKind) },
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
         ) {
@@ -227,7 +227,7 @@ private fun ListenTogetherLobby(
             shape = RoundedCornerShape(16.dp),
         )
         Button(
-            onClick = onJoin,
+            onClick = tapFeedback(onJoin),
             enabled = !busy && invitation.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
         ) {
@@ -265,13 +265,13 @@ private fun ActiveListenTogetherRoom(
             color = colors.onSurfaceVariant,
         )
         if (room.isHost && shareUrl != null) {
-            Button(onClick = { onShare(shareUrl) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = tapFeedback { onShare(shareUrl) }, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Outlined.Share, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text(tr("listen_together.share"))
             }
         }
-        TextButton(onClick = onEnd, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+        TextButton(onClick = tapFeedback(onEnd), enabled = !busy, modifier = Modifier.fillMaxWidth()) {
             Text(
                 if (room.isHost) tr("listen_together.end") else tr("listen_together.leave"),
                 color = colors.error,

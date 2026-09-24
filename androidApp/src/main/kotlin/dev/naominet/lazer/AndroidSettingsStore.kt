@@ -21,20 +21,6 @@ enum class AndroidPlaybackInterface {
     INDEPENDENT,
 }
 
-/**
- * Strength of the answer a landed tap gives. These map onto the platform's own haptic categories
- * rather than onto a raw vibration amplitude, so the system's haptic volume still has the last word.
- */
-enum class AndroidHapticLevel {
-    OFF,
-    LIGHT,
-    STANDARD,
-    STRONG,
-}
-
-internal fun parseAndroidHapticLevel(value: String?): AndroidHapticLevel =
-    AndroidHapticLevel.entries.firstOrNull { it.name == value } ?: AndroidHapticLevel.STANDARD
-
 internal fun parseAndroidPlaybackInterface(value: String?): AndroidPlaybackInterface =
     AndroidPlaybackInterface.entries.firstOrNull { it.name == value }
         ?: AndroidPlaybackInterface.SYSTEM_MEDIA
@@ -199,10 +185,18 @@ internal class AndroidSettingsStore(context: Context) {
         get() = preferences.getBoolean(KEY_AUDIO_REACTIVE_LEVELS, false)
         set(value) = preferences.edit().putBoolean(KEY_AUDIO_REACTIVE_LEVELS, value).apply()
 
-    /** How strongly a tap that lands answers on the hand. */
-    var hapticLevel: AndroidHapticLevel
-        get() = parseAndroidHapticLevel(preferences.getString(KEY_HAPTIC_LEVEL, null))
-        set(value) = preferences.edit().putString(KEY_HAPTIC_LEVEL, value.name).apply()
+    /**
+     * Whether a tap that lands answers on the hand. There is one strength and it belongs to the
+     * system: grading it here meant bypassing the waveform each maker tunes for its own motor, and
+     * the result felt worse than the plain platform click.
+     */
+    var hapticsEnabled: Boolean
+        get() = preferences.getBoolean(
+            KEY_HAPTICS_ENABLED,
+            // Readers who had already picked 关闭 in the old four-way choice keep that answer.
+            preferences.getString(KEY_HAPTIC_LEVEL, null) != "OFF",
+        )
+        set(value) = preferences.edit().putBoolean(KEY_HAPTICS_ENABLED, value).apply()
 
     private companion object {
         const val PREFERENCES_NAME = "lazer.android.settings"
@@ -231,6 +225,9 @@ internal class AndroidSettingsStore(context: Context) {
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"
+        const val KEY_HAPTICS_ENABLED = "interaction.haptics_enabled"
+        // The four-way strength this replaced is gone; the key is only ever read, so a reader who had
+        // chosen 关闭 does not get an answer back that they had turned off.
         const val KEY_HAPTIC_LEVEL = "interaction.haptic_level"
     }
 }

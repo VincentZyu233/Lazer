@@ -59,6 +59,51 @@ val verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
 tasks.matching { it.name == "assembleRelease" || it.name == "bundleRelease" }.configureEach {
     dependsOn(verifyReleaseSigning)
 }
+
+// Every surface that takes a tap answers with a haptic, at the strength the reader chose in
+// Settings. That is a convention the compiler cannot see, so a plain source scan enforces it: a raw
+// `Modifier.clickable`, an unwrapped Material control or a bare `LazerSlider` fails the build.
+// `// haptic-raw` exempts a line that answers through a gesture the scan cannot follow.
+val verifyTapHaptics = tasks.register("verifyTapHaptics") {
+    group = "verification"
+    description = "Fails when a clickable surface answers without a haptic."
+    val sourceRoot = file("src/main/kotlin")
+    inputs.dir(sourceRoot)
+    doLast {
+        val material = Regex("""(^|[^A-Za-z_.])(IconButton|TextButton|Button|OutlinedButton|FilledTonalButton|FilterChip|ExtendedFloatingActionButton|DropdownMenuItem)\(""")
+        val rawModifier = Regex("""\.(clickable|selectable)\(""")
+        val rawSlider = Regex("""(^|[^A-Za-z_.])LazerSlider\(""")
+        val rawCombined = Regex("""\.combinedClickable\(""")
+        val answered = Regex("""tapFeedback|tapped|answer\(\)""")
+        val offenders = mutableListOf<String>()
+
+        sourceRoot.walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
+            val lines = file.readLines()
+            lines.forEachIndexed { index, line ->
+                if (line.contains("// haptic-raw")) return@forEachIndexed
+                val where = "${file.name}:${index + 1}"
+                val window = lines.drop(index).take(14).joinToString("\n")
+                val needsAnswer = material.containsMatchIn(line) ||
+                    rawModifier.containsMatchIn(line) ||
+                    rawCombined.containsMatchIn(line)
+                when {
+                    needsAnswer && !answered.containsMatchIn(window) ->
+                        offenders += "$where  未接震动:onClick 要走 tapFeedback(...),或改用手边的 tap 版控件"
+                    rawSlider.containsMatchIn(line) ->
+                        offenders += "$where  裸 LazerSlider:改用 TapSlider,振动只落在松手那一下"
+                }
+            }
+        }
+
+        if (offenders.isNotEmpty()) {
+            throw GradleException(
+                "Tap haptics coverage failed:\n" + offenders.joinToString("\n") { "  $it" },
+            )
+        }
+    }
+}
+tasks.named("check") { dependsOn(verifyTapHaptics) }
+
 dependencies {
     implementation(project(":shared"))
 

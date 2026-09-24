@@ -625,7 +625,7 @@ private fun AnimatedLyricsViewport(
                     .combinedClickable(
                         interactionSource = null,
                         indication = null,
-                        onClick = {
+                        onClick = tapFeedback {
                             if (selection.state.isActive) {
                                 if (line.text.isNotBlank()) {
                                     selection.waveOrigin = -1
