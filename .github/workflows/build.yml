@@ -70,6 +70,7 @@ jobs:
           if ($entries -notcontains 'native/windows-x64/lazer-taskbar-bridge.dll') {
             throw 'Windows runnable JAR is missing the taskbar bridge DLL.'
           }
+          New-Item -ItemType Directory -Force -Path 'desktopApp/build/compose/binaries' | Out-Null
           Copy-Item -LiteralPath $jar.FullName -Destination 'desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64.jar'
       - name: Build portable Windows app
         shell: pwsh
