@@ -35,8 +35,7 @@ jobs:
           path: androidApp/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-  # Every branch/PR produces the x64 portable app image and runnable fat jar. The MSI is
-  # release-only: jpackage/WiX packaging is slow and must not delay interactive validation.
+  # Windows x64 MSI, portable app image, and runnable fat jar.
   desktop:
     # windows-2022 supplies the Visual Studio 2022 C++ toolchain used by the x64 taskbar bridge.
     runs-on: windows-2022
@@ -50,9 +49,8 @@ jobs:
       # setup-gradle caches Gradle toolchain/dependencies and the project build cache. MSVC and
       # CMake come from the versioned hosted runner image; generated native output is never cached.
       - uses: gradle/actions/setup-gradle@v4
-      # jpackage needs WiX only when making a versioned MSI release.
+      # jpackage needs WiX to produce an .msi.
       - name: Install WiX Toolset
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: |
           choco install wixtoolset --no-progress -y
@@ -103,7 +101,8 @@ jobs:
           $app = Get-ChildItem 'desktopApp/build/compose/binaries/main-release/app' -Directory | Select-Object -First 1
           if ($null -eq $app) { throw 'Compose app image was not created.' }
           tar.exe -a -c -f 'desktopApp/build/compose/binaries/Lazer-1.2.0-windows-x64-portable.zip' -C $app.Parent.FullName $app.Name
-      # Upload the packages used for branch/PR testing before optional release packaging.
+      # Upload the portable packages before the installer so they remain available if a later
+      # installer-specific failure needs diagnosis.
       - uses: actions/upload-artifact@v4
         with:
           name: lazer-jar-windows-x64
@@ -114,14 +113,10 @@ jobs:
           name: lazer-windows-x64-portable
           path: desktopApp/build/compose/binaries/*-windows-x64-portable.zip
           if-no-files-found: error
-      # Keep the installer as a release deliverable without making it a prerequisite for
-      # branch builds or portable-app regression testing.
       - name: Build MSI
-        if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         run: .\gradlew.bat :desktopApp:packageMsi -PwindowsArch=x64 --stacktrace
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: lazer-msi
           path: desktopApp/build/compose/binaries/**/*.msi

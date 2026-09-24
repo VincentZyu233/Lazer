@@ -272,8 +272,21 @@ void InstallTaskbarSubclass(HWND hwnd, TaskbarState& state) {
 LRESULT CALLBACK TaskbarCallWindowHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
-        if (TaskbarState* state = FindState(message->hwnd); state != nullptr) {
-            HandleTaskbarMessage(message->hwnd, *state, message->message, message->wParam, message->lParam);
+        TaskbarState* state = FindState(message->hwnd);
+        const int action = MediaActionForMessage(message->message, message->wParam, message->lParam);
+        if (state == nullptr && action != 0) {
+            // Explorer may send THBN_CLICKED to the Compose canvas (or another
+            // peer) instead of the top-level frame used for ThumbBarAddButtons.
+            // The command IDs are private to this bridge, so owner-thread routing
+            // remains unambiguous while preserving the visible frame as the target.
+            state = FindStateForOwnerThread();
+            if (state != nullptr) {
+                DebugMessage(L"foreign-window-command", message->hwnd, message->message,
+                    message->wParam, message->lParam);
+            }
+        }
+        if (state != nullptr) {
+            HandleTaskbarMessage(state->hwnd, *state, message->message, message->wParam, message->lParam);
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
@@ -287,11 +300,11 @@ LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
         // target HWND, but remains on the taskbar window's owner thread. Keep
         // this fallback strict to our three IDs so unrelated AWT messages can
         // never be consumed.
-        if (state == nullptr && message->hwnd == nullptr &&
-            MediaActionForMessage(message->message, message->wParam, message->lParam) != 0) {
+        if (state == nullptr && MediaActionForMessage(message->message, message->wParam, message->lParam) != 0) {
             state = FindStateForOwnerThread();
             if (state != nullptr) {
-                DebugMessage(L"thread-command", message->hwnd, message->message, message->wParam, message->lParam);
+                DebugMessage(message->hwnd == nullptr ? L"thread-command" : L"foreign-window-command",
+                    message->hwnd, message->message, message->wParam, message->lParam);
                 HandleTaskbarMessage(state->hwnd, *state, message->message, message->wParam, message->lParam);
                 message->message = WM_NULL;
             }
