@@ -4182,8 +4182,13 @@ private fun Modifier.onLongPressOnly(key: Any, onLongPress: () -> Unit): Modifie
 @Composable
 private fun Modifier.copyOnLongPress(titleKey: String, hintKey: String, value: String): Modifier {
     val requestCopy = LocalAndroidRequestCopyText.current
+    val answer = rememberTapAnswer()
     val request = rememberUpdatedState(AndroidCopyTextRequest(titleKey, hintKey, value))
-    return onLongPressOnly(value) { requestCopy(request.value) }
+    return onLongPressOnly(value) {
+        // The sheet is a response to the hand, so it answers it — at the strength the reader chose.
+        answer()
+        requestCopy(request.value)
+    }
 }
 
 @Composable
