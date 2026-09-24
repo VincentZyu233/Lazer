@@ -207,7 +207,7 @@ class AndroidGatewayController(context: Context) {
         private set
     var audioReactiveLevels by mutableStateOf(settings.audioReactiveLevels)
         private set
-    var hapticLevel by mutableStateOf(settings.hapticLevel)
+    var hapticsEnabled by mutableStateOf(settings.hapticsEnabled)
         private set
     val independentPlayback: Boolean
         get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
@@ -1075,9 +1075,9 @@ class AndroidGatewayController(context: Context) {
         AndroidPlaybackConnection.updateAudioLevels(appContext)
     }
 
-    fun updateHapticLevel(level: AndroidHapticLevel) {
-        hapticLevel = level
-        settings.hapticLevel = level
+    fun updateHapticsEnabled(enabled: Boolean) {
+        hapticsEnabled = enabled
+        settings.hapticsEnabled = enabled
     }
 
     /** Shown when the user asks for the audio-reactive indicator but withholds the permission. */
