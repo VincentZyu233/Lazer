@@ -134,6 +134,14 @@ TaskbarState* FindState(HWND hwnd) {
     return it == g_states.end() ? nullptr : it->second.get();
 }
 
+TaskbarState* FindStateForOwnerThread() {
+    const DWORD currentThreadId = GetCurrentThreadId();
+    for (auto& [_, state] : g_states) {
+        if (state->ownerThreadId == currentThreadId) return state.get();
+    }
+    return nullptr;
+}
+
 HICON LoadIconFile(const wchar_t* path) {
     if (path == nullptr || *path == L'\0') return nullptr;
     return static_cast<HICON>(LoadImageW(nullptr, path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE));
@@ -274,7 +282,21 @@ LRESULT CALLBACK TaskbarCallWindowHook(int code, WPARAM wParam, LPARAM lParam) {
 LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         auto* message = reinterpret_cast<MSG*>(lParam);
-        if (TaskbarState* state = FindState(message->hwnd); state != nullptr) {
+        TaskbarState* state = FindState(message->hwnd);
+        // Explorer can post THBN_CLICKED as a thread message. It then has no
+        // target HWND, but remains on the taskbar window's owner thread. Keep
+        // this fallback strict to our three IDs so unrelated AWT messages can
+        // never be consumed.
+        if (state == nullptr && message->hwnd == nullptr &&
+            MediaActionForMessage(message->message, message->wParam, message->lParam) != 0) {
+            state = FindStateForOwnerThread();
+            if (state != nullptr) {
+                DebugMessage(L"thread-command", message->hwnd, message->message, message->wParam, message->lParam);
+                HandleTaskbarMessage(state->hwnd, *state, message->message, message->wParam, message->lParam);
+                message->message = WM_NULL;
+            }
+        }
+        if (state != nullptr && message->message != WM_NULL) {
             if (message->message == kInstallSubclassMessage) {
                 InstallTaskbarSubclass(message->hwnd, *state);
                 message->message = WM_NULL;
