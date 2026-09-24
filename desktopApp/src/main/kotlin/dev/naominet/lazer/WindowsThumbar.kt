@@ -38,6 +38,7 @@ internal class WindowsThumbar(
     // A native DLL never retains a JVM callback automatically.
     private val callback = object : WindowsTaskbarBridge.ActionCallback {
         override fun callback(action: Int) {
+            WindowsTaskbarDebugLog.event("native-callback", "action=$action")
             when (action) {
                 ACTION_PREVIOUS -> dispatchAction(MediaControlAction.Previous)
                 ACTION_PLAY_PAUSE -> dispatchAction(MediaControlAction.PlayPause)
@@ -69,6 +70,15 @@ internal class WindowsThumbar(
                 PlaybackDebugLog.event("thumbar-bridge-load-failed")
                 return
             }
+            if (WindowsTaskbarDebugLog.enabled) {
+                val configured = loadedBridge.lazer_taskbar_set_debug_log_path(
+                    WString(WindowsTaskbarDebugLog.nativeLogPath.toString()),
+                ) != 0
+                WindowsTaskbarDebugLog.event(
+                    "native-log-configured",
+                    "configured=$configured hwnd=${Pointer.nativeValue(handle)}",
+                )
+            }
             hwnd = handle
             bridge = loadedBridge
             installed = loadedBridge.lazer_taskbar_install(
@@ -85,8 +95,10 @@ internal class WindowsThumbar(
                 callback,
             ) != 0
             PlaybackDebugLog.event(if (installed) "thumbar-installed" else "thumbar-install-failed")
+            WindowsTaskbarDebugLog.event("install-result", "installed=$installed hwnd=${Pointer.nativeValue(handle)}")
         }.onFailure { error ->
             PlaybackDebugLog.event("thumbar-install-error", error.playbackDebugSummary())
+            WindowsTaskbarDebugLog.event("install-error", error.playbackDebugSummary())
         }
     }
 
@@ -118,11 +130,16 @@ internal class WindowsThumbar(
      */
     private fun dispatchAction(action: MediaControlAction) {
         PlaybackDebugLog.event("thumbar-action-received", action.name)
+        WindowsTaskbarDebugLog.event("action-received", action.name)
         EventQueue.invokeLater {
             runCatching { onAction(action) }
-                .onSuccess { PlaybackDebugLog.event("thumbar-action-dispatched", action.name) }
+                .onSuccess {
+                    PlaybackDebugLog.event("thumbar-action-dispatched", action.name)
+                    WindowsTaskbarDebugLog.event("action-dispatched", action.name)
+                }
                 .onFailure { error ->
                     PlaybackDebugLog.event("thumbar-action-error", error.playbackDebugSummary())
+                    WindowsTaskbarDebugLog.event("action-error", error.playbackDebugSummary())
                 }
         }
     }
@@ -201,6 +218,8 @@ private interface WindowsTaskbarBridge : Library {
     ): Int
 
     fun lazer_taskbar_remove(hwnd: Pointer)
+
+    fun lazer_taskbar_set_debug_log_path(path: WString): Int
 }
 
 private object WindowsTaskbarBridgeLoader {

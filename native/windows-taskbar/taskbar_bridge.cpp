@@ -3,6 +3,11 @@
 #include <shobjidl_core.h>
 
 #include <memory>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -81,6 +86,61 @@ std::unordered_map<HWND, std::unique_ptr<TaskbarState>> g_states;
 // state, while command IDs still provide the final strict filter.
 std::unordered_map<HWND, HWND> g_peerWindows;
 UINT g_taskbarButtonCreated = 0;
+std::mutex g_debugLogMutex;
+std::wstring g_debugLogPath;
+constexpr uintmax_t kMaxDebugLogBytes = 512 * 1024;
+
+std::wstring WindowDetails(HWND hwnd) {
+    wchar_t className[256]{};
+    GetClassNameW(hwnd, className, ARRAYSIZE(className));
+    DWORD processId = 0;
+    const DWORD threadId = GetWindowThreadProcessId(hwnd, &processId);
+    std::wstringstream value;
+    value << L"hwnd=0x" << std::hex << reinterpret_cast<UINT_PTR>(hwnd)
+          << L" class=" << className
+          << L" pid=" << std::dec << processId
+          << L" thread=" << threadId
+          << L" visible=" << (IsWindowVisible(hwnd) ? 1 : 0)
+          << L" style=0x" << std::hex << static_cast<ULONG_PTR>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    return value.str();
+}
+
+void DebugLog(const wchar_t* event, const std::wstring& details = L"") {
+    std::lock_guard lock(g_debugLogMutex);
+    if (g_debugLogPath.empty()) return;
+    const std::filesystem::path path(g_debugLogPath);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (std::filesystem::exists(path, error) && std::filesystem::file_size(path, error) >= kMaxDebugLogBytes) {
+        std::filesystem::rename(path, path.parent_path() / L"taskbar-native.previous.log", error);
+        if (error) {
+            error.clear();
+            std::filesystem::remove(path.parent_path() / L"taskbar-native.previous.log", error);
+            error.clear();
+            std::filesystem::rename(path, path.parent_path() / L"taskbar-native.previous.log", error);
+        }
+    }
+    std::wofstream output(path, std::ios::app);
+    if (!output) return;
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    output << std::setfill(L'0')
+           << now.wYear << L'-' << std::setw(2) << now.wMonth << L'-' << std::setw(2) << now.wDay
+           << L'T' << std::setw(2) << now.wHour << L':' << std::setw(2) << now.wMinute
+           << L':' << std::setw(2) << now.wSecond << L'.' << std::setw(3) << now.wMilliseconds
+           << L"Z [thread=" << GetCurrentThreadId() << L"] " << event << L' ' << details << L'\n';
+}
+
+void DebugMessage(const wchar_t* source, HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    std::wstringstream details;
+    details << WindowDetails(hwnd)
+            << L" message=0x" << std::hex << message
+            << L" wParam=0x" << static_cast<ULONG_PTR>(wParam)
+            << L" lParam=0x" << static_cast<ULONG_PTR>(lParam)
+            << L" low=" << std::dec << LOWORD(wParam)
+            << L" high=" << HIWORD(wParam);
+    DebugLog(source, details.str());
+}
 
 void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state);
 
@@ -145,10 +205,16 @@ HRESULT ApplyButtons(HWND hwnd, TaskbarState& state) {
         buttons[index].dwFlags = THBF_HIDDEN;
     }
 
-    const HRESULT result = state.buttonsAddedWindows.contains(hwnd)
+    const bool updating = state.buttonsAddedWindows.contains(hwnd);
+    const HRESULT result = updating
         ? state.taskbar->ThumbBarUpdateButtons(hwnd, ARRAYSIZE(buttons), buttons)
         : state.taskbar->ThumbBarAddButtons(hwnd, ARRAYSIZE(buttons), buttons);
     if (SUCCEEDED(result)) state.buttonsAddedWindows.emplace(hwnd);
+    std::wstringstream details;
+    details << WindowDetails(hwnd) << L" operation="
+            << (updating ? L"update" : L"add")
+            << L" hresult=0x" << std::hex << static_cast<unsigned long>(result);
+    DebugLog(L"thumbbar-apply", details.str());
     return result;
 }
 
@@ -222,6 +288,10 @@ void ApplyButtonsOnOwnerThread(HWND hwnd, TaskbarState& state) {
 }
 
 void HandleTaskbarMessage(HWND hwnd, TaskbarState& state, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == g_taskbarButtonCreated || message == WM_SETTINGCHANGE ||
+        message == WM_COMMAND || message == WM_APPCOMMAND) {
+        DebugMessage(L"taskbar-message", hwnd, message, wParam, lParam);
+    }
     if (message == g_taskbarButtonCreated) {
         state.buttonsAddedWindows.erase(hwnd);
         ApplyButtonsOnOwnerThread(hwnd, state);
@@ -283,6 +353,9 @@ void EnsureTaskbarSubclass(HWND hwnd, TaskbarState& state) {
     if (!knownWindow && state.callback != nullptr) {
         state.callback(installed ? kActionSubclassInstalled : kActionSubclassInstallFailed);
     }
+    if (!knownWindow || !installed) {
+        DebugLog(L"subclass", WindowDetails(hwnd) + L" installed=" + (installed ? L"1" : L"0"));
+    }
 }
 
 bool InstallTaskbarHooksForThread(TaskbarState& state, DWORD threadId) {
@@ -323,6 +396,7 @@ BOOL CALLBACK CollectPeerWindow(HWND candidate, LPARAM value) {
     if (GetAncestor(candidate, GA_ROOT) == candidate) {
         collector.state.taskbarWindows.emplace(candidate);
     }
+    DebugLog(L"peer-window", WindowDetails(candidate));
     InstallTaskbarHooksForThread(collector.state, threadId);
     // The thread hook installs the subclass from the window's own message queue.
     PostMessageW(candidate, kInstallInputSubclassMessage, 0, 0);
@@ -333,6 +407,7 @@ BOOL CALLBACK CollectPeerWindow(HWND candidate, LPARAM value) {
 void AttachProcessPeerWindows(TaskbarState& state, HWND taskbarHwnd) {
     PeerWindowCollector collector { state, taskbarHwnd, GetCurrentProcessId() };
     EnumWindows(CollectPeerWindow, reinterpret_cast<LPARAM>(&collector));
+    DebugLog(L"peer-windows-attached", WindowDetails(taskbarHwnd) + L" peers=" + std::to_wstring(state.peerWindows.size()));
     if (state.callback != nullptr) {
         state.callback(kActionPeerWindowsAttached | static_cast<int>(state.peerWindows.size() & 0xFFFF));
     }
@@ -344,6 +419,9 @@ void AttachProcessPeerWindows(TaskbarState& state, HWND taskbarHwnd) {
 LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         const auto* message = reinterpret_cast<const CWPSTRUCT*>(lParam);
+        if (message->message == WM_COMMAND || message->message == WM_APPCOMMAND) {
+            DebugMessage(L"call-window-command", message->hwnd, message->message, message->wParam, message->lParam);
+        }
         if (message->message == WM_COMMAND) {
             HWND stateHwnd = nullptr;
             TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd);
@@ -373,6 +451,9 @@ LRESULT CALLBACK TaskbarMessageHook(int code, WPARAM wParam, LPARAM lParam) {
 LRESULT CALLBACK TaskbarGetMessageHook(int code, WPARAM wParam, LPARAM lParam) {
     if (code >= 0) {
         auto* message = reinterpret_cast<MSG*>(lParam);
+        if (message->message == WM_COMMAND || message->message == WM_APPCOMMAND) {
+            DebugMessage(L"queued-command", message->hwnd, message->message, message->wParam, message->lParam);
+        }
         if (message->message == WM_COMMAND) {
             HWND stateHwnd = nullptr;
             TaskbarState* state = FindStateForWindow(message->hwnd, stateHwnd);
@@ -428,11 +509,24 @@ bool UpdateState(HWND hwnd, const wchar_t* previous, const wchar_t* play, const 
 } // namespace
 
 extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd);
+extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_set_debug_log_path(const wchar_t* path);
+
+extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_set_debug_log_path(const wchar_t* path) {
+    {
+        std::lock_guard lock(g_debugLogMutex);
+        g_debugLogPath = path == nullptr ? L"" : path;
+    }
+    if (path != nullptr && *path != L'\0') {
+        DebugLog(L"debug-enabled", L"pid=" + std::to_wstring(GetCurrentProcessId()));
+    }
+    return 1;
+}
 
 extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     const wchar_t* previous, const wchar_t* play, const wchar_t* pause, const wchar_t* next,
     const wchar_t* previousTooltip, const wchar_t* playTooltip, const wchar_t* pauseTooltip,
     const wchar_t* nextTooltip, int isPlaying, ActionCallback callback) {
+    DebugLog(L"install-request", WindowDetails(hwnd));
     hwnd = ResolveTaskbarWindow(hwnd);
     if (hwnd == nullptr) return 0;
     if (g_taskbarButtonCreated == 0) g_taskbarButtonCreated = RegisterWindowMessageW(L"TaskbarButtonCreated");
@@ -444,6 +538,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_install(HWND hwnd,
     state->taskbarHwnd = hwnd;
     state->taskbarWindows.emplace(hwnd);
     g_states.emplace(hwnd, std::move(state));
+    DebugLog(L"install-target", WindowDetails(hwnd));
     // The Compose call is on AWT-EventQueue-0, whereas the native peer can be owned by AWT-
     // Windows or a short-lived taskbar proxy. Attach every in-process peer and each UI thread.
     // Calls are still applied from the taskbar HWND's own queue below.
@@ -462,6 +557,7 @@ extern "C" __declspec(dllexport) int __stdcall lazer_taskbar_update(HWND hwnd,
     const wchar_t* previous, const wchar_t* play, const wchar_t* pause, const wchar_t* next,
     const wchar_t* previousTooltip, const wchar_t* playTooltip, const wchar_t* pauseTooltip,
     const wchar_t* nextTooltip, int isPlaying) {
+    DebugLog(L"update-request", WindowDetails(hwnd));
     return UpdateState(ResolveTaskbarWindow(hwnd), previous, play, pause, next, previousTooltip, playTooltip,
         pauseTooltip, nextTooltip, isPlaying) ? 1 : 0;
 }
@@ -471,6 +567,7 @@ extern "C" __declspec(dllexport) void __stdcall lazer_taskbar_remove(HWND hwnd) 
     if (hwnd == nullptr) return;
     const auto it = g_states.find(hwnd);
     if (it == g_states.end()) return;
+    DebugLog(L"remove", WindowDetails(hwnd));
     for (const HWND taskbarWindow : it->second->taskbarWindows) {
         KillTimer(taskbarWindow, kRetryTimerId);
         KillTimer(taskbarWindow, kSubclassRefreshTimerId);

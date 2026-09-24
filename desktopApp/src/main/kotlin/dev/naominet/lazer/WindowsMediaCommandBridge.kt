@@ -5,6 +5,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.file.Path
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -16,12 +17,38 @@ internal enum class WindowsMediaCommand(val argument: String, val action: MediaC
 }
 
 internal const val MEDIA_COMMAND_ARGUMENT = "--lazer-media-command="
+internal const val TASKBAR_DEBUG_LOG_ARGUMENT = "--debug-log"
 private const val MEDIA_COMMAND_PORT = 52473
 
 internal fun windowsMediaCommandFromArgs(args: Array<String>): WindowsMediaCommand? =
     args.firstOrNull { it.startsWith(MEDIA_COMMAND_ARGUMENT) }
         ?.removePrefix(MEDIA_COMMAND_ARGUMENT)
         ?.let { value -> WindowsMediaCommand.entries.firstOrNull { it.argument == value } }
+
+internal fun windowsTaskbarDebugLoggingFromArgs(args: Array<String>): Boolean =
+    args.any { it == TASKBAR_DEBUG_LOG_ARGUMENT }
+
+internal fun windowsTaskbarNativeLogPath(home: Path): Path =
+    home.resolve(".lazer").resolve("logs").resolve("taskbar-native.log")
+
+/** Opt-in diagnostics for the native Windows thumbnail-toolbar bridge. */
+internal object WindowsTaskbarDebugLog {
+    @Volatile
+    var enabled: Boolean = false
+        private set
+
+    val nativeLogPath: Path
+        get() = windowsTaskbarNativeLogPath(Path.of(System.getProperty("user.home")))
+
+    fun configure(args: Array<String>) {
+        enabled = windowsTaskbarDebugLoggingFromArgs(args)
+        if (enabled) PlaybackDebugLog.event("taskbar-debug-enabled", "native-log=$nativeLogPath")
+    }
+
+    fun event(name: String, details: String = "") {
+        if (enabled) PlaybackDebugLog.event("taskbar-$name", details)
+    }
+}
 
 /**
  * A loopback-only bridge lets Jump List tasks control the already-running player.

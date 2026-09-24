@@ -37,6 +37,7 @@ import java.awt.Toolkit
  *   run-desktop.bat
  */
 fun main(args: Array<String>) {
+    WindowsTaskbarDebugLog.configure(args)
     val startupCommand = windowsMediaCommandFromArgs(args)
     if (startupCommand != null && WindowsMediaCommandBridge.forwardToRunning(startupCommand)) return
     WindowsJumpList.prepareAppUserModelId()

@@ -9,6 +9,7 @@ import java.awt.Rectangle
 import java.io.IOException
 import java.io.InputStream
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.Comparator
 import javax.sound.sampled.AudioFormat
 import kotlinx.coroutines.runBlocking
@@ -43,6 +44,18 @@ class DesktopMediaAndCacheTest {
         assertEquals(null, thumbarActionFromCommand(1))
         assertEquals(null, thumbarActionFromCommand(2))
         assertEquals(null, thumbarActionFromCommand(0xFFFF))
+    }
+
+    @Test
+    fun `taskbar debug logging is an explicit launch option with a stable native path`() {
+        assertTrue(windowsTaskbarDebugLoggingFromArgs(arrayOf(TASKBAR_DEBUG_LOG_ARGUMENT)))
+        assertTrue(windowsTaskbarDebugLoggingFromArgs(arrayOf("--other", TASKBAR_DEBUG_LOG_ARGUMENT)))
+        assertFalse(windowsTaskbarDebugLoggingFromArgs(arrayOf("--debug-log=true")))
+        assertFalse(windowsTaskbarDebugLoggingFromArgs(emptyArray()))
+        assertEquals(
+            Path.of("C:/Users/Lazer", ".lazer", "logs", "taskbar-native.log"),
+            windowsTaskbarNativeLogPath(Path.of("C:/Users/Lazer")),
+        )
     }
 
     @Test

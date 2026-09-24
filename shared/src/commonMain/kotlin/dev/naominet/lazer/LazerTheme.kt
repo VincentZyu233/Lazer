@@ -1,6 +1,7 @@
 package dev.naominet.lazer
 
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -385,6 +386,59 @@ private val MiuixMaterialShapes = Shapes(
     extraLarge = RoundedCornerShape(32.dp),
 )
 
+private const val ThemeTransitionMillis = 320
+
+@Composable
+private fun animatedThemeColor(target: Color, label: String): Color {
+    val color by animateColorAsState(
+        targetValue = target,
+        animationSpec = tween(durationMillis = ThemeTransitionMillis, easing = FastOutSlowInEasing),
+        label = label,
+    )
+    return color
+}
+
+/** Interpolates every Material semantic color so a theme change does not flash between frames. */
+@Composable
+private fun rememberAnimatedColorScheme(target: ColorScheme): ColorScheme = target.copy(
+    primary = animatedThemeColor(target.primary, "theme-primary"),
+    onPrimary = animatedThemeColor(target.onPrimary, "theme-on-primary"),
+    primaryContainer = animatedThemeColor(target.primaryContainer, "theme-primary-container"),
+    onPrimaryContainer = animatedThemeColor(target.onPrimaryContainer, "theme-on-primary-container"),
+    inversePrimary = animatedThemeColor(target.inversePrimary, "theme-inverse-primary"),
+    secondary = animatedThemeColor(target.secondary, "theme-secondary"),
+    onSecondary = animatedThemeColor(target.onSecondary, "theme-on-secondary"),
+    secondaryContainer = animatedThemeColor(target.secondaryContainer, "theme-secondary-container"),
+    onSecondaryContainer = animatedThemeColor(target.onSecondaryContainer, "theme-on-secondary-container"),
+    tertiary = animatedThemeColor(target.tertiary, "theme-tertiary"),
+    onTertiary = animatedThemeColor(target.onTertiary, "theme-on-tertiary"),
+    tertiaryContainer = animatedThemeColor(target.tertiaryContainer, "theme-tertiary-container"),
+    onTertiaryContainer = animatedThemeColor(target.onTertiaryContainer, "theme-on-tertiary-container"),
+    background = animatedThemeColor(target.background, "theme-background"),
+    onBackground = animatedThemeColor(target.onBackground, "theme-on-background"),
+    surface = animatedThemeColor(target.surface, "theme-surface"),
+    onSurface = animatedThemeColor(target.onSurface, "theme-on-surface"),
+    surfaceVariant = animatedThemeColor(target.surfaceVariant, "theme-surface-variant"),
+    onSurfaceVariant = animatedThemeColor(target.onSurfaceVariant, "theme-on-surface-variant"),
+    surfaceTint = animatedThemeColor(target.surfaceTint, "theme-surface-tint"),
+    inverseSurface = animatedThemeColor(target.inverseSurface, "theme-inverse-surface"),
+    inverseOnSurface = animatedThemeColor(target.inverseOnSurface, "theme-inverse-on-surface"),
+    error = animatedThemeColor(target.error, "theme-error"),
+    onError = animatedThemeColor(target.onError, "theme-on-error"),
+    errorContainer = animatedThemeColor(target.errorContainer, "theme-error-container"),
+    onErrorContainer = animatedThemeColor(target.onErrorContainer, "theme-on-error-container"),
+    outline = animatedThemeColor(target.outline, "theme-outline"),
+    outlineVariant = animatedThemeColor(target.outlineVariant, "theme-outline-variant"),
+    scrim = animatedThemeColor(target.scrim, "theme-scrim"),
+    surfaceBright = animatedThemeColor(target.surfaceBright, "theme-surface-bright"),
+    surfaceDim = animatedThemeColor(target.surfaceDim, "theme-surface-dim"),
+    surfaceContainer = animatedThemeColor(target.surfaceContainer, "theme-surface-container"),
+    surfaceContainerHigh = animatedThemeColor(target.surfaceContainerHigh, "theme-surface-container-high"),
+    surfaceContainerHighest = animatedThemeColor(target.surfaceContainerHighest, "theme-surface-container-highest"),
+    surfaceContainerLow = animatedThemeColor(target.surfaceContainerLow, "theme-surface-container-low"),
+    surfaceContainerLowest = animatedThemeColor(target.surfaceContainerLowest, "theme-surface-container-lowest"),
+)
+
 @Composable
 fun LazerTheme(
     isDark: Boolean,
@@ -392,12 +446,13 @@ fun LazerTheme(
     engine: LazerThemeEngine = LazerThemeEngine.MATERIAL3,
     content: @Composable () -> Unit,
 ) {
+    val targetColorScheme = colorScheme ?: if (isDark) DarkColors else LightColors
+    val animatedColorScheme = rememberAnimatedColorScheme(targetColorScheme)
     CompositionLocalProvider(LocalLazerThemeEngine provides engine) {
         if (engine == LazerThemeEngine.MIUIX) {
-            val miuixColors = remember(isDark, colorScheme) {
-                colorScheme?.toMiuixColors(isDark)
-                    ?: if (isDark) miuixDarkColorScheme() else miuixLightColorScheme()
-            }
+            // Derive Miuix colors from the animated Material scheme on every animation frame.
+            // This keeps both component engines in step without duplicating their palette tables.
+            val miuixColors = animatedColorScheme.toMiuixColors(isDark)
             MiuixTheme(
                 colors = miuixColors,
                 smoothRounding = true,
@@ -415,7 +470,7 @@ fun LazerTheme(
             }
         } else {
             LazerMaterialTheme(
-                colorScheme = colorScheme ?: if (isDark) DarkColors else LightColors,
+                colorScheme = animatedColorScheme,
                 shapes = Shapes(),
                 content = content,
             )
