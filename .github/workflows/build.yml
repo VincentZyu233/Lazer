@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, "feat/**", "fix/**", "ci/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -24,6 +24,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # setup-gradle owns the Gradle wrapper, dependency and project build caches.
+      # Do not cache generated APKs or build directories across commits.
       - uses: gradle/actions/setup-gradle@v4
       - name: Assemble arm64 release APK
         run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
@@ -33,9 +35,10 @@ jobs:
           path: androidApp/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-  # Desktop MSI + runnable fat jar (x64 runner).
+  # Windows x64 MSI, portable app image, and runnable fat jar.
   desktop:
-    runs-on: windows-latest
+    # windows-2022 supplies the Visual Studio 2022 C++ toolchain used by the x64 taskbar bridge.
+    runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +46,8 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      # setup-gradle caches Gradle toolchain/dependencies and the project build cache. MSVC and
+      # CMake come from the versioned hosted runner image; generated native output is never cached.
       - uses: gradle/actions/setup-gradle@v4
       # jpackage needs WiX to produce an .msi.
       - name: Install WiX Toolset
@@ -50,29 +55,162 @@ jobs:
         run: |
           choco install wixtoolset --no-progress -y
           "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Test desktop media integration
+        shell: pwsh
+        run: .\gradlew.bat :desktopApp:test -PwindowsArch=x64 --stacktrace
+      - name: Build Windows x64 runnable jar
+        shell: pwsh
+        run: |
+          .\gradlew.bat :desktopApp:packageUberJarForCurrentOS -PwindowsArch=x64 -PembedTaskbarBridge --stacktrace
+          $jar = Get-ChildItem 'desktopApp/build/compose/jars' -Filter '*.jar' | Select-Object -First 1
+          if ($null -eq $jar) { throw 'Windows runnable JAR was not created.' }
+          $entries = & "$env:JAVA_HOME/bin/jar.exe" tf $jar.FullName
+          if ($entries -notcontains 'native/windows-x64/lazer-taskbar-bridge.dll') {
+            throw 'Windows runnable JAR is missing the taskbar bridge DLL.'
+          }
+          New-Item -ItemType Directory -Force -Path 'desktopApp/build/compose/binaries' | Out-Null
+          Copy-Item -LiteralPath $jar.FullName -Destination 'desktopApp/build/compose/binaries/Lazer-windows-x64.jar'
+      - name: Build portable Windows app
+        shell: pwsh
+        run: .\gradlew.bat :desktopApp:createReleaseDistributable -PwindowsArch=x64 --stacktrace
+      - name: Verify portable Windows runtime
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem 'desktopApp/build/compose/binaries/main-release/app' -Directory | Select-Object -First 1
+          if ($null -eq $app) { throw 'Compose app image was not created.' }
+          $runtimeRelease = Get-Content "$($app.FullName)/runtime/release" -Raw
+          if ($runtimeRelease -notmatch 'java\.net\.http') {
+            throw 'Portable runtime is missing the java.net.http module required by DesktopAudioCache.'
+          }
+          $cioJar = Get-ChildItem "$($app.FullName)/app" -Filter 'ktor-client-cio-jvm-*.jar' | Select-Object -First 1
+          if ($null -eq $cioJar) { throw 'Ktor CIO engine jar was not packaged.' }
+          $entries = & "$env:JAVA_HOME/bin/jar.exe" tf $cioJar.FullName
+          if ($entries -notcontains 'io/ktor/client/engine/cio/CIOEngineContainer.class') {
+            throw 'Portable Ktor CIO jar is missing its ServiceLoader provider class.'
+          }
+          foreach ($file in @(
+            "$($app.FullName)/app/resources/native/windows-x64/lazer-taskbar-bridge.dll",
+            "$($app.FullName)/app/resources/media-control/light/play.ico",
+            "$($app.FullName)/app/resources/media-control/dark/play.ico"
+          )) {
+            if (-not (Test-Path -LiteralPath $file)) { throw "Portable app is missing $file" }
+          }
+      - name: Archive portable Windows app
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem 'desktopApp/build/compose/binaries/main-release/app' -Directory | Select-Object -First 1
+          if ($null -eq $app) { throw 'Compose app image was not created.' }
+          tar.exe -a -c -f 'desktopApp/build/compose/binaries/Lazer-windows-x64-portable.zip' -C $app.Parent.FullName $app.Name
+      # Upload the portable packages before the installer so they remain available if a later
+      # installer-specific failure needs diagnosis.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-jar-windows-x64
+          path: desktopApp/build/compose/binaries/Lazer-windows-x64.jar
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-windows-x64-portable
+          path: desktopApp/build/compose/binaries/*-windows-x64-portable.zip
+          if-no-files-found: error
       - name: Build MSI
         shell: pwsh
-        run: .\gradlew.bat :desktopApp:packageMsi --stacktrace
-      - name: Build runnable jar
-        shell: pwsh
-        run: .\gradlew.bat :desktopApp:packageUberJarForCurrentOS --stacktrace
-      # Separate artifacts so each downloads as its own zip (msi.zip, jar.zip).
+        run: .\gradlew.bat :desktopApp:packageMsi -PwindowsArch=x64 --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: lazer-msi
           path: desktopApp/build/compose/binaries/**/*.msi
           if-no-files-found: error
+
+  # Linux x64 packages plus a real single-file AppImage. Ubuntu 22.04 provides a conservative
+  # glibc baseline for the AppImage while jpackage produces the native deb/rpm packages.
+  linux-desktop:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # setup-gradle owns Gradle toolchain/dependency and project build caches.
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Linux packaging tools
+        run: sudo apt-get update && sudo apt-get install -y fakeroot rpm
+      - name: Test desktop media integration
+        run: ./gradlew :desktopApp:test --stacktrace
+      - name: Build deb and rpm packages
+        run: ./gradlew :desktopApp:packageReleaseDeb :desktopApp:packageReleaseRpm --stacktrace
+      - name: Build Linux app image
+        run: ./gradlew :desktopApp:createReleaseDistributable --stacktrace
+      - name: Build Linux x64 runnable jar
+        run: |
+          ./gradlew :desktopApp:packageUberJarForCurrentOS --stacktrace
+          jar_file="$(find desktopApp/build/compose/jars -maxdepth 1 -name '*.jar' -print -quit)"
+          test -n "$jar_file"
+          cp "$jar_file" desktopApp/build/compose/binaries/Lazer-linux-x64.jar
+      - name: Assemble AppImage
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_dir="$(find desktopApp/build/compose/binaries/main-release/app -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -n "$bundle_dir"
+          app_dir="desktopApp/build/appimage/Lazer.AppDir"
+          rm -rf "$app_dir"
+          mkdir -p "$app_dir/usr/lib/lazer" "$app_dir/usr/bin" \
+            "$app_dir/usr/share/applications" "$app_dir/usr/share/icons/hicolor/256x256/apps"
+          cp -a "$bundle_dir/." "$app_dir/usr/lib/lazer/"
+          ln -s ../lib/lazer/bin/dev.naominet.lazer "$app_dir/usr/bin/dev.naominet.lazer"
+          cp desktopApp/src/main/resources/icon.png "$app_dir/usr/share/icons/hicolor/256x256/apps/dev.naominet.lazer.png"
+          cat > "$app_dir/usr/share/applications/dev.naominet.lazer.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Lazer
+          Comment=Music player
+          Exec=dev.naominet.lazer
+          Icon=dev.naominet.lazer
+          Categories=AudioVideo;Audio;Player;
+          Terminal=false
+          EOF
+          ln -s usr/share/applications/dev.naominet.lazer.desktop "$app_dir/dev.naominet.lazer.desktop"
+          ln -s usr/share/icons/hicolor/256x256/apps/dev.naominet.lazer.png "$app_dir/dev.naominet.lazer.png"
+          cat > "$app_dir/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/dev.naominet.lazer" "$@"
+          EOF
+          chmod +x "$app_dir/AppRun"
+          curl -fsSL -o appimagetool-x86_64.AppImage \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run "$app_dir" \
+            "desktopApp/build/compose/binaries/Lazer-x86_64.AppImage"
       - uses: actions/upload-artifact@v4
         with:
-          name: lazer-jar
-          path: desktopApp/build/compose/jars/*.jar
+          name: lazer-deb-x64
+          path: desktopApp/build/compose/binaries/**/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-rpm-x64
+          path: desktopApp/build/compose/binaries/**/*.rpm
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-appimage-x64
+          path: desktopApp/build/compose/binaries/*.AppImage
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazer-jar-linux-x64
+          path: desktopApp/build/compose/binaries/Lazer-linux-x64.jar
           if-no-files-found: error
 
-  # Version tags publish the three deliverables uncompressed as release assets. A build without a
-  # tag only leaves the Actions artifacts (lazer-apk-arm64.zip, msi.zip, jar.zip).
+  # Version tags publish all deliverables uncompressed as release assets. Untagged builds leave
+  # the corresponding Actions artifacts for platform testing.
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [android, desktop]
+    needs: [android, desktop, linux-desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -80,10 +218,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Collect the three deliverables
+      - name: Collect release deliverables
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.apk' -o -name '*.msi' -o -name '*.jar' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.apk' -o -name '*.msi' -o -name '*.jar' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*-portable.zip' \) -exec cp {} release/ \;
           ls -l release
       # Release titles use "Release X.Y", dropping the leading "v" from the tag.
       - name: Resolve release title
@@ -97,3 +235,7 @@ jobs:
             release/*.apk
             release/*.msi
             release/*.jar
+            release/*.deb
+            release/*.rpm
+            release/*.AppImage
+            release/*-portable.zip

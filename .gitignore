@@ -21,6 +21,9 @@ node_modules/
 .gradle-codex/
 .android-codex/
 
+temp/
+tmp/
+
 # Android release signing credentials (keystore.properties, release.jks) are committed
 # intentionally so CI can sign release builds.
 *.keystore

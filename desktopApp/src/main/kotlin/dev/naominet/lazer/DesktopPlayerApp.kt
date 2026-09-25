@@ -161,6 +161,26 @@ fun WindowScope.DesktopPlayerApp(
             controller.setUiForeground(false)
         }
     }
+    // 系统托盘图标 + 右键媒体控制菜单(跨平台)。生命周期跟随本组件。
+    val mediaTray = remember {
+        DesktopMediaTray(
+            onAction = controller::dispatchMediaControlAction,
+            onShowWindow = {
+                window.isVisible = true
+                window.toFront()
+                window.requestFocus()
+            },
+            onQuit = onCloseWindow,
+        )
+    }
+    DisposableEffect(mediaTray) {
+        mediaTray.start()
+        onDispose { mediaTray.close() }
+    }
+    LaunchedEffect(controller.isPlaying) {
+        mediaTray.update(controller.isPlaying)
+    }
+    var taskbarAdminWarningVisible by remember { mutableStateOf(false) }
     var destination by remember { mutableStateOf(DesktopDestination.HOME) }
     var settingsVisible by remember { mutableStateOf(false) }
     var nowPlayingVisible by remember { mutableStateOf(false) }
@@ -210,6 +230,33 @@ fun WindowScope.DesktopPlayerApp(
                 // Keep retrying briefly so acrylic does not stay disabled for the whole session.
                 delay(120L)
             }
+        }
+        // Windows 任务栏缩略图工具栏(上一首/播放暂停/下一首)。安装在原生窗口句柄就绪后。
+        val thumbar = remember {
+            WindowsThumbar(
+                onAction = controller::dispatchMediaControlAction,
+                onBlockedByIntegrity = {
+                    taskbarAdminWarningVisible = true
+                    mediaTray.showNotification(
+                        tr("taskbar.admin_warning.title"),
+                        tr("taskbar.admin_warning.body"),
+                    )
+                },
+            )
+        }
+        DisposableEffect(thumbar) {
+            onDispose { thumbar.close() }
+        }
+        LaunchedEffect(window) {
+            // Compose creates the taskbar-visible peer after its first frame. Attaching before
+            // that peer is stable succeeds at the COM layer but is not rendered by Explorer.
+            delay(300)
+            thumbar.install(window, controller.isPlaying)
+            WindowsJumpList.install(controller.isPlaying)
+        }
+        LaunchedEffect(window, controller.isPlaying) {
+            thumbar.updatePlayState(controller.isPlaying)
+            WindowsJumpList.install(controller.isPlaying)
         }
         val osGlassActive = osGlassRequested && nativeGlassApplied
         val frameShape = RoundedCornerShape(0.dp)
@@ -363,6 +410,18 @@ fun WindowScope.DesktopPlayerApp(
                         }
                     },
                 )
+                if (taskbarAdminWarningVisible) {
+                    AlertDialog(
+                        onDismissRequest = { taskbarAdminWarningVisible = false },
+                        title = { Text(tr("taskbar.admin_warning.title")) },
+                        text = { Text(tr("taskbar.admin_warning.body")) },
+                        confirmButton = {
+                            TextButton(onClick = { taskbarAdminWarningVisible = false }) {
+                                Text(tr("taskbar.admin_warning.dismiss"))
+                            }
+                        },
+                    )
+                }
                 if (debugBuild) {
                     // Top-end, below the window title bar, clear of the window controls.
                     DebugWatermark(
