@@ -352,7 +352,7 @@ class DesktopPlayerController(
     /** True while the user is dragging the seek bar — freezes display smoothing. */
     var isSeeking by mutableStateOf(false)
         private set
-    var volume by mutableFloatStateOf(0.72f)
+    var volume by mutableFloatStateOf(DEFAULT_DESKTOP_VOLUME)
         private set
     var audioQuality by mutableStateOf(AudioQuality.EXHIGH)
         private set
