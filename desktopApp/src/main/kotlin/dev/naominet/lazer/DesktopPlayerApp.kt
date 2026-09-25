@@ -488,12 +488,9 @@ private fun NavigationPanel(
     Surface(
         modifier = Modifier
             .fillMaxHeight()
-            .padding(start = 14.dp, top = 14.dp, bottom = 14.dp)
             .width(railWidth)
             .widthIn(max = railWidth),
-        shape = RoundedCornerShape(22.dp),
-        color = colors.surface.copy(alpha = if (glass) 0.18f else 0.90f * uiAlpha),
-        shadowElevation = if (glass) 0.dp else 5.dp,
+        color = colors.surface.copy(alpha = if (glass) 0f else 0.86f * uiAlpha),
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.45f)),
     ) {
         Column(
@@ -2557,14 +2554,8 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
     val glass = LocalOsGlassActive.current
     val uiAlpha = LocalLazerUiAlpha.current
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp)
-            .padding(bottom = 14.dp)
-            .height(88.dp),
-        shape = RoundedCornerShape(24.dp),
-        color = colors.surface.copy(alpha = if (glass) 0.22f else 0.96f * uiAlpha),
-        shadowElevation = if (glass) 0.dp else 8.dp,
+        modifier = Modifier.fillMaxWidth().height(84.dp),
+        color = colors.surface.copy(alpha = if (glass) 0f else 0.96f * uiAlpha),
         border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.7f)),
     ) {
         Row(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
