@@ -104,6 +104,51 @@ class DesktopMediaAndCacheTest {
     }
 
     @Test
+    fun `desktop volume starts at fifty percent`() {
+        assertEquals(0.50f, DEFAULT_DESKTOP_VOLUME, 0f)
+    }
+
+    @Test
+    fun `PCM volume ramp advances linearly across decoded blocks`() {
+        val format = AudioFormat(
+            AudioFormat.Encoding.PCM_SIGNED,
+            48_000f,
+            16,
+            2,
+            4,
+            48_000f,
+            false,
+        )
+        val ramp = PcmVolumeRamp()
+
+        val firstQuarter = ramp.advance(1f, 48_000, format, 1_000)
+        assertEquals(0f, firstQuarter.startVolume, 0.0001f)
+        assertEquals(0.25f, firstQuarter.endVolume, 0.0001f)
+
+        val secondQuarter = ramp.advance(1f, 48_000, format, 1_000)
+        assertEquals(0.25f, secondQuarter.startVolume, 0.0001f)
+        assertEquals(0.50f, secondQuarter.endVolume, 0.0001f)
+    }
+
+    @Test
+    fun `PCM volume ramp scales samples within a block`() {
+        val format = AudioFormat(
+            AudioFormat.Encoding.PCM_SIGNED,
+            48_000f,
+            16,
+            1,
+            2,
+            48_000f,
+            false,
+        )
+        val pcm = byteArrayOf(0x10, 0x27, 0x10, 0x27)
+
+        applyPcm16VolumeRamp(pcm, pcm.size, format, 0f, 1f)
+
+        assertArrayEquals(byteArrayOf(0, 0, 0x10, 0x27), pcm)
+    }
+
+    @Test
     fun `WASAPI wave format matches decoded stereo PCM`() {
         val format = AudioFormat(
             AudioFormat.Encoding.PCM_SIGNED,
