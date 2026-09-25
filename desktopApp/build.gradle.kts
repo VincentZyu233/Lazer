@@ -1,4 +1,7 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.Exec
+import org.gradle.language.jvm.tasks.ProcessResources
 
 plugins {
     alias(libs.plugins.kotlinJvm)
@@ -44,21 +47,80 @@ dependencies {
     testImplementation(libs.junit)
 }
 
+val isWindowsHost = System.getProperty("os.name").contains("windows", ignoreCase = true)
+val nativeBridgeBuildDir = layout.buildDirectory.dir("native/windows-taskbar")
+val nativeBridgeFile = nativeBridgeBuildDir.map { it.file("Release/lazer-taskbar-bridge.dll") }
+val nativeCmakeGenerator = providers.gradleProperty("nativeCmakeGenerator").orElse("Visual Studio 17 2022").get()
+
+val configureWindowsTaskbarBridge by tasks.registering(Exec::class) {
+    onlyIf("Windows host") { System.getProperty("os.name").contains("windows", ignoreCase = true) }
+    inputs.dir(rootProject.layout.projectDirectory.dir("native/windows-taskbar"))
+    outputs.dir(nativeBridgeBuildDir)
+    val arguments = mutableListOf(
+        "cmake",
+        "-S", rootProject.layout.projectDirectory.dir("native/windows-taskbar").asFile.absolutePath,
+        "-B", nativeBridgeBuildDir.get().asFile.absolutePath,
+    )
+    arguments += listOf("-G", nativeCmakeGenerator)
+    if (nativeCmakeGenerator.contains("Visual Studio", ignoreCase = true)) arguments += listOf("-A", "x64")
+    commandLine(arguments)
+}
+
+val buildWindowsTaskbarBridge by tasks.registering(Exec::class) {
+    onlyIf("Windows host") { System.getProperty("os.name").contains("windows", ignoreCase = true) }
+    dependsOn(configureWindowsTaskbarBridge)
+    inputs.dir(rootProject.layout.projectDirectory.dir("native/windows-taskbar"))
+    outputs.file(nativeBridgeFile)
+    commandLine("cmake", "--build", nativeBridgeBuildDir.get().asFile.absolutePath, "--config", "Release")
+}
+
+val prepareJpackageResources by tasks.registering(Copy::class) {
+    from(layout.projectDirectory.dir("src/main/jpackage"))
+    into(layout.buildDirectory.dir("generated/jpackage-resources"))
+    if (isWindowsHost) {
+        dependsOn(buildWindowsTaskbarBridge)
+        from(nativeBridgeFile) { into("common/native/windows-x64") }
+    }
+}
+
+// A runnable Windows JAR embeds the bridge, while ordinary unit tests remain independent of a
+// local C++ toolchain. CI enables this property for its Windows JAR artifact.
+val embedTaskbarBridgeInJar = providers.gradleProperty("embedTaskbarBridge").isPresent()
+if (isWindowsHost && embedTaskbarBridgeInJar) {
+    tasks.named<ProcessResources>("processResources") {
+        dependsOn(buildWindowsTaskbarBridge)
+        from(nativeBridgeFile) { into("native/windows-x64") }
+    }
+}
+
 compose.desktop {
     application {
         mainClass = "dev.naominet.lazer.MainKt"
         jvmArgs += listOf("--enable-native-access=ALL-UNNAMED")
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            // Shell links need stable on-disk ICO paths; jpackage places this directory at app/resources.
+            appResourcesRootDir.set(layout.buildDirectory.dir("generated/jpackage-resources"))
+            targetFormats(TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "dev.naominet.lazer"
             packageVersion = rootProject.extra["lazerPackageVersion"] as String
+            // DesktopAudioCache uses java.net.http.HttpClient via the JDK module API.
+            // It is not visible to jdeps through the Kotlin bytecode analysis, so retain it
+            // explicitly in jpackage's custom runtime image.
+            modules("java.net.http")
+            buildTypes.release.proguard {
+                // Runtime-discovered libraries such as Ktor engines cannot be safely inferred
+                // by the shrinker. Keep release app images functionally identical to dev builds.
+                isEnabled.set(false)
+                configurationFiles.from(project.file("proguard-rules.pro"))
+            }
             windows {
                 iconFile = project.file("src/main/resources/icon.ico")
             }
-            macOS {
-                bundleID = "dev.naominet.lazer"
-                appCategory = "public.app-category.music"
+            linux {
+                shortcut = true
+                appCategory = "AudioVideo"
+                menuGroup = "AudioVideo"
             }
         }
     }
@@ -78,6 +140,10 @@ tasks.register<JavaExec>("runDesktop") {
     group = "application"
     description = "Run Lazer desktop (IDEA-safe on Windows ARM64)"
     dependsOn(tasks.named("classes"))
+    if (isWindowsHost) {
+        dependsOn(buildWindowsTaskbarBridge)
+        jvmArgs("-Dlazer.taskbar.bridge=${nativeBridgeFile.get().asFile.absolutePath}")
+    }
     mainClass.set("dev.naominet.lazer.MainKt")
     classpath = sourceSets["main"].runtimeClasspath
     standardInput = System.`in`
@@ -92,5 +158,17 @@ tasks.register<JavaExec>("runDesktop") {
 // The Compose `run` task is also a development run. Match lazily because the Compose plugin may
 // register `run` after this script body is evaluated.
 tasks.withType<JavaExec>().configureEach {
-    if (name == "run") jvmArgs("-Dlazer.debug=true")
+    if (name == "run") {
+        jvmArgs("-Dlazer.debug=true")
+        if (isWindowsHost) {
+            dependsOn(buildWindowsTaskbarBridge)
+            jvmArgs("-Dlazer.taskbar.bridge=${nativeBridgeFile.get().asFile.absolutePath}")
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name.startsWith("package") || name.startsWith("create") || name == "prepareAppResources") {
+        dependsOn(prepareJpackageResources)
+    }
 }
