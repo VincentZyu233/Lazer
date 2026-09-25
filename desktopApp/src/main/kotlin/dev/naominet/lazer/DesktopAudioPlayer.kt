@@ -24,6 +24,11 @@ private const val OutputWriteTimeoutNanos = 2_000_000_000L
 private const val OutputWatchdogIntervalMillis = 250L
 private const val ForegroundProgressIntervalNanos = 33_000_000L
 private const val BackgroundProgressIntervalNanos = 1_000_000_000L
+private const val VolumeTransitionMillis = 400
+private const val PlaybackFadeMillis = 450
+private const val PauseFadeMillis = 700
+private const val VolumeRampCompleteTolerance = 0.001f
+internal const val DEFAULT_DESKTOP_VOLUME = 0.50f
 
 /**
  * Small desktop streaming player. JavaMP3 decodes the growing cached MP3 stream, while PCM is
@@ -54,7 +59,10 @@ internal class DesktopAudioPlayer(
     private val pausedState = MutableStateFlow(false)
 
     @Volatile
-    private var volume = 0.72f
+    private var pauseFadeRequested = false
+
+    @Volatile
+    private var volume = DEFAULT_DESKTOP_VOLUME
 
     @Volatile
     private var exclusiveAudio = initialExclusiveAudio && isWindowsDesktop()
@@ -71,6 +79,7 @@ internal class DesktopAudioPlayer(
     ): Long {
         stopCurrent()
         this.volume = volume.coerceIn(0f, 1f)
+        pauseFadeRequested = false
         setPaused(!playWhenReady)
         val token = generation.incrementAndGet()
         val safeFromProgress = playableSeekProgress(fromProgress, durationMillis)
@@ -104,19 +113,24 @@ internal class DesktopAudioPlayer(
     }
 
     fun pause() {
-        setPaused(true)
-        PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
         activeLine?.let { output ->
             if (output.usesSoftwareVolume) {
-                // A paused exclusive stream must not keep other applications locked out.
-                closeOutputLine(output)
+                // Finish the current PCM block at zero to avoid a discontinuity click.
+                pauseFadeRequested = true
+                PlaybackDebugLog.event("audio-pause-fade", "token=${generation.get()}")
             } else {
+                setPaused(true)
+                PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
                 runCatching { output.stop() }
             }
+        } ?: run {
+            setPaused(true)
+            PlaybackDebugLog.event("audio-pause", "token=${generation.get()}")
         }
     }
 
     fun resume() {
+        pauseFadeRequested = false
         setPaused(false)
         PlaybackDebugLog.event("audio-resume", "token=${generation.get()}")
         runCatching { activeLine?.start() }
@@ -140,6 +154,7 @@ internal class DesktopAudioPlayer(
         generation.incrementAndGet()
         playbackJob?.cancel()
         playbackJob = null
+        pauseFadeRequested = false
         setPaused(false)
         runInterruptible(Dispatchers.IO) { releaseActiveResources() }
     }
@@ -212,6 +227,7 @@ internal class DesktopAudioPlayer(
                 frameRate = decodedFormat.frameRate,
             )
             val seekFadeIn = PcmSeekFadeIn(decodedFormat).takeIf { fromProgress > 0f }
+            val volumeRamp = PcmVolumeRamp()
             val writeInProgress = AtomicReference<DesktopPcmAudioOutput?>(null)
             val writeStartedAtNanos = AtomicLong(0L)
 
@@ -294,72 +310,102 @@ internal class DesktopAudioPlayer(
                         // short ramp removes that discontinuity without making the seek sound
                         // delayed or changing normal playback from the beginning.
                         seekFadeIn?.apply(buffer, count)
-                        if (line.usesSoftwareVolume) {
-                            applyPcm16Volume(buffer, count, decodedFormat, volume)
+                        val targetVolume = if (pauseFadeRequested) 0f else volume
+                        val transitionMillis = when {
+                            pauseFadeRequested -> PauseFadeMillis
+                            volumeRamp.currentVolume <= VolumeRampCompleteTolerance && targetVolume > VolumeRampCompleteTolerance ->
+                                PlaybackFadeMillis
+                            else -> VolumeTransitionMillis
                         }
-                    }
-                }
-
-                var written = 0
-                var zeroWrites = 0
-                while (written < count && token == generation.get() && scope.isActive) {
-                    if (paused) {
-                        pausedState.first { isPaused -> !isPaused }
-                        continue
-                    }
-                    val output = line ?: return
-                    if (!output.isOpen && output.usesSoftwareVolume) {
-                        outputTimeline.onLineReplaced()
-                        line = openOutputLine(decodedFormat)
-                        zeroWrites = 0
-                        continue
-                    }
-                    var writeError: Throwable? = null
-                    writeStartedAtNanos.set(System.nanoTime())
-                    writeInProgress.set(output)
-                    val chunk = try {
-                        output.write(buffer, written, count - written)
-                    } catch (error: Throwable) {
-                        writeError = error
-                        0
-                    } finally {
-                        writeInProgress.compareAndSet(output, null)
-                        writeStartedAtNanos.set(0L)
-                    }
-                    if (paused && output.usesSoftwareVolume && !output.isOpen) continue
-                    if (chunk > 0) {
-                        written += chunk
-                        outputTimeline.onBytesSubmitted(chunk)
-                        zeroWrites = 0
-                    } else {
-                        zeroWrites += 1
-                        val shouldReopen = shouldRecoverAudioOutput(
-                            writeError = writeError,
-                            outputOpen = output.isOpen,
-                            consecutiveZeroWrites = zeroWrites,
+                        val ramp = volumeRamp.advance(
+                            targetVolume = targetVolume,
+                            byteCount = count,
+                            format = decodedFormat,
+                            durationMillis = transitionMillis,
                         )
-                        if (shouldReopen && outputRecoveries < 3) {
-                            PlaybackDebugLog.event(
-                                "audio-output-recover",
-                                "token=$token track=$trackId attempt=${outputRecoveries + 1} " +
-                                    "open=${output.isOpen} running=${output.isRunning} " +
-                                    "available=${runCatching { output.availableBytes }.getOrDefault(-1)} " +
-                                    "written=$written count=$count " +
-                                    "error=${writeError?.playbackDebugSummary().orEmpty()}",
+                        if (line.usesSoftwareVolume) {
+                            applyPcm16VolumeRamp(
+                                buffer,
+                                count,
+                                decodedFormat,
+                                ramp.startVolume,
+                                ramp.endVolume,
                             )
-                            outputTimeline.onLineReplaced()
-                            closeOutputLine(output)
-                            if (!scope.isActive || token != generation.get()) return
-                            line = openOutputLine(decodedFormat)
-                            outputRecoveries += 1
-                            zeroWrites = 0
-                            continue
                         }
-                        if (shouldReopen) {
-                            throw IOException("系统音频输出停止响应", writeError)
+                        val pauseAfterCurrentBuffer = pauseFadeRequested &&
+                            volumeRamp.currentVolume <= VolumeRampCompleteTolerance
+
+                        var written = 0
+                        var zeroWrites = 0
+                        while (written < count && token == generation.get() && scope.isActive) {
+                            if (paused) {
+                                pausedState.first { isPaused -> !isPaused }
+                                continue
+                            }
+                            val output = line ?: return
+                            if (!output.isOpen && output.usesSoftwareVolume) {
+                                outputTimeline.onLineReplaced()
+                                line = openOutputLine(decodedFormat)
+                                zeroWrites = 0
+                                continue
+                            }
+                            var writeError: Throwable? = null
+                            writeStartedAtNanos.set(System.nanoTime())
+                            writeInProgress.set(output)
+                            val chunk = try {
+                                output.write(buffer, written, count - written)
+                            } catch (error: Throwable) {
+                                writeError = error
+                                0
+                            } finally {
+                                writeInProgress.compareAndSet(output, null)
+                                writeStartedAtNanos.set(0L)
+                            }
+                            if (paused && output.usesSoftwareVolume && !output.isOpen) continue
+                            if (chunk > 0) {
+                                written += chunk
+                                outputTimeline.onBytesSubmitted(chunk)
+                                zeroWrites = 0
+                            } else {
+                                zeroWrites += 1
+                                val shouldReopen = shouldRecoverAudioOutput(
+                                    writeError = writeError,
+                                    outputOpen = output.isOpen,
+                                    consecutiveZeroWrites = zeroWrites,
+                                )
+                                if (shouldReopen && outputRecoveries < 3) {
+                                    PlaybackDebugLog.event(
+                                        "audio-output-recover",
+                                        "token=$token track=$trackId attempt=${outputRecoveries + 1} " +
+                                            "open=${output.isOpen} running=${output.isRunning} " +
+                                            "available=${runCatching { output.availableBytes }.getOrDefault(-1)} " +
+                                            "written=$written count=$count " +
+                                            "error=${writeError?.playbackDebugSummary().orEmpty()}",
+                                    )
+                                    outputTimeline.onLineReplaced()
+                                    closeOutputLine(output)
+                                    if (!scope.isActive || token != generation.get()) return
+                                    line = openOutputLine(decodedFormat)
+                                    outputRecoveries += 1
+                                    zeroWrites = 0
+                                    continue
+                                }
+                                if (shouldReopen) {
+                                    throw IOException("系统音频输出停止响应", writeError)
+                                }
+                                if (!output.isRunning) runCatching { output.start() }
+                                delay(10)
+                            }
                         }
-                        if (!output.isRunning) runCatching { output.start() }
-                        delay(10)
+                        if (pauseAfterCurrentBuffer && token == generation.get()) {
+                            pauseFadeRequested = false
+                            setPaused(true)
+                            PlaybackDebugLog.event("audio-pause", "token=$token")
+                            // Preserve the endpoint and its already-ramped PCM. `stop()` makes
+                            // the pause immediate after the fade while allowing resume to reuse
+                            // the same stream without a fresh waveform discontinuity.
+                            line?.let { output -> runCatching { output.stop() } }
+                        }
                     }
                 }
                 if (endOfStream) break
@@ -454,6 +500,7 @@ internal class DesktopAudioPlayer(
         if (priorToken > 0L) PlaybackDebugLog.event("audio-stop", "token=$priorToken")
         playbackJob?.cancel()
         playbackJob = null
+        pauseFadeRequested = false
         setPaused(false)
         releaseActiveResources()
     }
@@ -571,6 +618,54 @@ internal fun applyPcm16Volume(
     byteCount: Int,
     format: AudioFormat,
     volume: Float,
+) = applyPcm16VolumeRamp(buffer, byteCount, format, volume, volume)
+
+/** A linear gain transition whose duration is independent of decoder buffer size. */
+internal class PcmVolumeRamp(initialVolume: Float = 0f) {
+    private var startVolume = initialVolume.coerceIn(0f, 1f)
+    private var targetVolume = startVolume
+    private var elapsedFrames = 0L
+    private var durationFrames = 0f
+
+    val currentVolume: Float
+        get() = volumeAt(elapsedFrames.toFloat())
+
+    fun advance(
+        targetVolume: Float,
+        byteCount: Int,
+        format: AudioFormat,
+        durationMillis: Int,
+    ): PcmVolumeRampSegment {
+        val target = targetVolume.coerceIn(0f, 1f)
+        if (target != this.targetVolume) {
+            startVolume = currentVolume
+            this.targetVolume = target
+            elapsedFrames = 0L
+            durationFrames = (format.frameRate * durationMillis / 1_000f).coerceAtLeast(1f)
+        }
+        if (durationFrames <= 0f) durationFrames = 1f
+        val start = currentVolume
+        val frames = if (format.frameSize > 0) byteCount.coerceAtLeast(0) / format.frameSize else 0
+        elapsedFrames = (elapsedFrames + frames).coerceAtMost(durationFrames.toLong())
+        return PcmVolumeRampSegment(start, currentVolume)
+    }
+
+    private fun volumeAt(frames: Float): Float {
+        if (durationFrames <= 0f) return targetVolume
+        val fraction = (frames / durationFrames).coerceIn(0f, 1f)
+        return startVolume + (targetVolume - startVolume) * fraction
+    }
+}
+
+internal data class PcmVolumeRampSegment(val startVolume: Float, val endVolume: Float)
+
+/** Applies a linear gain ramp across one decoded PCM block to avoid audible parameter steps. */
+internal fun applyPcm16VolumeRamp(
+    buffer: ByteArray,
+    byteCount: Int,
+    format: AudioFormat,
+    startVolume: Float,
+    endVolume: Float,
 ) {
     if (
         format.encoding != AudioFormat.Encoding.PCM_SIGNED ||
@@ -580,15 +675,20 @@ internal fun applyPcm16Volume(
     ) {
         return
     }
-    val normalized = volume.coerceIn(0f, 1f)
-    if (normalized >= 0.9999f) return
+    val start = startVolume.coerceIn(0f, 1f)
+    val end = endVolume.coerceIn(0f, 1f)
+    if (start >= 0.9999f && end >= 0.9999f) return
     val safeByteCount = byteCount.coerceIn(0, buffer.size)
     val sampleBytes = safeByteCount - safeByteCount % 2
-    for (offset in 0 until sampleBytes step 2) {
+    val sampleCount = sampleBytes / 2
+    for (sampleIndex in 0 until sampleCount) {
+        val offset = sampleIndex * 2
         val first = buffer[offset].toInt() and 0xFF
         val second = buffer[offset + 1].toInt() and 0xFF
         val raw = if (format.isBigEndian) (first shl 8) or second else (second shl 8) or first
-        val scaled = (raw.toShort().toInt() * normalized)
+        val interpolation = if (sampleCount <= 1) 1f else sampleIndex.toFloat() / (sampleCount - 1).toFloat()
+        val gain = start + (end - start) * interpolation
+        val scaled = (raw.toShort().toInt() * gain)
             .roundToInt()
             .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
         if (format.isBigEndian) {
