@@ -1,5 +1,6 @@
 package dev.naominet.lazer
 
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,7 +36,13 @@ import java.awt.Toolkit
  *   gradlew :desktopApp:runDesktop
  *   run-desktop.bat
  */
-fun main() = application {
+fun main(args: Array<String>) {
+    WindowsTaskbarDebugLog.configure(args)
+    val startupCommand = windowsMediaCommandFromArgs(args)
+    if (startupCommand != null && WindowsMediaCommandBridge.forwardToRunning(startupCommand)) return
+    WindowsJumpList.prepareAppUserModelId()
+
+    application {
     setSingletonImageLoaderFactory { context ->
         ImageLoader.Builder(context)
             .components {
@@ -65,6 +72,12 @@ fun main() = application {
         size = DpSize(1280.dp, 820.dp),
     )
     val controller = remember { DesktopPlayerController().also { it.start() } }
+    val commandServer = remember { WindowsMediaCommandServer(controller::dispatchMediaControlAction) }
+    DisposableEffect(commandServer) {
+        commandServer.start()
+        startupCommand?.let { controller.dispatchMediaControlAction(it.action) }
+        onDispose { commandServer.close() }
+    }
     val nowPlaying = controller.nowPlaying
     val windowTitle = if (controller.isPlaying && nowPlaying != null) {
         "Lazer - ${nowPlaying.title}"
@@ -101,6 +114,7 @@ fun main() = application {
             },
             onCloseWindow = ::exitApplication,
         )
+    }
     }
 }
 
