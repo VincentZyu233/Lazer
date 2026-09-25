@@ -216,20 +216,37 @@ fun WindowScope.DesktopPlayerApp(
         engine = controller.themeEngine,
     ) {
         val backgroundArgb = MaterialTheme.colorScheme.background.toArgb()
-        var nativeGlassApplied by remember(window, osGlassRequested, controller.isDark, backgroundArgb) {
+        // Compose interpolates its palette frame by frame. Keep the native backdrop in sync at
+        // the beginning and end of that transition instead of issuing DWM calls every frame.
+        val latestBackgroundArgb by rememberUpdatedState(backgroundArgb)
+        var nativeGlassApplied by remember(window, osGlassRequested) {
             mutableStateOf(false)
         }
-        LaunchedEffect(window, osGlassRequested, controller.isDark, backgroundArgb) {
+        LaunchedEffect(
+            window,
+            osGlassRequested,
+            controller.isDark,
+            controller.palette,
+            controller.nowPlayingArtworkSeed,
+        ) {
             nativeGlassApplied = false
             val attempts = if (osGlassRequested) 8 else 1
             repeat(attempts) { attempt ->
-                val applied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, backgroundArgb)
+                val applied = applyWindowsAcrylic(window, osGlassRequested, controller.isDark, latestBackgroundArgb)
                 nativeGlassApplied = osGlassRequested && applied
                 if (!osGlassRequested || applied || attempt == attempts - 1) return@LaunchedEffect
                 // The undecorated AWT window may not have an HWND during the first composition.
                 // Keep retrying briefly so acrylic does not stay disabled for the whole session.
                 delay(120L)
             }
+            // Match the end of the Compose color interpolation without issuing DWM calls per frame.
+            delay(340L)
+            nativeGlassApplied = osGlassRequested && applyWindowsAcrylic(
+                window,
+                osGlassRequested,
+                controller.isDark,
+                latestBackgroundArgb,
+            )
         }
         // Windows 任务栏缩略图工具栏(上一首/播放暂停/下一首)。安装在原生窗口句柄就绪后。
         val thumbar = remember {
