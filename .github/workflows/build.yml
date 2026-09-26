@@ -218,24 +218,67 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      # A bulk download succeeds even when an artifact is missing, which would quietly publish a
+      # shorter release. The manifest below is what turns any dropped, renamed or double-produced
+      # artifact into a failure that names it.
       - name: Collect release deliverables
         run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          declare -A deliverables=(
+            [lazer-apk-arm64]="Lazer-$version-arm64.apk"
+            [lazer-msi]="Lazer-$version-windows-x64.msi"
+            [lazer-jar-windows-x64]="Lazer-$version-windows-x64.jar"
+            [lazer-windows-x64-portable]="Lazer-$version-windows-x64-portable.zip"
+            [lazer-deb-x64]="Lazer-$version-linux-x64.deb"
+            [lazer-rpm-x64]="Lazer-$version-linux-x64.rpm"
+            [lazer-appimage-x64]="Lazer-$version-linux-x64.AppImage"
+            [lazer-jar-linux-x64]="Lazer-$version-linux-x64.jar"
+          )
           mkdir -p release
-          find artifacts -type f \( -name '*.apk' -o -name '*.msi' -o -name '*.jar' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*-portable.zip' \) -exec cp {} release/ \;
+          missing=()
+          for artifact in "${!deliverables[@]}"; do
+            # Recursive because upload-artifact keeps the matched files under their parent
+            # directories inside the artifact.
+            files=($(find "artifacts/$artifact" -type f 2>/dev/null || true))
+            if [ "${#files[@]}" -ne 1 ]; then
+              missing+=("$artifact expected 1 file, found ${#files[@]}")
+              continue
+            fi
+            cp "${files[0]}" "release/${deliverables[$artifact]}"
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf '::error::Release deliverables incomplete: %s\n' "${missing[*]}"
+            echo 'Artifact directories actually downloaded:'
+            find artifacts -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' | sort
+            exit 1
+          fi
           ls -l release
+          sha256sum release/*
+      - name: Record the commit every package carries
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          echo "- Built from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA (\`$short_sha\`), the commit each package names on its About page." > release-note.md
+          cat release-note.md >> "$GITHUB_STEP_SUMMARY"
       # Release titles use "Release X.Y", dropping the leading "v" from the tag.
       - name: Resolve release title
         id: title
         run: echo "value=Release ${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      # overwrite_files keeps a re-run of this job repairing one release instead of stacking
+      # duplicate assets onto it.
       - uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.title.outputs.value }}
           generate_release_notes: true
+          append_body: true
+          body_path: release-note.md
+          fail_on_unmatched_files: true
+          overwrite_files: true
           files: |
-            release/*.apk
-            release/*.msi
-            release/*.jar
-            release/*.deb
-            release/*.rpm
-            release/*.AppImage
-            release/*-portable.zip
+            release/Lazer-*.apk
+            release/Lazer-*.msi
+            release/Lazer-*.jar
+            release/Lazer-*.deb
+            release/Lazer-*.rpm
+            release/Lazer-*.AppImage
+            release/Lazer-*-portable.zip
