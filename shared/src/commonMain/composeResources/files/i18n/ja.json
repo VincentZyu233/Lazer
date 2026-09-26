@@ -273,6 +273,8 @@
   "about.version": "バージョン {0}（ビルド {1}）",
   "about.repository": "ソースリポジトリ",
   "about.repository.hint": "ソースコードと問題報告はこちらです。",
+  "about.commit.copy": "コミットをコピー",
+  "about.commit.copied": "コミットをコピーしました",
   "about.thanks": "謝辞",
   "about.thanks.body": "歌詞の描画は AMLL、API の挙動は NeteaseCloudMusicApi Enhanced を参考にし、UI は MiuiX、Coil、Compose Multiplatform を使用しています。",
   "about.license": "ライセンス",

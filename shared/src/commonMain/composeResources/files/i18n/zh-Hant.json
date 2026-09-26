@@ -273,6 +273,8 @@
   "about.version": "版本 {0}（建置 {1}）",
   "about.repository": "開源倉庫",
   "about.repository.hint": "原始碼與問題回報都在這裡。",
+  "about.commit.copy": "複製提交號",
+  "about.commit.copied": "提交號已複製",
   "about.thanks": "致謝",
   "about.thanks.body": "歌詞渲染參考 AMLL，介面行為參考 NeteaseCloudMusicApi Enhanced，介面元件使用 MiuiX、Coil 與 Compose Multiplatform。",
   "about.license": "授權條款",
