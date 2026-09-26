@@ -6,6 +6,7 @@ package dev.naominet.lazer
  * the APK or installer cannot disagree.
  */
 object LazerRelease {
+    const val name = "Lazer"
     const val versionName = "1.3"
     const val versionCode = 4
 

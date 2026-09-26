@@ -273,6 +273,8 @@
   "about.version": "Version {0} (build {1})",
   "about.repository": "Source repository",
   "about.repository.hint": "The source and the issue tracker live there.",
+  "about.commit.copy": "Copy commit",
+  "about.commit.copied": "Commit copied",
   "about.thanks": "Built on",
   "about.thanks.body": "Lyric rendering follows AMLL, gateway behaviour follows NeteaseCloudMusicApi Enhanced, and the interface uses MiuiX, Coil and Compose Multiplatform.",
   "about.license": "License",
