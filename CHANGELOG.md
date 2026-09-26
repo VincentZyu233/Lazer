@@ -1,5 +1,41 @@
 # Changelog / 更新日志
 
+## v1.3.1 — 2026-09-27
+
+### English
+
+**Highlights**
+
+- **Windows taskbar controls** — playback answers from the Windows taskbar media flyout: play, pause, previous, next and seek reach Lazer without bringing the window forward. The control icons follow the light and dark theme, and the bridge ships inside the Windows jar and portable packages (x64).
+- **A commit stamp on the About page** — the sheet now names the exact commit the running build was cut from, next to its date. Tapping it copies the full hash and timestamp, which is what a bug report needs. Version, build number and commit are three different things and the page no longer conflates them.
+- **About page rebuilt on Material 3** — brand mark, name and version lead the sheet, the repository is one list item with a single action, and reference text sits under a divider. The faded, slightly shrunken version line is gone: hierarchy now comes from type roles and tonal surfaces, so the text stays legible.
+
+**Interface and fixes**
+
+- Desktop light/dark switching animates the paper colors instead of snapping, and volume and play/pause changes ease rather than jump.
+- The desktop window is squared and the shared renderer no longer draws a shadow around itself.
+- Every Android control and drag answers with a haptic, and a long-press copy sheet buzzes as it opens.
+- Release packages now carry the version in their file names (`Lazer-1.3.1-windows-x64.msi`), and the publish job fails when any deliverable is missing instead of releasing a shorter list.
+
+---
+
+### 中文
+
+**重点更新**
+
+- **Windows 任务栏媒体控制** —— 播放、暂停、上一首、下一首和进度调整可以直接在 Windows 任务栏的媒体浮窗里操作,不必把窗口调到前台;控制图标跟随深浅色主题,桥接模块已打进 Windows 的 jar 与便携包(仅 x64)。
+- **关于页新增提交标识** —— 页面现在会写明这个安装包出自哪一次提交,并带上提交时间;点一下即可复制完整哈希和时间,提 issue 时直接粘它。版本、构建号、提交号是三件事,页面不再混为一谈。
+- **关于页按 Material 3 重做** —— 开头是应用标识、名称和版本,仓库条目收敛成一个带单一动作的列表项,参考信息放进分隔线以下。原来那行被压暗缩小的版本号取消了,层级改用字体角色和色调表面表达,文字更好读。
+
+**界面与修复**
+
+- 桌面端切换深浅色时纸面颜色改为过渡动画,音量和播放/暂停状态变化也不再突跳。
+- 桌面窗口恢复直角,共享渲染层不再给自己加阴影。
+- Android 上每个控件和拖拽都会回应触感,长按复制面板弹出时轻震一下。
+- 发布包文件名带上版本号(`Lazer-1.3.1-windows-x64.msi`),发布任务在任何一个产物缺失时直接失败,不会再悄悄少传几个包。
+
+---
+
 ## v1.3 — 2026-09-24
 
 ### English
