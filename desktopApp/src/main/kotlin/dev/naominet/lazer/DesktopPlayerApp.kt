@@ -354,16 +354,19 @@ fun WindowScope.DesktopPlayerApp(
                                     onDestinationSelected = {
                                         settingsVisible = false
                                         controller.closeArtist()
+                                        controller.closeCommentPanel()
                                         destination = it
                                     },
                                     onPlaylistSelected = {
                                         settingsVisible = false
                                         controller.closeArtist()
+                                        controller.closeCommentPanel()
                                         destination = DesktopDestination.LIBRARY
                                         controller.openPlaylist(it)
                                     },
                                     onOpenSettings = {
                                         controller.closeArtist()
+                                        controller.closeCommentPanel()
                                         settingsVisible = true
                                     },
                                 )
@@ -831,7 +834,9 @@ private fun MainContent(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier.fillMaxHeight().padding(horizontal = 28.dp)) {
-        if (settingsVisible) {
+        if (controller.isCommentPanelVisible) {
+            SongCommentPage(controller, Modifier.weight(1f))
+        } else if (settingsVisible) {
             DesktopSettingsPage(controller, Modifier.weight(1f))
         } else {
             TopBar(controller)
@@ -2748,10 +2753,12 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                     label = tr("player.queue"),
                 ) { PlayQueuePanel(controller) }
                 Spacer(Modifier.width(2.dp))
-                PlayerPanelControl(
-                    icon = Icons.Outlined.ModeComment,
-                    label = tr("comment.open"),
-                ) { SongCommentPanel(controller) }
+                CompactIconButton(
+                    Icons.Outlined.ModeComment,
+                    controller::openSongComments,
+                    tr("comment.open"),
+                    selected = controller.isCommentPanelVisible,
+                )
             }
         }
     }
@@ -3351,98 +3358,113 @@ private fun DesktopQueueRow(
     }
 }
 
+/** Comments for the song being played. A page rather than a popover: the list is the subject. */
 @Composable
-private fun SongCommentPanel(controller: DesktopPlayerController) {
+private fun SongCommentPage(controller: DesktopPlayerController, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val state = controller.comments
-    Column {
-        PlayerPanelHeader(
-            title = tr("comment.title"),
-            subtitle = tr("comment.count", state.total).takeIf { state.total > 0 },
-        )
+    val scrollState = rememberScrollState()
+    val inertia = LocalScrollInertia.current
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(scrollState)
+            .scrollInertia(scrollState, inertia)
+            .padding(top = 18.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
         Column(
-            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            Modifier.widthIn(max = 720.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-        controller.replyTarget?.let { target ->
-            CommentReplyComposer(
-                nickname = target.user?.nickname.orEmpty(),
-                draft = controller.replyDraft,
-                sending = controller.isReplySending,
-                error = controller.replyError,
-                onDraftChange = controller::updateReplyDraft,
-                onSend = controller::sendReply,
-                onCancel = controller::cancelReply,
+            TextButton(onClick = controller::closeCommentPanel, shape = RoundedCornerShape(10.dp)) {
+                Icon(Icons.AutoMirrored.Outlined.ArrowBack, tr("common.back"), Modifier.size(17.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(tr("common.back"))
+            }
+            PageHeading(
+                title = tr("comment.title"),
+                subtitle = listOfNotNull(
+                    controller.nowPlaying?.title,
+                    tr("comment.count", state.total).takeIf { state.total > 0 },
+                ).joinToString(" · "),
             )
-        }
-        when {
-            state.failed && state.comments.isEmpty() -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    tr("comment.load_fail"),
+            controller.replyTarget?.let { target ->
+                CommentReplyComposer(
+                    nickname = target.user?.nickname.orEmpty(),
+                    draft = controller.replyDraft,
+                    sending = controller.isReplySending,
+                    error = controller.replyError,
+                    onDraftChange = controller::updateReplyDraft,
+                    onSend = controller::sendReply,
+                    onCancel = controller::cancelReply,
+                )
+            }
+            when {
+                state.failed && state.comments.isEmpty() -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        tr("comment.load_fail"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                    TextButton(onClick = controller::retrySongComments) { Text(tr("comment.retry")) }
+                }
+                state.loading -> Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                    Text(
+                        tr("comment.loading"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                state.comments.isEmpty() && state.hotComments.isEmpty() -> Text(
+                    tr("comment.empty"),
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
-                TextButton(onClick = controller::retrySongComments) { Text(tr("comment.retry")) }
-            }
-            state.loading -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                Text(
-                    tr("comment.loading"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                )
-            }
-            state.comments.isEmpty() && state.hotComments.isEmpty() -> Text(
-                tr("comment.empty"),
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant,
-            )
-            else -> Column(
-                Modifier.fillMaxWidth().height(DesktopPanelListHeight).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                if (state.hotComments.isNotEmpty()) {
-                    CommentSectionLabel(tr("comment.hot"))
-                    state.hotComments.forEach {
+                else -> Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (state.hotComments.isNotEmpty()) {
+                        CommentSectionLabel(tr("comment.hot"))
+                        state.hotComments.forEach {
+                            DesktopCommentRow(
+                                comment = it,
+                                onLike = { controller.toggleCommentLiked(it) },
+                                onReply = { controller.startReply(it) },
+                            )
+                        }
+                        HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.6f))
+                    }
+                    CommentSectionLabel(tr("comment.latest"))
+                    state.comments.forEach {
                         DesktopCommentRow(
                             comment = it,
                             onLike = { controller.toggleCommentLiked(it) },
                             onReply = { controller.startReply(it) },
                         )
                     }
-                    HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.6f))
-                }
-                CommentSectionLabel(tr("comment.latest"))
-                state.comments.forEach {
-                    DesktopCommentRow(
-                        comment = it,
-                        onLike = { controller.toggleCommentLiked(it) },
-                        onReply = { controller.startReply(it) },
-                    )
-                }
-                when {
-                    state.loadingMore -> CircularProgressIndicator(
-                        Modifier.size(14.dp).align(Alignment.CenterHorizontally),
-                        strokeWidth = 2.dp,
-                    )
-                    state.hasMore -> TextButton(
-                        onClick = controller::loadMoreSongComments,
-                        modifier = Modifier.align(Alignment.CenterHorizontally),
-                    ) { Text(tr("comment.more")) }
-                    else -> Text(
-                        tr("comment.end"),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant,
-                    )
+                    when {
+                        state.loadingMore -> CircularProgressIndicator(
+                            Modifier.size(14.dp).align(Alignment.CenterHorizontally),
+                            strokeWidth = 2.dp,
+                        )
+                        state.hasMore -> TextButton(
+                            onClick = controller::loadMoreSongComments,
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        ) { Text(tr("comment.more")) }
+                        else -> Text(
+                            tr("comment.end"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
                 }
             }
-        }
         }
     }
 }
