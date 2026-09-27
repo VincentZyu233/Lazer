@@ -352,7 +352,7 @@ class DesktopPlayerController(
     /** True while the user is dragging the seek bar — freezes display smoothing. */
     var isSeeking by mutableStateOf(false)
         private set
-    var volume by mutableFloatStateOf(DEFAULT_DESKTOP_VOLUME)
+    var volume by mutableFloatStateOf(DesktopSettings.volume)
         private set
     var audioQuality by mutableStateOf(AudioQuality.EXHIGH)
         private set
@@ -1037,6 +1037,7 @@ class DesktopPlayerController(
 
     fun updateVolume(value: Float) {
         volume = value.coerceIn(0f, 1f)
+        DesktopSettings.volume = volume
         audioPlayer.setVolume(volume)
         systemMediaSession.setVolume(volume)
     }

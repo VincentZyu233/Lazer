@@ -129,6 +129,11 @@ internal object DesktopSettings {
     var exclusiveAudio: Boolean
         get() = DesktopStateFile.get("playback.exclusive_audio")?.toBooleanStrictOrNull() ?: false
         set(value) = DesktopStateFile.set("playback.exclusive_audio", value.toString())
+
+    var volume: Float
+        get() = DesktopStateFile.get("playback.volume")?.toFloatOrNull()?.coerceIn(0f, 1f)
+            ?: DEFAULT_DESKTOP_VOLUME
+        set(value) = DesktopStateFile.set("playback.volume", value.coerceIn(0f, 1f).toString())
 }
 
 private object DesktopStateFile {
