@@ -94,6 +94,11 @@ Lazer/
 
 项目使用 Gradle Wrapper，通常不需要单独安装 Gradle。
 
+Windows 桌面端还需要 CMake 和 Visual Studio 2022 的「使用 C++ 的桌面开发」工作负载：`runDesktop`、`run`
+与打包任务会先编译 `native/windows-taskbar` 里的任务栏媒体控制桥。CMake 若来自 Visual Studio 安装目录，
+需要把它的 `bin` 目录加入 `PATH`，否则构建会停在 `:desktopApp:configureWindowsTaskbarBridge`。
+生成器默认是 `Visual Studio 17 2022`，其他工具链用 `-PnativeCmakeGenerator=<生成器>` 覆盖。
+
 ## 快速开始
 
 ### Android
