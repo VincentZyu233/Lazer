@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [master, main, "feat/**", "fix/**", "ci/**"]
+    branches: [master, main, "feat/**", "fix/**", "ci/**", "codex/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -206,11 +206,50 @@ jobs:
           path: desktopApp/build/compose/binaries/Lazer-linux-x64.jar
           if-no-files-found: error
 
+  # Compile the Kotlin/Native framework, run shared iOS tests, then let Xcode compile and link the
+  # real SwiftUI + Compose application. The macOS 26 image supplies Xcode 26 for Liquid Glass APIs.
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Record Apple toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list runtimes
+      - name: Test shared code on iOS Simulator
+        run: ./gradlew :shared:iosSimulatorArm64Test --stacktrace
+      - name: Build and link iOS Simulator app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath iosApp/build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM= \
+            build | tee ios-xcodebuild.log
+      - name: Upload Xcode log when the build fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcodebuild-log
+          path: ios-xcodebuild.log
+          if-no-files-found: ignore
+
   # Version tags publish all deliverables uncompressed as release assets. Untagged builds leave
   # the corresponding Actions artifacts for platform testing.
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [android, desktop, linux-desktop]
+    needs: [android, desktop, linux-desktop, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
