@@ -23,17 +23,18 @@ dependencies {
     }
 
     if (osName.contains("win")) {
+        val composeVersion = libs.versions.composeMultiplatform.get()
         if (windowsArch == "arm64") {
-            implementation(compose.desktop.windows_arm64)
+            implementation("org.jetbrains.compose.desktop:desktop-jvm-windows-arm64:$composeVersion")
         } else {
-            implementation(compose.desktop.windows_x64)
+            implementation("org.jetbrains.compose.desktop:desktop-jvm-windows-x64:$composeVersion")
         }
     } else {
         implementation(compose.desktop.currentOs)
     }
 
-    implementation(compose.material3)
-    implementation(compose.materialIconsExtended)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.materialIconsExtended)
     implementation(libs.kotlinx.coroutinesSwing)
     implementation(libs.compose.uiToolingPreview)
     implementation(libs.zxing.core)
@@ -52,7 +53,7 @@ val nativeBridgeBuildDir = layout.buildDirectory.dir("native/windows-taskbar")
 val nativeBridgeFile = nativeBridgeBuildDir.map { it.file("Release/lazer-taskbar-bridge.dll") }
 val nativeCmakeGenerator = providers.gradleProperty("nativeCmakeGenerator").orElse("Visual Studio 17 2022").get()
 
-val configureWindowsTaskbarBridge by tasks.registering(Exec::class) {
+val configureWindowsTaskbarBridge = tasks.register<Exec>("configureWindowsTaskbarBridge") {
     onlyIf("Windows host") { System.getProperty("os.name").contains("windows", ignoreCase = true) }
     inputs.dir(rootProject.layout.projectDirectory.dir("native/windows-taskbar"))
     outputs.dir(nativeBridgeBuildDir)
@@ -66,7 +67,7 @@ val configureWindowsTaskbarBridge by tasks.registering(Exec::class) {
     commandLine(arguments)
 }
 
-val buildWindowsTaskbarBridge by tasks.registering(Exec::class) {
+val buildWindowsTaskbarBridge = tasks.register<Exec>("buildWindowsTaskbarBridge") {
     onlyIf("Windows host") { System.getProperty("os.name").contains("windows", ignoreCase = true) }
     dependsOn(configureWindowsTaskbarBridge)
     inputs.dir(rootProject.layout.projectDirectory.dir("native/windows-taskbar"))
@@ -74,7 +75,7 @@ val buildWindowsTaskbarBridge by tasks.registering(Exec::class) {
     commandLine("cmake", "--build", nativeBridgeBuildDir.get().asFile.absolutePath, "--config", "Release")
 }
 
-val prepareJpackageResources by tasks.registering(Copy::class) {
+val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") {
     from(layout.projectDirectory.dir("src/main/jpackage"))
     into(layout.buildDirectory.dir("generated/jpackage-resources"))
     if (isWindowsHost) {

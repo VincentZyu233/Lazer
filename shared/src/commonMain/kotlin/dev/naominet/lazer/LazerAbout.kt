@@ -21,15 +21,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * What Lazer is, what it stands on, and what it is allowed to be.
@@ -158,7 +159,8 @@ private fun CommitStamp() {
     if (LazerBuildInfo.commit.isBlank()) return
 
     val colors = MaterialTheme.colorScheme
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val clipboardScope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
     LaunchedEffect(copied) {
         if (copied) {
@@ -182,10 +184,12 @@ private fun CommitStamp() {
             .background(container)
             .border(1.dp, colors.outline, CircleShape)
             .clickable(onClickLabel = tr("about.commit.copy")) {
-                clipboard.setText(
-                    AnnotatedString("${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}"),
-                )
-                copied = true
+                clipboardScope.launch {
+                    clipboard.setClipEntry(
+                        lazerTextClipEntry("${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}"),
+                    )
+                    copied = true
+                }
             }
             .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {

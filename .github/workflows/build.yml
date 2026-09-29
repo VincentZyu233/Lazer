@@ -19,17 +19,17 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
       # setup-gradle owns the Gradle wrapper, dependency and project build caches.
       # Do not cache generated APKs or build directories across commits.
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Assemble arm64 release APK
         run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-apk-arm64
           path: androidApp/build/outputs/apk/release/*.apk
@@ -41,14 +41,14 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
       # setup-gradle caches Gradle toolchain/dependencies and the project build cache. MSVC and
       # CMake come from the versioned hosted runner image; generated native output is never cached.
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       # jpackage needs WiX to produce an .msi.
       - name: Install WiX Toolset
         shell: pwsh
@@ -103,12 +103,12 @@ jobs:
           tar.exe -a -c -f 'desktopApp/build/compose/binaries/Lazer-windows-x64-portable.zip' -C $app.Parent.FullName $app.Name
       # Upload the portable packages before the installer so they remain available if a later
       # installer-specific failure needs diagnosis.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-jar-windows-x64
           path: desktopApp/build/compose/binaries/Lazer-windows-x64.jar
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-windows-x64-portable
           path: desktopApp/build/compose/binaries/*-windows-x64-portable.zip
@@ -116,7 +116,7 @@ jobs:
       - name: Build MSI
         shell: pwsh
         run: .\gradlew.bat :desktopApp:packageMsi -PwindowsArch=x64 --stacktrace
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-msi
           path: desktopApp/build/compose/binaries/**/*.msi
@@ -128,13 +128,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
       # setup-gradle owns Gradle toolchain/dependency and project build caches.
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Install Linux packaging tools
         run: sudo apt-get update && sudo apt-get install -y fakeroot rpm
       - name: Test desktop media integration
@@ -185,22 +185,22 @@ jobs:
           chmod +x appimagetool-x86_64.AppImage
           ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run "$app_dir" \
             "desktopApp/build/compose/binaries/Lazer-x86_64.AppImage"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-deb-x64
           path: desktopApp/build/compose/binaries/**/*.deb
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-rpm-x64
           path: desktopApp/build/compose/binaries/**/*.rpm
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-appimage-x64
           path: desktopApp/build/compose/binaries/*.AppImage
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-jar-linux-x64
           path: desktopApp/build/compose/binaries/Lazer-linux-x64.jar
@@ -212,12 +212,12 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Record Apple toolchain
         run: |
           xcodebuild -version
@@ -248,14 +248,14 @@ jobs:
             cd iosApp/build/ipa
             zip -qry Lazer-unsigned.ipa Payload
           )
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lazer-ios-unsigned
           path: iosApp/build/ipa/Lazer-unsigned.ipa
           if-no-files-found: error
       - name: Upload Xcode log when the build fails
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ios-xcodebuild-log
           path: ios-xcodebuild.log
@@ -270,7 +270,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: artifacts
       # A bulk download succeeds even when an artifact is missing, which would quietly publish a
