@@ -4,6 +4,8 @@ package dev.naominet.lazer
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import dev.naominet.lazer.gateway.GatewaySessionStore
+import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.cinterop.usePinned
@@ -288,3 +290,32 @@ private data class StoredPlaylist(
         )
     }
 }
+
+/** The Gateway session cookie, kept in the device's own defaults like every other preference. */
+internal class IosSessionStore(
+    private val defaults: NSUserDefaults = NSUserDefaults.standardUserDefaults,
+) : GatewaySessionStore {
+    override var cookie: String?
+        get() = defaults.stringForKey(SESSION_KEY)
+        set(value) = defaults.setObject(value, SESSION_KEY)
+
+    private companion object {
+        const val SESSION_KEY = "lazer.ios.gatewayCookie"
+    }
+}
+
+/** Everything the shared app needs from iOS, in one object. */
+internal fun iosDevice(bridge: IosShellBridge): LazerDevice {
+    val sessionStore = IosSessionStore()
+    val gateway = NeteaseMusicGateway(sessionStore = sessionStore)
+    return LazerDevice(
+        preferences = iosPreferences(),
+        sessionStore = sessionStore,
+        cache = IosLibraryCache(),
+        player = IosPlayer(gateway),
+        host = IosPlatformHost(),
+        gateway = gateway,
+    )
+}
+
+internal fun iosScreenHost(bridge: IosShellBridge): LazerScreenHost = IosScreenHost(bridge)

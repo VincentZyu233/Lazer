@@ -1348,7 +1348,9 @@ private fun LazerAppContent(
                         val pending = coverSaveTarget
                         coverSaveTarget = null
                         if (target != null && pending != null) {
-                            controller.saveArtwork(pending.url, target, pending.title)
+                            controller.saveArtwork(pending.url, target, pending.title) { written ->
+                                written?.let(screen::onFileExported)
+                            }
                         }
                     }
                 },

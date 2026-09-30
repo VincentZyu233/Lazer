@@ -9,6 +9,10 @@
 		<key>NSAllowsArbitraryLoadsForMedia</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>用于扫描登录二维码和一起听邀请。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>用于选择一张你喜欢的图片作为背景。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

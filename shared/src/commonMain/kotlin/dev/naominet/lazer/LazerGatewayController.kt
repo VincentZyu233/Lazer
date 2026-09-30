@@ -143,7 +143,7 @@ class LazerGatewayController(private val device: LazerDevice) {
 
     val settings: LazerSettingsStore = device.settings
     private val gatewaySessionStore: GatewaySessionStore = device.sessionStore
-    private val gateway = NeteaseMusicGateway(
+    private val gateway = device.gateway ?: NeteaseMusicGateway(
         sessionStore = gatewaySessionStore,
     )
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -1186,7 +1186,7 @@ class LazerGatewayController(private val device: LazerDevice) {
         isArtistLoading = false
     }
 
-    fun saveArtwork(url: String, target: String, title: String) {
+    fun saveArtwork(url: String, target: String, title: String, onSaved: (String?) -> Unit = {}) {
         scope.launch {
             message = tr("cover.save.saving")
             val saved = withContext(Dispatchers.Default) {
@@ -1198,6 +1198,8 @@ class LazerGatewayController(private val device: LazerDevice) {
                 }.getOrDefault(false)
             }
             message = if (saved) tr("cover.save.success", title) else tr("cover.save.fail")
+            onSaved(target.takeIf { saved })
+        }
         }
     }
 

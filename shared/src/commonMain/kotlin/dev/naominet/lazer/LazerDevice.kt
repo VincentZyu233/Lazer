@@ -2,6 +2,7 @@ package dev.naominet.lazer
 
 import androidx.compose.ui.graphics.ImageBitmap
 import dev.naominet.lazer.gateway.GatewaySessionStore
+import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.coroutines.flow.StateFlow
 
@@ -127,6 +128,8 @@ class LazerDevice(
     val cache: LazerLibraryCache,
     val player: LazerPlayer,
     val host: LazerPlatformHost,
+    /** A platform that plays through its own client builds the Gateway here so both share it. */
+    val gateway: NeteaseMusicGateway? = null,
 ) {
     val settings: LazerSettingsStore = LazerSettingsStore(preferences)
 }

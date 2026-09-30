@@ -75,6 +75,9 @@ interface LazerScreenHost {
     /** Matches the system bars to the theme, so icons stay readable on paper or on dark paper. */
     fun setStatusBarAppearance(isDark: Boolean)
 
+    /** Called once a file the listener asked for has actually been written to disk. */
+    fun onFileExported(path: String) { }
+
     fun decodeImageBytes(bytes: ByteArray): ImageBitmap?
 
 }
