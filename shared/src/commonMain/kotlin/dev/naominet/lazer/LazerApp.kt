@@ -868,11 +868,14 @@ private fun LazerAppContent(
             "glass" -> controller.updateStyle(LazerStyle.LIQUID_GLASS)
             "playlist" -> awaitLazerSmokeList(controller::featuredPlaylists).firstOrNull()
                 ?.let(controller::openPlaylist)
-            "player", "comments" -> {
+            "player", "comments", "queue" -> {
                 val tracks = awaitLazerSmokeList(controller::homeTracks)
                 tracks.firstOrNull()?.let { controller.play(tracks, it) }
                 playerVisible = true
-                if (route == "comments") controller.openSongComments()
+                when (route) {
+                    "comments" -> controller.openSongComments()
+                    "queue" -> controller.openQueueSheet()
+                }
             }
             else -> controller.selectDestination(
                 LazerRootDestination.entries
