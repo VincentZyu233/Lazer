@@ -41,14 +41,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -108,7 +109,13 @@ internal fun IOSLazerApp() {
         )
         reportIOSComposeStage("glass:ready")
 
-        Box(Modifier.fillMaxSize().background(colors.background)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(colors.background)
+                .onSizeChanged { reportIOSComposeStage("size:${it.width}x${it.height}") }
+                .drawFirstIOSFrame(),
+        ) {
             reportIOSComposeStage("content")
             Box(
                 Modifier
@@ -153,14 +160,17 @@ internal fun IOSLazerApp() {
         }
     }
     reportIOSComposeStage("theme:ready")
+}
 
-    // Side effects run only after a successful composition commit. The CI launch test uses this
-    // marker to distinguish a genuinely rendered first frame from a still-running blank shell.
-    SideEffect {
-        if (!didReportIOSComposeReady) {
-            didReportIOSComposeReady = true
-            println(IOS_COMPOSE_READY_MARKER)
-        }
+/**
+ * The launch smoke test needs a signal that pixels reached the screen, not merely that composition
+ * ran: a Compose root that never gets a frame from the display link leaves a live but blank shell.
+ */
+private fun Modifier.drawFirstIOSFrame(): Modifier = drawWithContent {
+    content.draw(this)
+    if (!didReportIOSComposeReady) {
+        didReportIOSComposeReady = true
+        println(IOS_COMPOSE_READY_MARKER)
     }
 }
 
