@@ -206,6 +206,7 @@ fun AndroidNeteaseAuthWebView(
     androidx.compose.ui.viewinterop.AndroidView(
         factory = {
             WebView(context).apply {
+                val authorizationWebView = this
                 setBackgroundColor(android.graphics.Color.WHITE)
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
@@ -213,7 +214,7 @@ fun AndroidNeteaseAuthWebView(
                 settings.allowContentAccess = false
                 CookieManager.getInstance().apply {
                     setAcceptCookie(true)
-                    setAcceptThirdPartyCookies(this@apply, false)
+                    setAcceptThirdPartyCookies(authorizationWebView, false)
                     installNeteaseSessionCookies(sessionCookie)
                     flush()
                 }
