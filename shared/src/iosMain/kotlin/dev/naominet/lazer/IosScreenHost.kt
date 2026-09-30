@@ -3,6 +3,8 @@
 package dev.naominet.lazer
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.ImageBitmap
@@ -94,7 +96,22 @@ interface IosShellBridge {
      */
     fun playerSetAudioMode(exclusive: Boolean, systemMedia: Boolean)
 
-    fun setDarkStatusBar(dark: Boolean)}
+    /** Asks UIKit to watch, or stop watching, the system's edge swipe for the layer on top. */
+    fun setBackGesture(enabled: Boolean, sink: IosBackGestureSink)
+
+    fun setDarkStatusBar(dark: Boolean)
+}
+
+/**
+ * What UIKit reports while the system's own edge swipe drags the top layer aside. Progress is the
+ * share of the screen the finger has covered, and `confirmed` fires only once the swipe is committed,
+ * which is exactly the pair of answers the shared screens already drive their page transform from.
+ */
+interface IosBackGestureSink {
+    fun reportProgress(progress: Float, fromLeftEdge: Boolean)
+
+    fun confirmed()
+}
 
 /**
  * The colours the Android scan activity receives as intent extras, flattened to plain integers:
@@ -144,6 +161,8 @@ interface IosPlayerCommands {
 /** iOS's answers to the screen-level asks of the shared interface. */
 @OptIn(ExperimentalForeignApi::class)
 internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHost {
+    private val backSink = LazerIosBackSink()
+
     override val supportsSystemPalette: Boolean get() = false
 
     override fun dynamicColorScheme(isDark: Boolean): ColorScheme? = null
@@ -168,13 +187,32 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
     override val deviceFingerprint: String
         get() = UIDevice.currentDevice.identifierForVendor?.UUIDString.orEmpty()
 
-    /** iOS has no system back gesture, so the screens keep their own way out of every layer. */
+    /**
+     * UIKit's own edge swipe, handed to the same page transform Android drives from its predictive
+     * back. Only the layer that owns back asks for it, and the sink is installed once per change of
+     * ownership rather than once per recomposition.
+     */
     @Composable
     override fun BackGesture(
         enabled: Boolean,
         onProgress: (progress: Float, edge: LazerSwipeEdge) -> Unit,
         onConfirmed: () -> Unit,
-    ) = Unit
+    ) {
+        val latestProgress = rememberUpdatedState(onProgress)
+        val latestConfirmed = rememberUpdatedState(onConfirmed)
+        DisposableEffect(enabled) {
+            backSink.onProgress = { value, fromLeft ->
+                latestProgress.value(value, if (fromLeft) LazerSwipeEdge.Left else LazerSwipeEdge.Right)
+            }
+            backSink.onConfirmed = { latestConfirmed.value() }
+            bridge.setBackGesture(enabled, backSink)
+            onDispose {
+                bridge.setBackGesture(false, backSink)
+                backSink.onProgress = null
+                backSink.onConfirmed = null
+            }
+        }
+    }
 
     override fun shareText(text: String, title: String) = bridge.share(text, title)
 
@@ -215,4 +253,21 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
         ?.windows
         ?.filterIsInstance<UIWindow>()
         ?.firstOrNull { it.isKeyWindow() }
+}
+
+/** Holds whichever pair of callbacks the layer that currently owns back last supplied. */
+private class LazerIosBackSink : IosBackGestureSink {
+    var onProgress: ((Float, LazerSwipeEdge) -> Unit)? = null
+    var onConfirmed: (() -> Unit)? = null
+
+    override fun reportProgress(progress: Float, fromLeftEdge: Boolean) {
+        onProgress?.invoke(
+            progress,
+            if (fromLeftEdge) LazerSwipeEdge.Left else LazerSwipeEdge.Right,
+        )
+    }
+
+    override fun confirmed() {
+        onConfirmed?.invoke()
+    }
 }

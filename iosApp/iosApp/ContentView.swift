@@ -11,6 +11,8 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     private var pendingScan: ((String?) -> Void)?
     private var pendingImage: ((String?) -> Void)?
     private var pickerHandler: LazerPickerHandler?
+    private var backGesture: UIScreenEdgePanGestureRecognizer?
+    private var backSink: IosBackGestureSink?
 
     func scanCode(chrome: IosScanChrome, onResult: @escaping (String?) -> Void) {
         pendingScan = onResult
@@ -158,6 +160,43 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         audio.applyMode(exclusive: exclusive, systemMedia: systemMedia)
     }
 
+    /// The system's own left-edge swipe, reported to the shared page transform while it drags.
+    func setBackGesture(enabled: Bool, sink: IosBackGestureSink) {
+        backSink = sink
+        guard let view = foregroundWindow()?.rootViewController?.view else { return }
+        if let existing = backGesture {
+            existing.isEnabled = enabled
+            return
+        }
+        guard enabled else { return }
+        let recognizer = UIScreenEdgePanGestureRecognizer(
+            target: self, action: #selector(trackBackGesture(_:))
+        )
+        recognizer.edges = .left
+        view.addGestureRecognizer(recognizer)
+        backGesture = recognizer
+    }
+
+    @objc private func trackBackGesture(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard let sink = backSink, let view = gesture.view else { return }
+        let travelled = gesture.translation(in: view).x
+        let share = Float(max(0, min(1, travelled / max(1, view.bounds.width))))
+        switch gesture.state {
+        case .began, .changed:
+            sink.reportProgress(progress: share, fromLeftEdge: true)
+        case .ended:
+            // A swipe that never reached the threshold slides back instead of closing the layer.
+            if share > 0.3 {
+                sink.reportProgress(progress: 1, fromLeftEdge: true)
+                sink.confirmed()
+            } else {
+                sink.reportProgress(progress: 0, fromLeftEdge: true)
+            }
+        default:
+            sink.reportProgress(progress: 0, fromLeftEdge: true)
+        }
+    }
+
     func setDarkStatusBar(dark: Bool) {
         LazerHostViewController.prefersDarkStatusBar = dark
         foregroundWindow()?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
@@ -202,10 +241,10 @@ private final class LazerAudio: NSObject {
 
     func load(url: String, startPlaying: Bool, positionMillis: Double) {
         guard let address = URL(string: url) else { return }
-        mediaQueue.async {
-            try? AVAudioSession.sharedInstance().setCategory(.playback)
-            try? AVAudioSession.sharedInstance().setActive(true)
-        }
+        // The session has to be configured and active before the first sample plays. iOS decides from
+        // that moment whether this is background audio at all, which is what puts the track on the
+        // lock screen and in the Dynamic Island and keeps it audible once the app is suspended.
+        applySessionCategory()
         let item = AVPlayerItem(url: address)
         let next = AVPlayer(playerItem: item)
         NotificationCenter.default.addObserver(
@@ -245,6 +284,14 @@ private final class LazerAudio: NSObject {
     private let mediaQueue = DispatchQueue(label: "lazer.media")
     private var commands: IosPlayerCommands?
     private var wantsSystemMedia = true
+    private var exclusiveAudio = false
+
+    /// Sharing audio means ducking whoever else is playing; taking it over means silencing them.
+    private func applySessionCategory() {
+        let options: AVAudioSession.CategoryOptions = exclusiveAudio ? [] : .duckOthers
+        try? AVAudioSession.sharedInstance().setCategory(.playback, options: options)
+        try? AVAudioSession.sharedInstance().setActive(true)
+    }
 
     func attach(commands: IosPlayerCommands) {
         guard self.commands == nil else { return }
@@ -318,8 +365,9 @@ private final class LazerAudio: NSObject {
 
     func applyMode(exclusive: Bool, systemMedia: Bool) {
         wantsSystemMedia = systemMedia
+        exclusiveAudio = exclusive
+        applySessionCategory()
         mediaQueue.async {
-            try? AVAudioSession.sharedInstance().setCategory(.playback, options: exclusive ? [] : .duckOthers)
             let center = MPRemoteCommandCenter.shared()
             [center.playCommand, center.pauseCommand, center.nextTrackCommand,
              center.previousTrackCommand, center.changePlaybackPositionCommand].forEach {
