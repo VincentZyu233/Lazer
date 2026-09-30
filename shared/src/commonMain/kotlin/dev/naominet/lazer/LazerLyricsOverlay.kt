@@ -527,7 +527,6 @@ private fun AnimatedLyricsViewport(
             val focus = androidx.compose.runtime.key(trackId, line) {
                 animatedLyricFocus(index == activeIndexValue, animationSpeed)
             }
-            val ambient = (1f - distance / 4f).coerceAtLeast(0f)
             val rowLight = if (line.text.isBlank()) {
                 0f
             } else {
@@ -552,7 +551,8 @@ private fun AnimatedLyricsViewport(
                 interactionSuspended = !followPlayback,
             )
             val alpha = lyricSelectionRowAlpha(
-                baseAlpha = (0.24f + ambient * 0.20f) * (1f - highlight) + highlight * LyricActiveLineAlpha,
+                baseAlpha = (1f - highlight) * LyricInactiveLineAlpha +
+                    highlight * LyricActiveLineAlpha,
                 modePresence = selectionModeLight,
                 rowPresence = rowLight,
             )

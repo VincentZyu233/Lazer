@@ -128,6 +128,40 @@ internal data class LyricCharEmphasis(
 )
 
 /**
+ * AMLL's `LyricLine.shouldEmphasize`: a word only gets the per-character show if it is held long
+ * enough to read as one. CJK words need nothing but the second, because a single hanzi can carry a
+ * whole syllable for a second; Latin words shorter than two characters or longer than seven are
+ * left to the plain word float.
+ */
+internal fun lyricWordIsEmphasizable(word: TimedLyricWord): Boolean {
+    if (word.durationMillis < 1_000L) return false
+    val text = word.text
+    if (text.any(::isLyricCjkCharacter)) return true
+    val trimmed = text.trim().length
+    return trimmed in 2..7
+}
+
+/**
+ * AMLL's `createFloatAnimation`, which every word gets whether or not it is emphasized: one ease-out
+ * lift to `-0.05em` over the word's own duration, held there for the rest of the line by `fill: both`.
+ * The sung half of a line therefore rides slightly above the half still to come.
+ */
+internal fun lyricWordFloatOffsetEm(word: TimedLyricWord, positionMillis: Long): Float {
+    val duration = word.durationMillis.coerceAtLeast(EmpMinDurationMillis.toLong()).toFloat()
+    val progress = lyricEmphasizeElapsed(positionMillis, word.startTimeMillis.toFloat(), duration)
+    return -SettledLyricWordFloatEm * lyricEaseOut(progress)
+}
+
+/** The lift a finished word keeps, in em. */
+internal const val SettledLyricWordFloatEm = 0.05f
+
+/** CSS `ease-out`, which is what AMLL's word float runs on. */
+internal fun lyricEaseOut(x: Float): Float = cubicBezierEase(0f, 0f, EmpSharedX2, EmpSharedY2, x)
+
+private fun isLyricCjkCharacter(character: Char): Boolean =
+    character.code in 0x3400..0x9FFF || character.code in 0xF900..0xFAFF
+
+/**
  * The whole per-character answer: [glowProgress] drives scale, lean and halo, [floatProgress] drives
  * the sine-shaped lift that starts 400ms before the glow and runs 1.4 times as long.
  *

@@ -139,6 +139,31 @@ class LyricEmphasizeTest {
     }
 
     @Test
+    fun onlyHeldWordsGetThePerCharacterShow() {
+        // AMLL's shouldEmphasize: a second of holding is the floor, and a Latin word has to be short
+        // enough to read as one unit. CJK words are exempt from the length rule, because a single
+        // hanzi can carry a whole syllable for longer than that.
+        assertTrue(lyricWordIsEmphasizable(TimedLyricWord(0L, 1_000L, "长")))
+        assertTrue(lyricWordIsEmphasizable(TimedLyricWord(0L, 1_000L, "hello")))
+        assertTrue(!lyricWordIsEmphasizable(TimedLyricWord(0L, 999L, "长")))
+        assertTrue(!lyricWordIsEmphasizable(TimedLyricWord(0L, 1_200L, "a")))
+        assertTrue(!lyricWordIsEmphasizable(TimedLyricWord(0L, 1_200L, "absolutely")))
+    }
+
+    @Test
+    fun aSungWordRisesToItsFloatHeightAndKeepsIt() {
+        val word = TimedLyricWord(1_000L, 400L, "音")
+        assertEquals(0f, lyricWordFloatOffsetEm(word, 900L), 0.0001f)
+        // The lift takes at least a second even when the word itself is shorter, so a quick syllable
+        // still moves rather than snapping.
+        val midway = lyricWordFloatOffsetEm(word, 1_500L)
+        assertTrue(midway < 0f && midway > -SettledLyricWordFloatEm)
+        // fill:"both" holds it there for the rest of the line, which is what puts the sung half
+        // slightly above the half still to come.
+        assertEquals(-SettledLyricWordFloatEm, lyricWordFloatOffsetEm(word, 3_000L), 0.0001f)
+    }
+
+    @Test
     fun elapsedProgressHoldsBothEndsLikeFillBoth() {
         assertEquals(0f, lyricEmphasizeElapsed(0L, startMillis = 1000f, durationMillis = 500f), 0f)
         assertEquals(0.5f, lyricEmphasizeElapsed(1250L, startMillis = 1000f, durationMillis = 500f), 0.0001f)

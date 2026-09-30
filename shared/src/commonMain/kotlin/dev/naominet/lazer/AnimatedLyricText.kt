@@ -1,7 +1,7 @@
 package dev.naominet.lazer
 
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -51,6 +51,13 @@ private val MinimumLyricGlowOverflow = 36.dp
 
 /** Brightness of the line being sung. Below opaque so glow and cover art still read through it. */
 const val LyricActiveLineAlpha = 0.85f
+
+/**
+ * Brightness of every other line. AMLL's wrapper opacity is a flat 1 there and its two ink layers
+ * hold 0.2 each, so all lines out of the singing window read at 0.4 of the ink - near or far, which
+ * is why distance moves the blur and never the brightness.
+ */
+const val LyricInactiveLineAlpha = 0.4f
 
 /**
  * AMLL's line-focus spring: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so
@@ -163,12 +170,14 @@ fun AmllLyricText(
     )
     val effectStrength = animateFloatAsState(
         targetValue = if (active) 1f else 0f,
-        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        // AMLL cross-fades the dim and bright ink layers over 0.45s on CSS `ease-out`.
+        animationSpec = tween(durationMillis = 450, easing = LinearOutSlowInEasing),
         label = "AMLL lyric effect",
     )
     val lineFocus by animateFloatAsState(
         targetValue = if (currentLine) 1f else 0f,
-        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        // The wrapper's own opacity and filter transitions are 0.4s ease.
+        animationSpec = tween(durationMillis = 400, easing = LinearOutSlowInEasing),
         label = "AMLL lyric shadow",
     )
     val alignedStyle = style.merge(
@@ -217,7 +226,9 @@ fun AmllLyricText(
                                 // Click feedback lights the whole line, including before seek completes.
                                 hasTimedGlyphs = !temporaryGlow && timed.hasTimedGlyphs,
                                 wordMasks = masks,
+                                wordFloatEm = timed.wordFloatOffsetsAt(clock),
                                 shadowColor = shadowColor,
+                                emPx = emPx,
                             )
                             // AMLL gives each character mid-emphasis its own blurred duplicate; the
                             // layer's Gaussian makes that a halo, so the only extra work here is the
@@ -273,6 +284,7 @@ fun AmllLyricText(
                             hasTimedGlyphs = true,
                             wordMasks = timed.masksAt(clock, speed),
                             emphasized = timed.emphasisAt(clock, speed),
+                            wordFloatEm = timed.wordFloatOffsetsAt(clock),
                             color = color,
                             effectStrength = effectStrength.value,
                             emPx = emPx,
@@ -312,6 +324,8 @@ private class TimedLyricLayout {
     private var cachedEmphasisPosition = Long.MIN_VALUE
     private var cachedEmphasisSpeed: LyricAnimationSpeed? = null
     private var cachedEmphasis = emptyList<LyricCharEmphasisState>()
+    private var cachedFloatPosition = Long.MIN_VALUE
+    private var cachedWordFloats: FloatArray? = null
 
     var hasTimedGlyphs: Boolean = false
         private set
@@ -341,6 +355,8 @@ private class TimedLyricLayout {
             cachedEmphasisPosition = Long.MIN_VALUE
             cachedEmphasisSpeed = null
             cachedEmphasis = emptyList()
+            cachedFloatPosition = Long.MIN_VALUE
+            cachedWordFloats = null
         }
         return this
     }
@@ -352,6 +368,24 @@ private class TimedLyricLayout {
             cachedMasks = buildWordMasks(laidOutWords, positionMillis, speed)
         }
         return cachedMasks
+    }
+
+    /**
+     * AMLL's per-word float for every word of the line, in em, negative being up. A finished word
+     * keeps its lift for the rest of the line, so the sung half rides above the half still to come.
+     */
+    fun wordFloatOffsetsAt(positionMillis: Long): FloatArray {
+        val words = sourceWords
+        val cached = cachedWordFloats
+        if (cachedFloatPosition != positionMillis || cached == null || cached.size != words.size) {
+            cachedFloatPosition = positionMillis
+            val offsets = FloatArray(words.size) { index ->
+                lyricWordFloatOffsetEm(words[index], positionMillis)
+            }
+            cachedWordFloats = offsets
+            return offsets
+        }
+        return cached
     }
 
     /**
@@ -371,11 +405,13 @@ private class TimedLyricLayout {
             cachedEmphasis = emptyList()
             return cachedEmphasis
         }
+        val wordFloats = wordFloatOffsetsAt(positionMillis)
         cachedEmphasis = buildList(timedGlyphs.size) {
             for (glyph in timedGlyphs) {
                 val wordIndex = glyph.timing.wordIndex
                 if (wordIndex !in sourceWords.indices) continue
                 val word = sourceWords[wordIndex]
+                if (!lyricWordIsEmphasizable(word)) continue
                 val strength = wordStrengths[wordIndex]
                 val glowStart = lyricEmphasizeCharStartMillis(
                     wordStartMillis = word.startTimeMillis,
@@ -406,6 +442,7 @@ private class TimedLyricLayout {
                             characterCount = glyph.timing.characterCount,
                         ),
                         lineClip = glyphLineClip(layout, glyph),
+                        wordFloatEm = wordFloats[wordIndex],
                     ),
                 )
             }
@@ -420,6 +457,8 @@ internal class LyricCharEmphasisState(
     val emphasis: LyricCharEmphasis,
     /** The line box the character belongs to, so a transform never bleeds into the next row. */
     val lineClip: Rect,
+    /** AMLL composes the word's own float under the character's, additively. */
+    val wordFloatEm: Float,
 )
 
 internal data class LaidOutLyricGlyph(
@@ -481,13 +520,15 @@ private fun DrawScope.drawLyricShaderShadow(
     layout: TextLayoutResult,
     hasTimedGlyphs: Boolean,
     wordMasks: List<LyricWordMask>,
+    wordFloatEm: FloatArray,
     shadowColor: Color,
+    emPx: Float,
 ) {
     if (!hasTimedGlyphs) {
         drawText(textLayoutResult = layout, color = shadowColor)
         return
     }
-    drawTextInWordMasks(layout, wordMasks, shadowColor)
+    drawMaskedLine(layout, wordMasks, emptyList(), wordFloatEm, shadowColor, emPx)
 }
 
 private fun buildWordMasks(
@@ -531,6 +572,7 @@ private fun DrawScope.drawAmllGlyphs(
     hasTimedGlyphs: Boolean,
     wordMasks: List<LyricWordMask>,
     emphasized: List<LyricCharEmphasisState>,
+    wordFloatEm: FloatArray,
     color: Color,
     effectStrength: Float,
     emPx: Float,
@@ -539,10 +581,18 @@ private fun DrawScope.drawAmllGlyphs(
     val dimColor = color.copy(alpha = color.alpha * (1f - effect * (1f - lyricBaseMaskAlpha())))
     drawText(textLayoutResult = layout, color = dimColor)
     if (!hasTimedGlyphs) return
-    // The line is painted in two passes: everything that is merely being revealed goes in one
-    // clipped pass, and only the few characters AMLL is mid-emphasis on are drawn on their own, so
-    // the cost of the animation stays proportional to the characters that are actually moving.
-    drawTextInWordMasks(layout, wordMasks, color, punched = emphasized.map { it.glyph.bounds })
+    // AMLL's line is three things at once: a dim copy that never moves, a bright copy clipped to
+    // what has been sung, and per-character transforms on the word being sung now. Words that have
+    // finished floating share one clipped pass, a word still rising gets one of its own, and only
+    // the handful of characters inside their emphasis window are drawn individually.
+    drawMaskedLine(
+        layout = layout,
+        wordMasks = wordMasks,
+        punched = emphasized,
+        wordFloatEm = wordFloatEm,
+        color = color,
+        emPx = emPx,
+    )
     emphasized.forEach { state ->
         drawEmphasizedCharacter(layout, state, wordMasks, color, emPx)
     }
@@ -570,7 +620,7 @@ private fun DrawScope.drawEmphasizedCharacter(
 
     translate(
         left = emphasis.offsetXEm * emPx,
-        top = (emphasis.offsetYEm + emphasis.floatOffsetEm) * emPx,
+        top = (state.wordFloatEm + emphasis.offsetYEm + emphasis.floatOffsetEm) * emPx,
     ) {
         scale(
             pivot = Offset((box.left + box.right) / 2f, (box.top + box.bottom) / 2f),
@@ -606,28 +656,84 @@ private fun DrawScope.drawEmphasizedCharacter(
     }
 }
 
-/** Paint AMLL's bright side over the dim base text, including the moving half-em fade band. */
-private fun DrawScope.drawTextInWordMasks(
+/**
+ * Paint AMLL's bright side over the dim base text, word by word, each at the height its float has
+ * reached. Words that have finished rising all sit at the same offset and share one clipped pass;
+ * a word still on its way needs a pass of its own.
+ */
+private fun DrawScope.drawMaskedLine(
     layout: TextLayoutResult,
     wordMasks: List<LyricWordMask>,
+    punched: List<LyricCharEmphasisState>,
+    wordFloatEm: FloatArray,
     color: Color,
-    punched: List<Rect> = emptyList(),
+    emPx: Float,
 ) {
-    if (wordMasks.isEmpty()) return
+    val settled = ArrayList<LyricWordMask>(wordMasks.size)
+    val rising = ArrayList<LyricWordMask>(4)
+    wordMasks.forEach { mask ->
+        if (!mask.hasVisibleInk()) return@forEach
+        val offsetEm = wordFloatEm.getOrElse(mask.wordIndex) { 0f }
+        if (mask.fullyRevealed && offsetEm <= -SettledLyricWordFloatEm) {
+            settled += mask
+        } else {
+            rising += mask
+        }
+    }
+    if (settled.isNotEmpty()) {
+        translate(top = -SettledLyricWordFloatEm * emPx) {
+            drawWordMaskGroup(layout, settled, punched, color)
+        }
+    }
+    rising.forEach { mask ->
+        translate(top = wordFloatEm.getOrElse(mask.wordIndex) { 0f } * emPx) {
+            drawWordMaskGroup(layout, listOf(mask), punched, color)
+        }
+    }
+}
+
+private fun LyricWordMask.solidRight(): Float = if (fullyRevealed) {
+    bounds.right
+} else {
+    fadeStartX.coerceIn(bounds.left, bounds.right)
+}
+
+private fun LyricWordMask.hasVisibleInk(): Boolean {
+    if (solidRight() > bounds.left) return true
+    val fadeLeft = fadeStartX.coerceAtLeast(bounds.left)
+    val fadeRight = edgeX.coerceAtMost(bounds.right)
+    return fadeRight > fadeLeft
+}
+
+private fun DrawScope.drawWordMaskGroup(
+    layout: TextLayoutResult,
+    wordMasks: List<LyricWordMask>,
+    punched: List<LyricCharEmphasisState>,
+    color: Color,
+) {
     val solidMask = Path().apply {
         fillType = PathFillType.EvenOdd
         wordMasks.forEach { mask ->
-            val solidRight = if (mask.fullyRevealed) {
-                mask.bounds.right
-            } else {
-                mask.fadeStartX.coerceIn(mask.bounds.left, mask.bounds.right)
-            }
-            if (solidRight > mask.bounds.left) {
-                addRect(Rect(mask.bounds.left, mask.bounds.top, solidRight, mask.bounds.bottom))
+            val right = mask.solidRight()
+            if (right > mask.bounds.left) {
+                addRect(Rect(mask.bounds.left, mask.bounds.top, right, mask.bounds.bottom))
             }
         }
-        // Even-odd turns a character that is being drawn on its own into a hole in this pass.
-        punched.forEach { bounds -> addRect(bounds) }
+        // Even-odd turns a character that is drawn on its own into a hole in this pass, but only
+        // where this pass would have painted it, so a hole can never brighten an un-sung region.
+        punched.forEach { state ->
+            val hole = state.glyph.bounds
+            wordMasks.forEach { mask ->
+                if (mask.wordIndex != state.glyph.timing.wordIndex) return@forEach
+                val solid = Rect(
+                    mask.bounds.left,
+                    mask.bounds.top,
+                    mask.solidRight(),
+                    mask.bounds.bottom,
+                )
+                if (hole.overlaps(solid)) addRect(hole.intersect(solid))
+            }
+        }
     }
     if (!solidMask.isEmpty) {
         clipPath(solidMask) {
