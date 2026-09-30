@@ -12,9 +12,9 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     private var pendingImage: ((String?) -> Void)?
     private var pickerHandler: LazerPickerHandler?
 
-    func scanCode(onResult: @escaping (String?) -> Void) {
+    func scanCode(chrome: IosScanChrome, onResult: @escaping (String?) -> Void) {
         pendingScan = onResult
-        let scanner = LazerScannerViewController()
+        let scanner = LazerScannerViewController(chrome: chrome)
         scanner.onFound = { [weak self] code in
             self?.pendingScan?(code)
             self?.pendingScan = nil
@@ -322,52 +322,191 @@ private final class LazerAudio: NSObject {
 }
 
 
-/// A QR scanner that stays on screen only while the listener is looking for a code.
+/// A QR scanner that carries the active palette over the camera, laid out the way the Android
+/// scan activity lays itself out: a card at the top, a pill at the bottom, corner guides between.
 private final class LazerScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onFound: ((String?) -> Void)?
     var onCancelled: (() -> Void)?
 
+    private let chrome: IosScanChrome
+    private var cameraUnavailable = false
     private let session = AVCaptureSession()
     private let preview = AVCaptureVideoPreviewLayer()
+    private let guides = CAShapeLayer()
+
+    init(chrome: IosScanChrome) {
+        self.chrome = chrome
+        super.init(nibName: nil, bundle: nil)
+        modalPresentationStyle = .fullScreen
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let source = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(source) else {
-            onCancelled?()
-            return
-        }
-        session.addInput(source)
-        let output = AVCaptureMetadataOutput()
-        if session.canAddOutput(output) {
-            session.addOutput(output)
-            output.setMetadataObjectsDelegate(self, queue: .main)
-            output.metadataObjectTypes = [.qr]
+        view.backgroundColor = .black
+        if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+           let source = try? AVCaptureDeviceInput(device: device),
+           session.canAddInput(source) {
+            session.addInput(source)
+            let output = AVCaptureMetadataOutput()
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+                output.setMetadataObjectsDelegate(self, queue: .main)
+                output.metadataObjectTypes = [.qr]
+            }
+        } else {
+            cameraUnavailable = true
         }
         preview.session = session
         preview.videoGravity = .resizeAspectFill
         view.layer.addSublayer(preview)
+        buildInterface()
+    }
 
-        let cancel = UIButton(type: .system)
-        cancel.setTitle("取消", for: .normal)
-        cancel.addTarget(self, action: #selector(cancelScan), for: .touchUpInside)
-        cancel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(cancel)
+    private func buildInterface() {
+        guides.fillColor = nil
+        guides.strokeColor = palette(chrome.primaryArgb).cgColor
+        guides.lineWidth = 4
+        guides.lineCap = .round
+        view.layer.addSublayer(guides)
+
+        let card = UIView()
+        card.backgroundColor = palette(chrome.backgroundArgb).withAlphaComponent(247 / 255)
+        card.layer.cornerRadius = 22
+        card.layer.shadowColor = UIColor.black.cgColor
+        card.layer.shadowOpacity = 0.24
+        card.layer.shadowRadius = 6
+        card.layer.shadowOffset = CGSize(width: 0, height: 4)
+
+        let mark = UIImageView(image: LazerScanGlyph.qr(side: 22))
+        mark.tintColor = palette(chrome.onPrimaryContainerArgb)
+        mark.backgroundColor = palette(chrome.primaryContainerArgb)
+        mark.layer.cornerRadius = 15
+
+        let title = UILabel()
+        title.text = chrome.title
+        title.font = .systemFont(ofSize: 20, weight: .medium)
+        title.textColor = palette(chrome.onBackgroundArgb)
+
+        let subtitle = UILabel()
+        subtitle.text = chrome.subtitle
+        subtitle.font = .systemFont(ofSize: 13, weight: .regular)
+        subtitle.textColor = palette(chrome.onSurfaceVariantArgb)
+        subtitle.numberOfLines = 2
+
+        let column = UIStackView(arrangedSubviews: [title, subtitle])
+        column.axis = .vertical
+        column.spacing = 4
+        // The card keeps its width and lets the copy wrap, exactly as the Android panel does.
+        title.contentCompressionResistancePriority = .init(700)
+        subtitle.contentCompressionResistancePriority = .init(700)
+
+        let close = UIButton(type: .custom)
+        close.setImage(LazerScanGlyph.close(side: 20), for: .normal)
+        close.tintColor = palette(chrome.onBackgroundArgb)
+        close.backgroundColor = palette(chrome.surfaceArgb)
+        close.layer.cornerRadius = 24
+        close.accessibilityLabel = chrome.backLabel
+        close.addTarget(self, action: #selector(cancelScan), for: .touchUpInside)
+
+        let subviews: [UIView] = [card, mark, column, close]
+        for subview in subviews {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+        }
+        view.addSubview(card)
+        card.addSubview(mark)
+        card.addSubview(column)
+        card.addSubview(close)
+
+        // Android gives the panel 18dp margins and lets it run to 440dp at most.
+        let fillsWidth = card.widthAnchor.constraint(equalTo: view.safeAreaLayoutGuide.widthAnchor, constant: -36)
+        fillsWidth.priority = .defaultHigh
+
+        let pill = UIView()
+        pill.backgroundColor = palette(chrome.primaryArgb).withAlphaComponent(232 / 255)
+        pill.layer.cornerRadius = 100
+        pill.layer.shadowColor = UIColor.black.cgColor
+        pill.layer.shadowOpacity = 0.18
+        pill.layer.shadowRadius = 4
+        pill.layer.shadowOffset = CGSize(width: 0, height: 3)
+        let prompt = UILabel()
+        prompt.text = chrome.prompt
+        prompt.font = .systemFont(ofSize: 14, weight: .medium)
+        prompt.textColor = LazerScanGlyph.isLight(chrome.primaryArgb) ? .black : .white
+        prompt.textAlignment = .center
+        prompt.translatesAutoresizingMaskIntoConstraints = false
+        pill.addSubview(prompt)
+        view.addSubview(pill)
+
         NSLayoutConstraint.activate([
-            cancel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            cancel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            card.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
+            card.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+            card.widthAnchor.constraint(lessThanOrEqualToConstant: 440),
+            card.widthAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.widthAnchor, constant: -36),
+            card.heightAnchor.constraint(equalToConstant: 76),
+            fillsWidth,
+
+            mark.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            mark.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            mark.widthAnchor.constraint(equalToConstant: 44),
+            mark.heightAnchor.constraint(equalToConstant: 44),
+
+            close.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -8),
+            close.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+            close.widthAnchor.constraint(equalToConstant: 48),
+            close.heightAnchor.constraint(equalToConstant: 48),
+
+            column.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 14),
+            column.trailingAnchor.constraint(equalTo: close.leadingAnchor, constant: -8),
+            column.centerYAnchor.constraint(equalTo: card.centerYAnchor),
+
+            pill.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            pill.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+            pill.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 20),
+            pill.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
+            prompt.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 18),
+            prompt.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -18),
+            prompt.topAnchor.constraint(equalTo: pill.topAnchor, constant: 11),
+            prompt.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -11),
         ])
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         preview.frame = view.bounds
+        let side = framingSide(for: view.bounds.size)
+        let rect = CGRect(
+            x: (view.bounds.width - side) / 2,
+            y: (view.bounds.height - side) / 2,
+            width: side,
+            height: side
+        )
+        guides.frame = view.bounds
+        guides.path = LazerScanGlyph.cornerGuides(around: rect, arm: side * 0.12)
+    }
+
+    /// The Android viewfinder measures 62% of the shorter side, kept between 190 and 330 points.
+    private func framingSide(for size: CGSize) -> CGFloat {
+        let shorter = max(1, min(size.width, size.height))
+        let minimum = min(shorter, 190)
+        let maximum = max(min(shorter, 330), minimum)
+        return min(max((shorter * 0.62).rounded(), minimum), maximum)
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        if cameraUnavailable {
+            dismiss(animated: true) { [weak self] in
+                self?.onCancelled?()
+                self?.onCancelled = nil
+            }
+            return
+        }
         if !session.isRunning { session.startRunning() }
     }
 
@@ -383,6 +522,16 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
         }
     }
 
+    private func palette(_ argb: Int32) -> UIColor {
+        let value = UInt32(bitPattern: argb)
+        return UIColor(
+            red: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: CGFloat((value >> 24) & 0xFF) / 255
+        )
+    }
+
     func metadataOutput(
         _ output: AVCaptureMetadataOutput,
         didOutput metadataObjects: [AVMetadataObject],
@@ -394,6 +543,98 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
             self?.onFound?(code)
             self?.onFound = nil
         }
+    }
+}
+
+/// The two marks the Android scanner loads from vector drawables, drawn at the same 24 point grid.
+private enum LazerScanGlyph {
+    static func qr(side: CGFloat) -> UIImage {
+        let path = UIBezierPath()
+        path.usesEvenOddFillRule = true
+        let finders: [(CGFloat, CGFloat)] = [(3, 3), (14, 3), (3, 14)]
+        for finder in finders {
+            path.append(UIBezierPath(rect: CGRect(x: finder.0, y: finder.1, width: 7, height: 7)))
+            path.append(UIBezierPath(rect: CGRect(x: finder.0 + 2, y: finder.1 + 2, width: 3, height: 3)))
+        }
+        let cells: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+            (13, 13, 3, 3), (12, 17, 2, 4), (15, 18, 2, 3), (18, 18, 3, 3),
+        ]
+        for cell in cells {
+            path.append(UIBezierPath(rect: CGRect(x: cell.0, y: cell.1, width: cell.2, height: cell.3)))
+        }
+        let shape = UIBezierPath()
+        shape.move(to: CGPoint(x: 17, y: 13))
+        shape.addLine(to: CGPoint(x: 21, y: 13))
+        shape.addLine(to: CGPoint(x: 21, y: 15))
+        shape.addLine(to: CGPoint(x: 19, y: 15))
+        shape.addLine(to: CGPoint(x: 19, y: 17))
+        shape.addLine(to: CGPoint(x: 17, y: 17))
+        shape.closePath()
+        path.append(shape)
+        return render(side) { context in
+            context.cgContext.saveGState()
+            context.cgContext.scaleBy(x: side / 24, y: side / 24)
+            UIColor.white.setFill()
+            path.fill()
+            context.cgContext.restoreGState()
+        }
+    }
+
+    static func close(side: CGFloat) -> UIImage {
+        let path = UIBezierPath()
+        path.lineCapStyle = .round
+        path.move(to: CGPoint(x: 6.4, y: 6.4))
+        path.addLine(to: CGPoint(x: 17.6, y: 17.6))
+        path.move(to: CGPoint(x: 17.6, y: 6.4))
+        path.addLine(to: CGPoint(x: 6.4, y: 17.6))
+        return render(side) { context in
+            context.cgContext.saveGState()
+            context.cgContext.scaleBy(x: side / 24, y: side / 24)
+            UIColor.white.setStroke()
+            path.lineWidth = 2
+            path.stroke()
+            context.cgContext.restoreGState()
+        }
+    }
+
+    static func cornerGuides(around rect: CGRect, arm: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        let stroke: CGFloat = 4
+        let left = rect.minX + stroke / 2
+        let top = rect.minY + stroke / 2
+        let right = rect.maxX - stroke / 2
+        let bottom = rect.maxY - stroke / 2
+        let corners: [(CGPoint, CGPoint)] = [
+            (CGPoint(x: left, y: top), CGPoint(x: left + arm, y: top)),
+            (CGPoint(x: left, y: top), CGPoint(x: left, y: top + arm)),
+            (CGPoint(x: right, y: top), CGPoint(x: right - arm, y: top)),
+            (CGPoint(x: right, y: top), CGPoint(x: right, y: top + arm)),
+            (CGPoint(x: left, y: bottom), CGPoint(x: left + arm, y: bottom)),
+            (CGPoint(x: left, y: bottom), CGPoint(x: left, y: bottom - arm)),
+            (CGPoint(x: right, y: bottom), CGPoint(x: right - arm, y: bottom)),
+            (CGPoint(x: right, y: bottom), CGPoint(x: right, y: bottom - arm)),
+        ]
+        for (from, to) in corners {
+            path.move(to: from)
+            path.addLine(to: to)
+        }
+        return path
+    }
+
+    /// Whether the primary colour is bright enough to need dark text, the same test Android runs.
+    static func isLight(_ argb: Int32) -> Bool {
+        let value = UInt32(bitPattern: argb)
+        let channels = [(value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF]
+        let linear = channels.map { raw -> Double in
+            let channel = Double(raw) / 255
+            return channel <= 0.03928 ? channel / 12.92 : pow((channel + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2] > 0.45
+    }
+
+    private static func render(_ side: CGFloat, _ draw: (UIGraphicsImageRendererContext) -> Void) -> UIImage {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image(actions: draw)
+        return image.withRenderingMode(.alwaysTemplate)
     }
 }
 

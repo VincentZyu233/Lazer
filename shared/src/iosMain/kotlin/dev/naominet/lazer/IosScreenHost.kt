@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
@@ -23,7 +24,7 @@ import platform.UIKit.UIView
  * Kotlin owns every decision about what the listener sees around them.
  */
 interface IosShellBridge {
-    fun scanCode(onResult: (text: String?) -> Unit)
+    fun scanCode(chrome: IosScanChrome, onResult: (text: String?) -> Unit)
 
     fun pickImage(onPicked: (path: String?) -> Unit)
 
@@ -98,6 +99,38 @@ interface IosShellBridge {
     fun setDarkStatusBar(dark: Boolean)
 }
 
+/**
+ * The colours the Android scan activity receives as intent extras, flattened to plain integers:
+ * an inline [androidx.compose.ui.graphics.Color] has no shape left once it crosses the bridge.
+ */
+class IosScanChrome(
+    val backgroundArgb: Int,
+    val surfaceArgb: Int,
+    val primaryArgb: Int,
+    val primaryContainerArgb: Int,
+    val onBackgroundArgb: Int,
+    val onSurfaceVariantArgb: Int,
+    val onPrimaryContainerArgb: Int,
+    val title: String,
+    val subtitle: String,
+    val prompt: String,
+    val backLabel: String,
+) {
+    internal constructor(theme: LazerScanTheme) : this(
+        backgroundArgb = theme.background.toArgb(),
+        surfaceArgb = theme.surface.toArgb(),
+        primaryArgb = theme.primary.toArgb(),
+        primaryContainerArgb = theme.primaryContainer.toArgb(),
+        onBackgroundArgb = theme.onBackground.toArgb(),
+        onSurfaceVariantArgb = theme.onSurfaceVariant.toArgb(),
+        onPrimaryContainerArgb = theme.onPrimaryContainer.toArgb(),
+        title = theme.title,
+        subtitle = theme.description,
+        prompt = theme.prompt,
+        backLabel = theme.backLabel,
+    )
+}
+
 /** The playback actions the system is allowed to ask the shared player for. */
 interface IosPlayerCommands {
     fun play()
@@ -163,7 +196,7 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
     override fun onFileExported(path: String) = bridge.presentSavedFile(path)
 
     override fun scanCode(theme: LazerScanTheme, onResult: (text: String?) -> Unit) =
-        bridge.scanCode(onResult)
+        bridge.scanCode(IosScanChrome(theme), onResult)
 
     override fun setStatusBarAppearance(isDark: Boolean) = bridge.setDarkStatusBar(isDark)
 
