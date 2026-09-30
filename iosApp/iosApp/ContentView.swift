@@ -484,14 +484,9 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if cameraUnavailable {
-            dismiss(animated: true) { [weak self] in
-                self?.onCancelled?()
-                self?.onCancelled = nil
-            }
-            return
-        }
-        if !session.isRunning { session.startRunning() }
+        // Without a camera the panel stays up with its own way out, which is what the Android
+        // scanner does over a black preview; vanishing by itself would leave the tap unanswered.
+        if !cameraUnavailable && !session.isRunning { session.startRunning() }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
