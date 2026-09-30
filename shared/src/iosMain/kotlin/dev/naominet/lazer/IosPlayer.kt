@@ -29,9 +29,9 @@ internal class IosPlayer(
 
     private var exclusive = false
     private var systemMedia = true
+    private var didAttachCommands = false
 
     init {
-        bridge.playerAttachCommands(this)
         bridge.playerSetEndedHandler {
             scope.launch {
                 if (LazerPlaybackQueue.mode == LazerPlayMode.SingleLoop) {
@@ -52,6 +52,11 @@ internal class IosPlayer(
         startPlaying: Boolean,
         positionMillis: Long,
     ) {
+        // The system's transport is only worth asking for once there is something to transport.
+        if (!didAttachCommands) {
+            didAttachCommands = true
+            bridge.playerAttachCommands(this)
+        }
         LazerPlaybackQueue.replace(queue, track)
         LazerPlaybackStateStore.update(
             LazerPlaybackSnapshot(

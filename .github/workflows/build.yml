@@ -293,8 +293,18 @@ jobs:
           fi
           xcrun simctl io "$simulator_udid" screenshot ios-simulator.png
           if ! grep -q 'LAZER_IOS_COMPOSE_READY' ios-simulator-console.log; then
+            # A process that is alive but has drawn nothing is stalled, so ask the system where it
+            # is sitting before anything is torn down.
+            xcrun simctl spawn "$simulator_udid" sample Lazer 3 -f ios-simulator-sample.txt || true
+            xcrun simctl spawn "$simulator_udid" log show \
+              --last 2m --style compact --predicate "process == 'Lazer'" \
+              > ios-simulator-runtime.log || true
             echo 'App console output:'
             cat ios-simulator-console.log
+            echo 'Stacks sampled from the running app:'
+            head -n 80 ios-simulator-sample.txt || true
+            echo 'Recent simulator runtime output:'
+            tail -n 60 ios-simulator-runtime.log || true
             xcrun simctl terminate "$simulator_udid" "$bundle_id" || true
             wait "$console_pid" || true
             echo '::error::Lazer stayed alive but did not commit its first Compose frame.'
@@ -330,6 +340,7 @@ jobs:
             ios-simulator-xcodebuild.log
             ios-simulator-console.log
             ios-simulator-runtime.log
+            ios-simulator-sample.txt
             ios-simulator*.png
             ios-simulator-*-console.log
             ios-simulator-crash-reports/

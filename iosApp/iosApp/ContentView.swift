@@ -191,8 +191,10 @@ private final class LazerAudio: NSObject {
 
     func load(url: String, startPlaying: Bool, positionMillis: Double) {
         guard let address = URL(string: url) else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
-        try? AVAudioSession.sharedInstance().setActive(true)
+        mediaQueue.async {
+            try? AVAudioSession.sharedInstance().setCategory(.playback)
+            try? AVAudioSession.sharedInstance().setActive(true)
+        }
         let item = AVPlayerItem(url: address)
         let next = AVPlayer(playerItem: item)
         NotificationCenter.default.addObserver(
@@ -216,7 +218,7 @@ private final class LazerAudio: NSObject {
 
     func release() {
         player?.pause()
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        mediaQueue.async { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
         if let item = observedItem {
             NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
         }
@@ -227,19 +229,24 @@ private final class LazerAudio: NSObject {
     @objc private func itemDidFinish() { onEnded?() }
 
     /* System media controls. They attach once for the life of the player; the mode switch decides
-       whether the system hears about playback at all. */
+       whether the system hears about playback at all. Everything that talks to the media services
+       daemon keeps to this queue, because a thread that only asked for audio should not wait on it. */
+    private let mediaQueue = DispatchQueue(label: "lazer.media")
     private var commands: IosPlayerCommands?
     private var wantsSystemMedia = true
 
     func attach(commands: IosPlayerCommands) {
         guard self.commands == nil else { return }
         self.commands = commands
-        let center = MPRemoteCommandCenter.shared()
-        center.playCommand.addTarget(self, action: #selector(handlePlay))
-        center.pauseCommand.addTarget(self, action: #selector(handlePause))
-        center.nextTrackCommand.addTarget(self, action: #selector(handleNext))
-        center.previousTrackCommand.addTarget(self, action: #selector(handlePrevious))
-        center.changePlaybackPositionCommand.addTarget(self, action: #selector(handleSeek(_:)))
+        mediaQueue.async { [weak self] in
+            guard let self else { return }
+            let center = MPRemoteCommandCenter.shared()
+            center.playCommand.addTarget(self, action: #selector(self.handlePlay))
+            center.pauseCommand.addTarget(self, action: #selector(self.handlePause))
+            center.nextTrackCommand.addTarget(self, action: #selector(self.handleNext))
+            center.previousTrackCommand.addTarget(self, action: #selector(self.handlePrevious))
+            center.changePlaybackPositionCommand.addTarget(self, action: #selector(self.handleSeek(_:)))
+        }
     }
 
     @objc private func handlePlay() -> MPRemoteCommandHandlerStatus {
@@ -272,7 +279,7 @@ private final class LazerAudio: NSObject {
         positionMillis: Int64, durationMillis: Int64, isPlaying: Bool
     ) {
         guard wantsSystemMedia else { return }
-        var info: [String: Any] = [
+        let info: [String: Any] = [
             "MPMediaItemPropertyTitle": title,
             "MPMediaItemPropertyArtist": artist,
             "MPMediaItemPropertyAlbumTitle": album,
@@ -281,28 +288,35 @@ private final class LazerAudio: NSObject {
             "MPNowPlayingInfoPropertyPlaybackRate": isPlaying ? 1.0 : 0.0,
             "MPNowPlayingInfoPropertyDefaultPlaybackRate": 1.0,
         ]
-        let center = MPNowPlayingInfoCenter.default()
-        center.nowPlayingInfo = info
-        center.playbackState = isPlaying ? .playing : .paused
-        guard let coverUrl, let address = URL(string: coverUrl) else { return }
-        URLSession.shared.dataTask(with: address) { data, _, _ in
-            guard let data, let image = UIImage(data: data) else { return }
-            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-            info["MPMediaItemPropertyArtwork"] = artwork
-            DispatchQueue.main.async { center.nowPlayingInfo = info }
-        }.resume()
+        mediaQueue.async {
+            let center = MPNowPlayingInfoCenter.default()
+            center.nowPlayingInfo = info
+            center.playbackState = isPlaying ? .playing : .paused
+            guard let coverUrl, let address = URL(string: coverUrl) else { return }
+            URLSession.shared.dataTask(with: address) { data, _, _ in
+                guard let data, let image = UIImage(data: data) else { return }
+                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                self.mediaQueue.async {
+                    var withArtwork = info
+                    withArtwork["MPMediaItemPropertyArtwork"] = artwork
+                    center.nowPlayingInfo = withArtwork
+                }
+            }.resume()
+        }
     }
 
     func applyMode(exclusive: Bool, systemMedia: Bool) {
         wantsSystemMedia = systemMedia
-        try? AVAudioSession.sharedInstance().setCategory(.playback, options: exclusive ? [] : .duckOthers)
-        let center = MPRemoteCommandCenter.shared()
-        [center.playCommand, center.pauseCommand, center.nextTrackCommand,
-         center.previousTrackCommand, center.changePlaybackPositionCommand].forEach {
-            $0.isEnabled = systemMedia
-        }
-        if !systemMedia {
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        mediaQueue.async {
+            try? AVAudioSession.sharedInstance().setCategory(.playback, options: exclusive ? [] : .duckOthers)
+            let center = MPRemoteCommandCenter.shared()
+            [center.playCommand, center.pauseCommand, center.nextTrackCommand,
+             center.previousTrackCommand, center.changePlaybackPositionCommand].forEach {
+                $0.isEnabled = systemMedia
+            }
+            if !systemMedia {
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            }
         }
     }
 }
