@@ -241,20 +241,20 @@ private val LazerMotionEasing = LazerTokens.Motion.pageEasing
 // floating liquid-glass bottom controls.
 private val LocalAndroidContentBottomInset = compositionLocalOf { 0.dp }
 
-private data class AndroidCoverSaveRequest(val url: String, val title: String)
+private data class LazerCoverSaveRequest(val url: String, val title: String)
 
 /** A text field a long press offers to the clipboard. The sheet asks first, as saving a cover does. */
-private data class AndroidCopyTextRequest(
+private data class LazerCopyTextRequest(
     val titleKey: String,
     val hintKey: String,
     val value: String,
 )
 
-private val LocalAndroidOpenArtists = androidx.compose.runtime.staticCompositionLocalOf<(List<Artist>) -> Unit> { {} }
-private val LocalAndroidRequestCoverSave = androidx.compose.runtime.staticCompositionLocalOf<(AndroidCoverSaveRequest) -> Unit> { {} }
-private val LocalAndroidRequestCopyText = androidx.compose.runtime.staticCompositionLocalOf<(AndroidCopyTextRequest) -> Unit> { {} }
+private val LocalLazerOpenArtists = androidx.compose.runtime.staticCompositionLocalOf<(List<Artist>) -> Unit> { {} }
+private val LocalLazerRequestCoverSave = androidx.compose.runtime.staticCompositionLocalOf<(LazerCoverSaveRequest) -> Unit> { {} }
+private val LocalLazerRequestCopyText = androidx.compose.runtime.staticCompositionLocalOf<(LazerCopyTextRequest) -> Unit> { {} }
 
-private enum class AndroidMainPageKind(val depth: Int) {
+private enum class LazerMainPageKind(val depth: Int) {
     ROOT(0),
     PLAYLIST(1),
     SETTINGS(1),
@@ -262,8 +262,8 @@ private enum class AndroidMainPageKind(val depth: Int) {
     ABOUT(2),
 }
 
-private data class AndroidMainPage(
-    val kind: AndroidMainPageKind,
+private data class LazerMainPage(
+    val kind: LazerMainPageKind,
     val playlist: LazerPlaylist? = null,
     val artist: Artist? = null,
     val tracks: List<LazerTrack> = emptyList(),
@@ -271,8 +271,8 @@ private data class AndroidMainPage(
 ) {
     val contentKey: Any
         get() = when (kind) {
-            AndroidMainPageKind.PLAYLIST -> kind to playlist?.id
-            AndroidMainPageKind.ARTIST -> kind to artist?.id
+            LazerMainPageKind.PLAYLIST -> kind to playlist?.id
+            LazerMainPageKind.ARTIST -> kind to artist?.id
             else -> kind
         }
 }
@@ -433,7 +433,7 @@ internal fun TapSlider(
     )
 }
 
-private enum class AndroidBackLayer {
+private enum class LazerBackLayer {
     ARTIST,
     PLAYLIST,
     SETTINGS,
@@ -795,23 +795,23 @@ private fun LazerAppContent(
     }.collectAsState(initial = controller.player.snapshot.value)
     var playerVisible by remember { mutableStateOf(false) }
     var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
-    var coverSaveRequest by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
-    var coverSaveTarget by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
-    var copyTextRequest by remember { mutableStateOf<AndroidCopyTextRequest?>(null) }
+    var coverSaveRequest by remember { mutableStateOf<LazerCoverSaveRequest?>(null) }
+    var coverSaveTarget by remember { mutableStateOf<LazerCoverSaveRequest?>(null) }
+    var copyTextRequest by remember { mutableStateOf<LazerCopyTextRequest?>(null) }
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
     var requestedBackProgress by remember { mutableFloatStateOf(0f) }
     var isPredictiveBackRunning by remember { mutableStateOf(false) }
     var backSwipeEdge by remember { mutableStateOf(LazerSwipeEdge.Left) }
-    var transformedBackLayer by remember { mutableStateOf<AndroidBackLayer?>(null) }
+    var transformedBackLayer by remember { mutableStateOf<LazerBackLayer?>(null) }
     val screenCornerRadius = rememberScreenCornerRadius()
 
     val activeBackLayer = when {
-        playerVisible -> AndroidBackLayer.PLAYER
-        controller.isAboutVisible -> AndroidBackLayer.ABOUT
-        controller.activeArtist != null -> AndroidBackLayer.ARTIST
-        controller.isSettingsVisible -> AndroidBackLayer.SETTINGS
-        controller.activePlaylist != null -> AndroidBackLayer.PLAYLIST
+        playerVisible -> LazerBackLayer.PLAYER
+        controller.isAboutVisible -> LazerBackLayer.ABOUT
+        controller.activeArtist != null -> LazerBackLayer.ARTIST
+        controller.isSettingsVisible -> LazerBackLayer.SETTINGS
+        controller.activePlaylist != null -> LazerBackLayer.PLAYLIST
         else -> null
     }
     val renderedBackProgress by animateFloatAsState(
@@ -852,11 +852,11 @@ private fun LazerAppContent(
         },
         onConfirmed = {
             when (activeBackLayer) {
-                AndroidBackLayer.PLAYER -> playerVisible = false
-                AndroidBackLayer.ARTIST -> controller.closeArtist()
-                AndroidBackLayer.SETTINGS -> controller.closeSettings()
-                AndroidBackLayer.ABOUT -> controller.closeAbout()
-                AndroidBackLayer.PLAYLIST -> controller.closePlaylist()
+                LazerBackLayer.PLAYER -> playerVisible = false
+                LazerBackLayer.ARTIST -> controller.closeArtist()
+                LazerBackLayer.SETTINGS -> controller.closeSettings()
+                LazerBackLayer.ABOUT -> controller.closeAbout()
+                LazerBackLayer.PLAYLIST -> controller.closePlaylist()
                 null -> Unit
             }
             isPredictiveBackRunning = false
@@ -865,21 +865,21 @@ private fun LazerAppContent(
     )
 
     val mainPage = when {
-        controller.isAboutVisible -> AndroidMainPage(AndroidMainPageKind.ABOUT)
-        controller.isSettingsVisible -> AndroidMainPage(AndroidMainPageKind.SETTINGS)
-        controller.activeArtist != null -> AndroidMainPage(
-            kind = AndroidMainPageKind.ARTIST,
+        controller.isAboutVisible -> LazerMainPage(LazerMainPageKind.ABOUT)
+        controller.isSettingsVisible -> LazerMainPage(LazerMainPageKind.SETTINGS)
+        controller.activeArtist != null -> LazerMainPage(
+            kind = LazerMainPageKind.ARTIST,
             artist = controller.activeArtist,
             tracks = controller.activeArtistTracks,
             isLoading = controller.isArtistLoading,
         )
-        controller.activePlaylist != null -> AndroidMainPage(
-            kind = AndroidMainPageKind.PLAYLIST,
+        controller.activePlaylist != null -> LazerMainPage(
+            kind = LazerMainPageKind.PLAYLIST,
             playlist = controller.activePlaylist,
             tracks = controller.activePlaylistTracks,
             isLoading = controller.isPlaylistLoading,
         )
-        else -> AndroidMainPage(AndroidMainPageKind.ROOT)
+        else -> LazerMainPage(LazerMainPageKind.ROOT)
     }
     val windowSize = LocalWindowInfo.current.containerSize
     val nowPlayingPaletteSeed = rememberLazerArtworkSeed(
@@ -908,7 +908,7 @@ private fun LazerAppContent(
         engine = controller.themeEngine,
     ) {
         CompositionLocalProvider(
-            LocalAndroidOpenArtists provides { artists ->
+            LocalLazerOpenArtists provides { artists ->
                 val available = artists.filter { it.id > 0L && it.name.isNotBlank() }.distinctBy(Artist::id)
                 when (available.size) {
                     0 -> Unit
@@ -919,8 +919,8 @@ private fun LazerAppContent(
                     else -> artistChoices = available
                 }
             },
-            LocalAndroidRequestCoverSave provides { coverSaveRequest = it },
-            LocalAndroidRequestCopyText provides { copyTextRequest = it },
+            LocalLazerRequestCoverSave provides { coverSaveRequest = it },
+            LocalLazerRequestCopyText provides { copyTextRequest = it },
             LocalTapHapticsEnabled provides controller.hapticsEnabled,
         ) {
         val colors = MaterialTheme.colorScheme
@@ -979,7 +979,7 @@ private fun LazerAppContent(
         }
         // The Liquid Glass playlist owns the status-bar backdrop. Do not leave the global
         // wallpaper exposed above its artwork-derived background.
-        val playlistOwnsStatusBarBackdrop = liquidGlass.isEnabled && mainPage.kind == AndroidMainPageKind.PLAYLIST
+        val playlistOwnsStatusBarBackdrop = liquidGlass.isEnabled && mainPage.kind == LazerMainPageKind.PLAYLIST
         Box(Modifier.fillMaxSize().background(colors.background)) {
             // One opaque, full-window sampling plane: visual background first, page content next.
             // Floating glass controls stay outside this box, so they never sample themselves.
@@ -1086,10 +1086,10 @@ private fun LazerAppContent(
                                 targetContentZIndex = if (movesForward) 1f else -1f
                             }
                         },
-                        contentKey = AndroidMainPage::contentKey,
+                        contentKey = LazerMainPage::contentKey,
                         label = "android-main-page",
                     ) { page ->
-                        if (page.kind == AndroidMainPageKind.ROOT) {
+                        if (page.kind == LazerMainPageKind.ROOT) {
                             Box(Modifier.fillMaxSize())
                             return@AnimatedContent
                         }
@@ -1098,11 +1098,11 @@ private fun LazerAppContent(
                                 .fillMaxSize()
                                 .predictiveBackTransform(
                                     enabled = when (page.kind) {
-                                        AndroidMainPageKind.ARTIST -> transformedBackLayer == AndroidBackLayer.ARTIST
-                                        AndroidMainPageKind.PLAYLIST -> transformedBackLayer == AndroidBackLayer.PLAYLIST
-                                        AndroidMainPageKind.SETTINGS -> transformedBackLayer == AndroidBackLayer.SETTINGS
-                                        AndroidMainPageKind.ABOUT -> transformedBackLayer == AndroidBackLayer.ABOUT
-                                        AndroidMainPageKind.ROOT -> false
+                                        LazerMainPageKind.ARTIST -> transformedBackLayer == LazerBackLayer.ARTIST
+                                        LazerMainPageKind.PLAYLIST -> transformedBackLayer == LazerBackLayer.PLAYLIST
+                                        LazerMainPageKind.SETTINGS -> transformedBackLayer == LazerBackLayer.SETTINGS
+                                        LazerMainPageKind.ABOUT -> transformedBackLayer == LazerBackLayer.ABOUT
+                                        LazerMainPageKind.ROOT -> false
                                     },
                                     progress = renderedBackProgress,
                                     swipeEdge = backSwipeEdge,
@@ -1121,9 +1121,9 @@ private fun LazerAppContent(
                             shape = RoundedCornerShape(screenCornerRadius),
                         ) {
                             when (page.kind) {
-                                AndroidMainPageKind.SETTINGS -> SettingsPage(controller)
-                                AndroidMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
-                                AndroidMainPageKind.ARTIST -> page.artist?.let { artist ->
+                                LazerMainPageKind.SETTINGS -> SettingsPage(controller)
+                                LazerMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
+                                LazerMainPageKind.ARTIST -> page.artist?.let { artist ->
                                     ArtistPage(
                                         artist = artist,
                                         tracks = page.tracks,
@@ -1133,7 +1133,7 @@ private fun LazerAppContent(
                                         onPlay = playFromQueue,
                                     )
                                 }
-                                AndroidMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
+                                LazerMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
                                     PlaylistDetail(
                                         playlist = playlist,
                                         tracks = page.tracks,
@@ -1146,7 +1146,7 @@ private fun LazerAppContent(
                                         onPlay = playFromQueue,
                                     )
                                 }
-                                AndroidMainPageKind.ROOT -> Unit
+                                LazerMainPageKind.ROOT -> Unit
                             }
                         }
                     }
@@ -1166,7 +1166,7 @@ private fun LazerAppContent(
             }
             }
 
-            if (liquidGlass.isEnabled && !landscape && mainPage.kind == AndroidMainPageKind.ROOT) {
+            if (liquidGlass.isEnabled && !landscape && mainPage.kind == LazerMainPageKind.ROOT) {
                 Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -1293,7 +1293,7 @@ private fun LazerAppContent(
                     modifier = Modifier
                         .fillMaxSize()
                         .predictiveBackTransform(
-                            enabled = transformedBackLayer == AndroidBackLayer.PLAYER,
+                            enabled = transformedBackLayer == LazerBackLayer.PLAYER,
                             progress = renderedBackProgress,
                             swipeEdge = backSwipeEdge,
                         ),
@@ -1340,7 +1340,7 @@ private fun LazerAppContent(
                 onConfirm = { request ->
                     coverSaveRequest = null
                     coverSaveTarget = request
-                    screen.pickExportDestination(androidCoverFileName(request.title)) { target ->
+                    screen.pickExportDestination(lazerCoverFileName(request.title)) { target ->
                         val pending = coverSaveTarget
                         coverSaveTarget = null
                         if (target != null && pending != null) {
@@ -4172,9 +4172,9 @@ private fun MobileArtwork(
             .build()
     }
     val colors = MaterialTheme.colorScheme
-    val requestSave = LocalAndroidRequestCoverSave.current
+    val requestSave = LocalLazerRequestCoverSave.current
     val onLongPress: (() -> Unit)? = if (saveOnLongPress && !url.isNullOrBlank()) {
-        { requestSave(AndroidCoverSaveRequest(url, label)) }
+        { requestSave(LazerCoverSaveRequest(url, label)) }
     } else {
         null
     }
@@ -4241,9 +4241,9 @@ private fun Modifier.onLongPressOnly(key: Any, onLongPress: () -> Unit): Modifie
 /** Long press on a piece of text worth copying. It asks first, exactly as saving a cover does. */
 @Composable
 private fun Modifier.copyOnLongPress(titleKey: String, hintKey: String, value: String): Modifier {
-    val requestCopy = LocalAndroidRequestCopyText.current
+    val requestCopy = LocalLazerRequestCopyText.current
     val answer = rememberTapAnswer()
-    val request = rememberUpdatedState(AndroidCopyTextRequest(titleKey, hintKey, value))
+    val request = rememberUpdatedState(LazerCopyTextRequest(titleKey, hintKey, value))
     return onLongPressOnly(value) {
         // The sheet is a response to the hand, so it answers it the way a tap does.
         answer()
@@ -4756,7 +4756,7 @@ private fun AndroidArtistNames(
     offerCopy: Boolean = false,
 ) {
     val available = artists.filter { it.id > 0L && it.name.isNotBlank() }
-    val openArtists = LocalAndroidOpenArtists.current
+    val openArtists = LocalLazerOpenArtists.current
     val names = available.joinToString(" / ") { it.name }.ifBlank { fallback }
     Text(
         text = names,
@@ -5194,7 +5194,7 @@ private fun NowPlayingPage(
                     val endLeft = expandedRect.left
                     val endTop = expandedRect.top
                     val endSize = minOf(expandedRect.width, expandedRect.height)
-                    val requestSave = LocalAndroidRequestCoverSave.current
+                    val requestSave = LocalLazerRequestCoverSave.current
 
                     Box(
                         Modifier
@@ -5227,7 +5227,7 @@ private fun NowPlayingPage(
                                 onLongClick = {
                                     val url = track.coverUrl
                                     if (!url.isNullOrBlank()) {
-                                        requestSave(AndroidCoverSaveRequest(url, track.title))
+                                        requestSave(LazerCoverSaveRequest(url, track.title))
                                     }
                                 },
                             ),
@@ -5351,9 +5351,9 @@ private fun ArtistChoiceSheet(
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun CoverSaveSheet(
-    request: AndroidCoverSaveRequest?,
+    request: LazerCoverSaveRequest?,
     onDismiss: () -> Unit,
-    onConfirm: (AndroidCoverSaveRequest) -> Unit,
+    onConfirm: (LazerCoverSaveRequest) -> Unit,
 ) {
     request ?: return
     val colors = MaterialTheme.colorScheme
@@ -5388,9 +5388,9 @@ private fun CoverSaveSheet(
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun CopyTextSheet(
-    request: AndroidCopyTextRequest?,
+    request: LazerCopyTextRequest?,
     onDismiss: () -> Unit,
-    onConfirm: (AndroidCopyTextRequest) -> Unit,
+    onConfirm: (LazerCopyTextRequest) -> Unit,
 ) {
     request ?: return
     val colors = MaterialTheme.colorScheme
@@ -5422,7 +5422,7 @@ private fun CopyTextSheet(
     }
 }
 
-private fun androidCoverFileName(title: String): String {
+private fun lazerCoverFileName(title: String): String {
     val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank { "Lazer cover" }
     return "$safeTitle.jpg"
 }
