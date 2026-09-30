@@ -149,7 +149,7 @@ internal class IosPlayer(
             LazerPlaybackStateStore.update(
                 LazerPlaybackSnapshot(
                     track = track,
-                    message = "这首歌现在无法播放，可以试试其他歌曲。",
+                    message = tr("status.track_unplayable"),
                 ),
             )
             return
