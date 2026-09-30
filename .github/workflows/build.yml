@@ -208,6 +208,10 @@ jobs:
 
   # Compile the Kotlin/Native framework, run shared iOS tests, then let Xcode compile and link the
   # real SwiftUI + Compose application. The macOS 26 image supplies Xcode 26 for Liquid Glass APIs.
+  #
+  # The simulator smoke test and the unsigned device build are separate jobs on purpose: they need
+  # different Kotlin/Native build types (debug vs release), so neither can reuse the other's work,
+  # and running them one after another on a single runner made the job as long as both together.
   ios:
     runs-on: macos-26
     timeout-minutes: 60
@@ -218,6 +222,15 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v6
+      # setup-gradle owns the Gradle caches but not ~/.konan, where Kotlin/Native unpacks its own
+      # compiler and LLVM on first use. A hosted macOS runner starts without it, so every job used to
+      # re-download and re-unpack roughly a gigabyte before compiling a single line.
+      - name: Cache the Kotlin/Native toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: konan-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-
       - name: Record Apple toolchain
         run: |
           xcodebuild -version
@@ -255,6 +268,7 @@ jobs:
             -destination "id=$simulator_udid" \
             -derivedDataPath iosApp/build/SimulatorDerivedData \
             CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             build | tee ios-simulator-xcodebuild.log
           app_path="$(find iosApp/build/SimulatorDerivedData/Build/Products/Debug-iphonesimulator -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app_path"
@@ -320,7 +334,19 @@ jobs:
               "$simulator_udid" "$bundle_id" "LAZER_IOS_ROUTE=$route" \
               > "ios-simulator-$route-console.log" 2>&1 &
             route_pid=$!
-            sleep 16
+            # Wait for the page to announce itself rather than holding a fixed window: the marker
+            # normally lands within a couple of seconds, while a slow route still gets its full
+            # grace and one that dies early is noticed immediately instead of after a long sleep.
+            for attempt in $(seq 1 20); do
+              if grep -q "LAZER_IOS_ROUTE_APPLIED $route" "ios-simulator-$route-console.log"; then
+                break
+              fi
+              if ! kill -0 "$route_pid" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            sleep 2
             xcrun simctl io "$simulator_udid" screenshot "ios-simulator-$route.png"
             if ! grep -q "LAZER_IOS_ROUTE_APPLIED $route" "ios-simulator-$route-console.log"; then
               echo "Console output for the $route screen:"
@@ -351,6 +377,25 @@ jobs:
             ios-simulator-*-console.log
             ios-simulator-crash-reports/
           if-no-files-found: ignore
+  # The device archive shares nothing with the simulator job above - it links the release
+  # Kotlin/Native framework where the simulator links the debug one - so splitting them only ever
+  # meant two runners working at the same time instead of one doing both back to back.
+  ios-device:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Cache the Kotlin/Native toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: konan-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-
       - name: Build unsigned iOS device app
         run: |
           set -o pipefail
@@ -362,6 +407,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath iosApp/build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO \
             DEVELOPMENT_TEAM= \
             build | tee ios-xcodebuild.log
       - name: Package unsigned IPA
@@ -392,7 +438,7 @@ jobs:
   # the corresponding Actions artifacts for platform testing.
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [android, desktop, linux-desktop, ios]
+    needs: [android, desktop, linux-desktop, ios, ios-device]
     runs-on: ubuntu-latest
     permissions:
       contents: write
