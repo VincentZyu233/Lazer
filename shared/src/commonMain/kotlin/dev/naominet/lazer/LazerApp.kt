@@ -755,13 +755,14 @@ fun LazerApp(
     screen: LazerScreenHost,
     authWebView: LazerAuthWebView,
     initialListenTogetherInvitation: String? = null,
+    smokeRoute: String? = null,
 ) {
     CompositionLocalProvider(
         LocalLazerScreenHost provides screen,
         LocalLazerAuthWebView provides authWebView,
         LocalLazerPlatformHost provides controller.host,
     ) {
-        LazerAppContent(controller, initialListenTogetherInvitation)
+        LazerAppContent(controller, initialListenTogetherInvitation, smokeRoute)
     }
 }
 
@@ -769,6 +770,7 @@ fun LazerApp(
 private fun LazerAppContent(
     controller: LazerGatewayController,
     initialListenTogetherInvitation: String?,
+    smokeRoute: String?,
 ) {
     val screen = LocalLazerScreenHost.current
     var pendingQrAuthorizationUrl by remember { mutableStateOf<String?>(null) }
@@ -839,6 +841,30 @@ private fun LazerAppContent(
         if (rootMessage == shown) rootMessage = null
     }
     LaunchedEffect(playback.track?.id) { playback.track?.id?.let(controller::loadLyrics) }
+    // Continuous integration has no finger to tap with, so a launch names the screen it wants and
+    // the app walks there through the same calls a tap makes. The player route waits for the real
+    // recommendation list instead of inventing a track the listener would never see.
+    LaunchedEffect(smokeRoute) {
+        val route = smokeRoute ?: return@LaunchedEffect
+        when {
+            route == "settings" -> controller.openSettings()
+            route == "about" -> controller.openAbout()
+            route == "player" -> {
+                var waits = 0
+                while (controller.homeTracks.isEmpty() && waits < 40) {
+                    kotlinx.coroutines.delay(200L)
+                    waits++
+                }
+                controller.homeTracks.firstOrNull()?.let { controller.play(controller.homeTracks, it) }
+                playerVisible = true
+            }
+            else -> controller.selectDestination(
+                LazerRootDestination.entries
+                    .firstOrNull { it.name.equals(route, ignoreCase = true) }
+                    ?: LazerRootDestination.HOME,
+            )
+        }
+    }
 
     // The currently visible top layer owns back. Gesture progress drives the same page that a
     // normal back press closes; cancelling the gesture eases that page back into place.

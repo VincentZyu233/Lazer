@@ -305,12 +305,12 @@ jobs:
           # One home screen proves little: a page that only fails once it is opened is invisible in
           # that shot. Each route gets its own process, its own screenshot and the same survival
           # check, driven through the app's own navigation rather than a test-only fixture.
-          for route in search library me settings about; do
+          for route in search library me settings about player; do
             xcrun simctl launch --terminate-running-process --console \
               "$simulator_udid" "$bundle_id" "LAZER_IOS_ROUTE=$route" \
               > "ios-simulator-$route-console.log" 2>&1 &
             route_pid=$!
-            sleep 12
+            sleep 16
             xcrun simctl io "$simulator_udid" screenshot "ios-simulator-$route.png"
             if ! kill -0 "$route_pid" 2>/dev/null; then
               echo "Console output for the $route screen:"
