@@ -1,21 +1,21 @@
+@file:OptIn(kotlin.experimental.ExperimentalNativeApi::class)
+
 package dev.naominet.lazer
 
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.ColorScheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
-import platform.AVFAudio.AVCaptureDevice
-import platform.AVFAudio.AVCaptureAuthorizationStatusAuthorized
-import platform.AVFAudio.AVCaptureAuthorizationStatusDenied
-import platform.AVFAudio.AVCaptureAuthorizationStatusRestricted
-import platform.AVFAudio.AVMediaTypeAudio
-import platform.AVFAudio.requestAccessForMediaType
+import platform.AVFoundation.AVCaptureDevice
+import platform.AVFoundation.AVAuthorizationStatusAuthorized
+import platform.AVFoundation.AVAuthorizationStatusDenied
+import platform.AVFoundation.AVAuthorizationStatusRestricted
+import platform.AVFoundation.AVMediaTypeAudio
 import platform.UIKit.UIApplication
 import platform.UIKit.UIDevice
-import platform.UIKit.UIStatusBarStyleDarkContent
-import platform.UIKit.UIStatusBarStyleLightContent
 import platform.UIKit.UISceneActivationStateForegroundActive
 import platform.UIKit.UIWindow
 import platform.UIKit.UIWindowScene
@@ -114,8 +114,8 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
 
     override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) {
         when (AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeAudio)) {
-            AVCaptureAuthorizationStatusAuthorized -> onResult(true)
-            AVCaptureAuthorizationStatusDenied, AVCaptureAuthorizationStatusRestricted -> onResult(false)
+            AVAuthorizationStatusAuthorized -> onResult(true)
+            AVAuthorizationStatusDenied, AVAuthorizationStatusRestricted -> onResult(false)
             else -> AVCaptureDevice.requestAccessForMediaType(AVMediaTypeAudio) { granted ->
                 dispatch_async(dispatch_get_main_queue()) { onResult(granted) }
             }
@@ -124,7 +124,7 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
 
     override val microphoneGranted: Boolean
         get() = AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeAudio) ==
-            AVCaptureAuthorizationStatusAuthorized
+            AVAuthorizationStatusAuthorized
 
     override fun pickBackgroundImage(onPicked: (source: String?) -> Unit) = bridge.pickImage(onPicked)
 
@@ -139,10 +139,12 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
         bridge.scanCode(onResult)
 
     override fun setStatusBarAppearance(isDark: Boolean) {
-        UIApplication.sharedApplication.setStatusBarStyle(
-            if (isDark) UIStatusBarStyleLightContent else UIStatusBarStyleDarkContent,
-            animated = false,
-        )
+        val manager = foregroundWindow()?.windowScene?.statusBarManager ?: return
+        manager.statusBarStyle = if (isDark) {
+            platform.UIKit.UIStatusBarStyleLightContent
+        } else {
+            platform.UIKit.UIStatusBarStyleDarkContent
+        }
     }
 
     override fun decodeImageBytes(bytes: ByteArray): ImageBitmap? =

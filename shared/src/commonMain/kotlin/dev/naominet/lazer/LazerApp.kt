@@ -146,7 +146,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.isSpecified
@@ -222,10 +221,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import java.net.URI
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.math.roundToInt
 import top.yukonga.miuix.kmp.basic.Button as MiuixButton
 import top.yukonga.miuix.kmp.basic.ButtonColors as MiuixButtonColors
@@ -3458,7 +3453,7 @@ private fun relativeCommentTime(
         minutes < 60 -> tr("comment.time.minutes", minutes)
         hours < 24 -> tr("comment.time.hours", hours)
         days < 30 -> tr("comment.time.days", days)
-        else -> SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(epochMillis))
+        else -> formatCommentDate(epochMillis)
     }
 }
 
@@ -5443,18 +5438,43 @@ private fun classifyScannedCode(raw: String): ScannedCode {
     return ScannedCode.Unsupported
 }
 
+/** Days since the civil epoch, turned into a calendar date without leaning on a platform calendar. */
+private fun formatCommentDate(epochMillis: Long): String {
+    val z = floorDiv(epochMillis, 86_400_000L) + 719_468L
+    val era = floorDiv(z, 146_097L)
+    val dayOfEra = (z - era * 146_097L).toInt()
+    val yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524 - dayOfEra / 146096) / 365
+    val dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100)
+    val monthShift = (5 * dayOfYear + 2) / 153
+    val day = dayOfYear - (153 * monthShift + 2) / 5 + 1
+    val month = if (monthShift < 10) monthShift + 3 else monthShift - 9
+    val year = (if (month <= 2) yearOfEra + 1 else yearOfEra) + era * 400
+    return "$year" + "-" + month.toString().padStart(2, '0') + "-" + day.toString().padStart(2, '0')
+}
+
+private fun floorDiv(value: Long, divisor: Long): Long {
+    val quotient = value / divisor
+    return if ((value % divisor != 0L) && ((value < 0L) != (divisor < 0L))) quotient - 1 else quotient
+}
+
 /** Only official NetEase login QR URLs may receive the user's saved session cookie. */
 internal fun parseNeteaseClientLoginUrl(raw: String): String? {
-    val uri = runCatching { URI(raw.trim()) }.getOrNull() ?: return null
-    if (!uri.scheme.equals("https", ignoreCase = true)) return null
-    if (!uri.host.equals("music.163.com", ignoreCase = true)) return null
-    val query = uri.rawQuery?.takeIf(String::isNotBlank) ?: return null
+    val trimmed = raw.trim()
+    if (!trimmed.startsWith("https://", ignoreCase = true)) return null
+    val afterScheme = trimmed.substringAfter("://")
+    val hostEnd = afterScheme.indexOfFirst { it == '/' || it == '?' || it == '#' }
+    val host = if (hostEnd < 0) afterScheme else afterScheme.substring(0, hostEnd)
+    if (!host.equals("music.163.com", ignoreCase = true)) return null
+    val remainder = if (hostEnd < 0) "" else afterScheme.substring(hostEnd)
+    val path = remainder.substringBefore('?').substringBefore('#')
+    val query = remainder.substringAfter('?', "").substringBefore('#')
+    if (query.isBlank()) return null
     val hasCodeKey = query.split('&').any { parameter ->
         parameter.substringBefore('=').equals("codekey", ignoreCase = true) &&
             parameter.substringAfter('=', "").isNotBlank()
     }
     if (!hasCodeKey) return null
-    return when (uri.path) {
+    return when (path) {
         "/login", "/st/platform/scanlogin" ->
             "https://music.163.com/st/platform/scanlogin?$query"
         else -> null
