@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.TileMode
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -58,6 +59,12 @@ const val LyricActiveLineAlpha = 0.85f
  * is why distance moves the blur and never the brightness.
  */
 const val LyricInactiveLineAlpha = 0.4f
+
+/**
+ * AMLL's translation and romanisation sub-line: the same ink at 0.3, not a second colour. It rides
+ * the row's own wrapper opacity, so a sub-line of the singing line is brighter than one elsewhere.
+ */
+const val LyricSubLineOpacity = 0.3f
 
 /**
  * AMLL's line-focus spring: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so
@@ -192,7 +199,11 @@ fun AmllLyricText(
     val timedLayout = remember { TimedLyricLayout() }
 
     Box(modifier) {
-        if (temporaryGlow || (glowEnabled && (currentLine || lineFocus > 0.001f))) {
+        // AMLL's glow is a bloom: it is white and it adds light, which only reads on a dark ground.
+        // Painting a blurred copy of the line in a dark ink is not a bloom but a drop shadow, and the
+        // lyric would be rendered twice, so a light theme gets no underlay at all.
+        val glowBrightens = shadowColor.luminance() > 0.5f
+        if (glowBrightens && (temporaryGlow || (glowEnabled && (currentLine || lineFocus > 0.001f)))) {
             Box(
                 Modifier
                     .matchParentSize()
@@ -219,7 +230,7 @@ fun AmllLyricText(
                             val masks = if (temporaryGlow) {
                                 emptyList()
                             } else {
-                                timed.masksAt(clock, speed)
+                                timed.masksAt(clock)
                             }
                             drawLyricShaderShadow(
                                 layout = measured,
@@ -282,7 +293,7 @@ fun AmllLyricText(
                         drawAmllGlyphs(
                             layout = measured,
                             hasTimedGlyphs = true,
-                            wordMasks = timed.masksAt(clock, speed),
+                            wordMasks = timed.masksAt(clock),
                             emphasized = timed.emphasisAt(clock, speed),
                             wordFloatEm = timed.wordFloatOffsetsAt(clock),
                             color = color,
@@ -361,11 +372,10 @@ private class TimedLyricLayout {
         return this
     }
 
-    fun masksAt(positionMillis: Long, speed: LyricAnimationSpeed): List<LyricWordMask> {
-        if (cachedPosition != positionMillis || cachedSpeed != speed) {
+    fun masksAt(positionMillis: Long): List<LyricWordMask> {
+        if (cachedPosition != positionMillis) {
             cachedPosition = positionMillis
-            cachedSpeed = speed
-            cachedMasks = buildWordMasks(laidOutWords, positionMillis, speed)
+            cachedMasks = buildWordMasks(laidOutWords, positionMillis)
         }
         return cachedMasks
     }
@@ -534,17 +544,22 @@ private fun DrawScope.drawLyricShaderShadow(
 private fun buildWordMasks(
     laidOutWords: List<LaidOutLyricWord>,
     positionMillis: Long,
-    speed: LyricAnimationSpeed,
 ): List<LyricWordMask> {
     if (laidOutWords.isEmpty()) return emptyList()
     val masks = ArrayList<LyricWordMask>(laidOutWords.size)
-    for (laidOutWord in laidOutWords) {
+    laidOutWords.forEachIndexed { index, laidOutWord ->
         val bounds = laidOutWord.bounds
         val fadeWidth = bounds.height * 0.5f
-        // Start the fade band slightly before the source timestamp. Without this lead, the dim
-        // base is the only paint for the first frame of every word and briefly flashes grey.
-        val progress = lyricWordVisualProgress(laidOutWord.word, positionMillis, speed)
-        val edgeX = bounds.left + lyricWordMaskEdge(progress, bounds.width, fadeWidth)
+        // AMLL gives the line extra runway at its two ends, inside the same word duration: the first
+        // word's feather starts a whole feather further back and the last travels half a feather on,
+        // so the line opens and closes instead of popping. A one-word line gets both.
+        val extraTravel = fadeWidth * (if (index == 0) 1.5f else 0f) +
+            fadeWidth * (if (index == laidOutWords.lastIndex) 0.5f else 0f)
+        // Upstream eases nothing: each word's reveal is linear across exactly its own span, and the
+        // feather leaving the edge of the previous word is what holds between words.
+        val progress = lyricWordMaskProgress(laidOutWord.word, positionMillis)
+        val edgeX = bounds.left +
+            lyricWordMaskEdge(progress, bounds.width, fadeWidth, extraTravel)
         val fadeStartX = edgeX - fadeWidth
         masks += LyricWordMask(
             wordIndex = laidOutWord.wordIndex,
@@ -579,7 +594,17 @@ private fun DrawScope.drawAmllGlyphs(
 ) {
     val effect = effectStrength.coerceIn(0f, 1f)
     val dimColor = color.copy(alpha = color.alpha * (1f - effect * (1f - lyricBaseMaskAlpha())))
-    drawText(textLayoutResult = layout, color = dimColor)
+    // Whatever has moved must not leave its original ink standing where it was. AMLL can carry a
+    // static copy under the live one because that copy is only 0.2 strong; this underlay is much
+    // nearer the real line, so an unmoved copy underneath a floated word reads as a shadow.
+    val vacated = vacatedInkBounds(wordMasks, emphasized, wordFloatEm)
+    if (vacated.isEmpty()) {
+        drawText(textLayoutResult = layout, color = dimColor)
+    } else {
+        clipPath(inkFreeArea(vacated)) {
+            drawText(textLayoutResult = layout, color = dimColor)
+        }
+    }
     if (!hasTimedGlyphs) return
     // AMLL's line is three things at once: a dim copy that never moves, a bright copy clipped to
     // what has been sung, and per-character transforms on the word being sung now. Words that have
@@ -703,6 +728,45 @@ private fun LyricWordMask.hasVisibleInk(): Boolean {
     val fadeLeft = fadeStartX.coerceAtLeast(bounds.left)
     val fadeRight = edgeX.coerceAtMost(bounds.right)
     return fadeRight > fadeLeft
+}
+
+/**
+ * Where the underlay must not paint, because the bright pass is going to draw that ink somewhere
+ * else this frame: a word that has floated away, or a character mid-emphasis inside a word that has
+ * not. The two sets cannot overlap, which is what lets even-odd subtract them without cancelling.
+ */
+private fun vacatedInkBounds(
+    wordMasks: List<LyricWordMask>,
+    emphasized: List<LyricCharEmphasisState>,
+    wordFloatEm: FloatArray,
+): List<Rect> {
+    if (wordMasks.isEmpty() && emphasized.isEmpty()) return emptyList()
+    val bounds = ArrayList<Rect>(wordMasks.size + emphasized.size)
+    wordMasks.forEach { mask ->
+        if (wordFloatEm.getOrElse(mask.wordIndex) { 0f } == 0f) return@forEach
+        val right = mask.solidRight()
+        if (right > mask.bounds.left) {
+            bounds += Rect(mask.bounds.left, mask.bounds.top, right, mask.bounds.bottom)
+        }
+    }
+    emphasized.forEach { state ->
+        val wordIndex = state.glyph.timing.wordIndex
+        if (wordFloatEm.getOrElse(wordIndex) { 0f } != 0f) return@forEach
+        val hole = state.glyph.bounds
+        wordMasks.forEach { mask ->
+            if (mask.wordIndex != wordIndex) return@forEach
+            val solid = Rect(mask.bounds.left, mask.bounds.top, mask.solidRight(), mask.bounds.bottom)
+            if (hole.overlaps(solid)) bounds += hole.intersect(solid)
+        }
+    }
+    return bounds
+}
+
+/** The draw area minus [holes]. Even-odd, so the holes have to stay disjoint. */
+private fun DrawScope.inkFreeArea(holes: List<Rect>): Path = Path().apply {
+    addRect(Rect(Offset.Zero, size))
+    fillType = PathFillType.EvenOdd
+    holes.forEach { addRect(it) }
 }
 
 private fun DrawScope.drawWordMaskGroup(

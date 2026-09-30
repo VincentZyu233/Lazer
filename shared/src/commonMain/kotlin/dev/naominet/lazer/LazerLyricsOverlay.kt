@@ -259,7 +259,7 @@ private fun AnimatedLyricsViewport(
     val mainFontSp = lyricFontSizeSp.sp
     val mainLineHeightSp = (lyricFontSizeSp * 1.38f).sp
     val translationFontSp = (lyricFontSizeSp * 0.50f).coerceIn(12f, 20f).sp
-    val translationLineHeightSp = (translationFontSp.value * 1.38f).sp
+    val translationLineHeightSp = (translationFontSp.value * 1.5f).sp
     val lyricMaxLines = if (showFullLyrics) Int.MAX_VALUE else 2
     val measuredRowHeightsPx = remember(trackId, lyricFontSizeSp, showFullLyrics) {
         mutableStateMapOf<TimedLyricLine, Int>()
@@ -557,7 +557,6 @@ private fun AnimatedLyricsViewport(
                 rowPresence = rowLight,
             )
             val lineColor = lyricSelectionColor(colors.onBackground, rowLight, colors.primary)
-            val translationColor = lyricSelectionColor(colors.onSurfaceVariant, rowLight, colors.primary)
             val clickGlowActive = clickGlowTokens.containsKey(line)
             val contentBlurRadiusPx = with(density) { blurRadiusDp.dp.toPx() }
             val hasTranslation = !line.translation.isNullOrBlank()
@@ -725,7 +724,9 @@ private fun AnimatedLyricsViewport(
                             modifier = Modifier.fillMaxWidth(textWidthFraction).graphicsLayer {
                                 scaleX = scale
                                 scaleY = scale
-                                this.alpha = alpha
+                                // AMLL's sub-line is dimmed ink inside the same wrapper, so the row's
+                                // brightness applies on top of its own 0.3.
+                                this.alpha = alpha * LyricSubLineOpacity
                                 renderEffect = if (contentBlurRadiusPx > 0.01f) {
                                     BlurEffect(contentBlurRadiusPx, contentBlurRadiusPx, TileMode.Decal)
                                 } else {
@@ -734,7 +735,7 @@ private fun AnimatedLyricsViewport(
                                 clip = false
                                 transformOrigin = TransformOrigin.Center
                             },
-                            color = translationColor,
+                            color = lineColor,
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontSize = translationFontSp,
                                 lineHeight = translationLineHeightSp,

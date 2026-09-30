@@ -96,6 +96,17 @@ class LyricMotionTest {
     }
 
     @Test
+    fun theLineOpensAndClosesWithExtraFeatherRunway() {
+        // AMLL adds 1.5 feather widths to its first word's travel and 0.5 to its last, inside the same
+        // word duration, so the sweep is already moving when it reaches the line's edges.
+        val half = lyricWordMaskEdge(0.5f, 100f, 20f, extraTravelPixels = 20f * 1.5f)
+        val quarter = lyricWordMaskEdge(0.5f, 100f, 20f, extraTravelPixels = 20f * 0.5f)
+        assertEquals(75f, half, 0.0001f)
+        assertEquals(65f, quarter, 0.0001f)
+        assertTrue(quarter - 60f == (half - 60f) / 3f)
+    }
+
+    @Test
     fun amllLineFocusUsesExactScaleAndDistanceBlurTargets() {
         assertEquals(0.97f, amllLyricLineScale(0f), 0.0001f)
         assertEquals(1f, amllLyricLineScale(1f), 0.0001f)

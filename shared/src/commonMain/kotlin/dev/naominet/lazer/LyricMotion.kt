@@ -215,13 +215,21 @@ internal fun lyricWordMaskProgress(
     positionMillis: Long,
 ): Float = lyricWordProgress(word, positionMillis)
 
-/** Position of the right edge of a word's moving fade band, in local word pixels. */
+/**
+ * Position of the right edge of a word's moving fade band, in local word pixels.
+ *
+ * [extraTravelPixels] is AMLL's per-line allowance: the line's first word gets one and a half feather
+ * widths more runway and its last word half a feather more, both swept over the same word duration,
+ * which is what makes the first syllable arrive rather than appear.
+ */
 internal fun lyricWordMaskEdge(
     wordProgress: Float,
     wordWidthPixels: Float,
     fadeWidthPixels: Float,
+    extraTravelPixels: Float = 0f,
 ): Float = wordProgress.coerceIn(0f, 1f) *
-    (wordWidthPixels.coerceAtLeast(0f) + fadeWidthPixels.coerceAtLeast(0.01f))
+    (wordWidthPixels.coerceAtLeast(0f) + fadeWidthPixels.coerceAtLeast(0.01f) +
+        extraTravelPixels.coerceAtLeast(0f))
 
 
 internal fun lyricBaseMaskAlpha(): Float = AMLL_BASE_MASK_ALPHA
