@@ -749,6 +749,19 @@ private fun ExperimentalBadge() {
     }
 }
 
+/**
+ * A smoke route that names a page of real data has to wait for that data, which arrives over the
+ * network. The wait is bounded so a list that never fills in fails the job instead of hanging it.
+ */
+private suspend fun <T> awaitLazerSmokeList(read: () -> List<T>): List<T> {
+    var waits = 0
+    while (read().isEmpty() && waits < 40) {
+        kotlinx.coroutines.delay(200L)
+        waits++
+    }
+    return read()
+}
+
 @Composable
 fun LazerApp(
     controller: LazerGatewayController,
@@ -846,17 +859,16 @@ private fun LazerAppContent(
     // recommendation list instead of inventing a track the listener would never see.
     LaunchedEffect(smokeRoute) {
         val route = smokeRoute ?: return@LaunchedEffect
-        when {
-            route == "settings" -> controller.openSettings()
-            route == "about" -> controller.openAbout()
-            route == "player" -> {
-                var waits = 0
-                while (controller.homeTracks.isEmpty() && waits < 40) {
-                    kotlinx.coroutines.delay(200L)
-                    waits++
-                }
-                controller.homeTracks.firstOrNull()?.let { controller.play(controller.homeTracks, it) }
+        when (route) {
+            "settings" -> controller.openSettings()
+            "about" -> controller.openAbout()
+            "playlist" -> awaitLazerSmokeList(controller::featuredPlaylists).firstOrNull()
+                ?.let(controller::openPlaylist)
+            "player", "comments" -> {
+                val tracks = awaitLazerSmokeList(controller::homeTracks)
+                tracks.firstOrNull()?.let { controller.play(tracks, it) }
                 playerVisible = true
+                if (route == "comments") controller.openSongComments()
             }
             else -> controller.selectDestination(
                 LazerRootDestination.entries
