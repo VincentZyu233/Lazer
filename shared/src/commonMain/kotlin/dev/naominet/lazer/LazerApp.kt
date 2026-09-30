@@ -285,12 +285,11 @@ private data class AndroidMainPage(
 internal val LocalTapHapticsEnabled = androidx.compose.runtime.staticCompositionLocalOf { true }
 
 /**
- * Where the reader turned system haptics off, the app stays quiet too. The key is deprecated on 31+,
- * but it remains the one every skin writes and there is no replacement that covers them all.
+ * Where the reader turned system haptics off, the app stays quiet too. The host reads the platform's
+ * own switch, because on some platforms that is the only one that matters.
  */
-@Suppress("DEPRECATION")
-private fun hapticsAllowedBySystem(context: Context): Boolean =
-    Settings.System.getInt(context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) != 0
+@Composable
+private fun hapticsAllowedBySystem(): Boolean = LocalLazerScreenHost.current.systemHapticsEnabled
 
 // Both answers below go through the platform's own haptic categories rather than a duration and an
 // amplitude. Raw values can be graded into strengths, but they bypass the waveform each maker tunes
@@ -324,9 +323,8 @@ private const val SLIDER_DETENTS = 20
  */
 @Composable
 internal fun rememberDetentAnswer(quantize: (Float) -> Int): (Float) -> Unit {
-    val context = LocalContext.current
     val viewHaptics = LocalHapticFeedback.current
-    val answer = LocalTapHapticsEnabled.current && hapticsAllowedBySystem(context)
+    val answer = LocalTapHapticsEnabled.current && hapticsAllowedBySystem()
     val latestQuantize by rememberUpdatedState(quantize)
     val lastCell = remember { mutableIntStateOf(Int.MIN_VALUE) }
     return { fraction ->
@@ -342,9 +340,8 @@ internal fun rememberDetentAnswer(quantize: (Float) -> Int): (Float) -> Unit {
 /** Answers a gesture that landed. Silent when the reader asked for no answer. */
 @Composable
 internal fun rememberTapAnswer(): () -> Unit {
-    val context = LocalContext.current
     val viewHaptics = LocalHapticFeedback.current
-    val answer = LocalTapHapticsEnabled.current && hapticsAllowedBySystem(context)
+    val answer = LocalTapHapticsEnabled.current && hapticsAllowedBySystem()
     return { if (answer) answerTap(viewHaptics) }
 }
 
@@ -452,35 +449,21 @@ private enum class AndroidBackLayer {
  */
 @Composable
 private fun rememberScreenCornerRadius(): Dp {
-    val view = LocalView.current
+    val host = LocalLazerScreenHost.current
     val density = LocalDensity.current
-    // Insets only exist once the window has been laid out, so the container size keys the recompute.
-    val containerSize = LocalWindowInfo.current.containerSize
-    return remember(view, density, containerSize) {
-        val insets =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) view.rootWindowInsets else null
-        val radiusPx = insets?.let { windowInsets ->
-            intArrayOf(
-                RoundedCorner.POSITION_TOP_LEFT,
-                RoundedCorner.POSITION_TOP_RIGHT,
-                RoundedCorner.POSITION_BOTTOM_LEFT,
-                RoundedCorner.POSITION_BOTTOM_RIGHT,
-            ).maxOf { position -> windowInsets.getRoundedCorner(position)?.radius ?: 0 }
-        } ?: 0
-        with(density) { radiusPx.toFloat().toDp() }
-    }
+    return remember(host, density) { with(density) { host.screenCornerRadiusPx.toDp() } }
 }
 
 private fun Modifier.predictiveBackTransform(
     enabled: Boolean,
     progress: Float,
-    swipeEdge: Int,
+    swipeEdge: LazerSwipeEdge,
 ): Modifier = if (!enabled) {
     this
 } else {
     graphicsLayer {
         val fraction = progress.coerceIn(0f, 1f)
-        val direction = if (swipeEdge == BackEventCompat.EDGE_RIGHT) -1f else 1f
+        val direction = if (swipeEdge == LazerSwipeEdge.Right) -1f else 1f
         translationX = size.width * 0.16f * fraction * direction
         val scale = 1f - 0.09f * fraction
         scaleX = scale
@@ -499,7 +482,7 @@ private fun Modifier.capturedPageBackground(backdrop: LayerBackdrop): Modifier =
 
 @Composable
 private fun isLandscapeLayout(): Boolean =
-    LocalConfiguration.current.let { it.screenWidthDp > it.screenHeightDp }
+    LocalWindowInfo.current.containerSize.let { it.width > it.height }
 
 @Composable
 private fun AdaptiveDetailHeader(artwork: @Composable () -> Unit, content: @Composable () -> Unit) {
@@ -768,13 +751,30 @@ private fun ExperimentalBadge() {
 }
 
 @Composable
-fun LazerApp(initialListenTogetherInvitation: String? = null) {
-    val context = LocalContext.current
-    val controller = remember(context.applicationContext) { LazerGatewayController(context.applicationContext) }
+fun LazerApp(
+    controller: LazerGatewayController,
+    screen: LazerScreenHost,
+    authWebView: LazerAuthWebView,
+    initialListenTogetherInvitation: String? = null,
+) {
+    CompositionLocalProvider(
+        LocalLazerScreenHost provides screen,
+        LocalLazerAuthWebView provides authWebView,
+    ) {
+        LazerAppContent(controller, initialListenTogetherInvitation)
+    }
+}
+
+@Composable
+private fun LazerAppContent(
+    controller: LazerGatewayController,
+    initialListenTogetherInvitation: String?,
+) {
+    val screen = LocalLazerScreenHost.current
     var pendingQrAuthorizationUrl by remember { mutableStateOf<String?>(null) }
     var rootMessage by remember { mutableStateOf<String?>(null) }
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        when (val target = result.contents?.let(::classifyScannedCode)) {
+    fun handleScanned(raw: String?) {
+        when (val target = raw?.let(::classifyScannedCode)) {
             is ScannedCode.ListenTogether -> controller.joinListenTogether(target.raw)
             is ScannedCode.ClientLogin -> {
                 if (controller.currentSessionCookie == null) {
@@ -800,14 +800,9 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
     var copyTextRequest by remember { mutableStateOf<AndroidCopyTextRequest?>(null) }
     val clipboard = LocalClipboard.current
     val clipboardScope = rememberCoroutineScope()
-    val coverDocumentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
-        val request = coverSaveTarget
-        coverSaveTarget = null
-        if (uri != null && request != null) controller.saveArtwork(request.url, uri.toString(), request.title)
-    }
     var requestedBackProgress by remember { mutableFloatStateOf(0f) }
     var isPredictiveBackRunning by remember { mutableStateOf(false) }
-    var backSwipeEdge by remember { mutableStateOf(BackEventCompat.EDGE_LEFT) }
+    var backSwipeEdge by remember { mutableStateOf(LazerSwipeEdge.Left) }
     var transformedBackLayer by remember { mutableStateOf<AndroidBackLayer?>(null) }
     val screenCornerRadius = rememberScreenCornerRadius()
 
@@ -847,27 +842,27 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
 
     // The currently visible top layer owns back. Gesture progress drives the same page that a
     // normal back press closes; cancelling the gesture eases that page back into place.
-    PredictiveBackHandler(enabled = !controller.isLoginVisible && activeBackLayer != null) { events ->
-        val layer = activeBackLayer ?: return@PredictiveBackHandler
-        transformedBackLayer = layer
-        isPredictiveBackRunning = true
-        try {
-            events.collect { event ->
-                requestedBackProgress = event.progress
-                backSwipeEdge = event.swipeEdge
-            }
-            when (layer) {
+    screen.BackGesture(
+        enabled = !controller.isLoginVisible && activeBackLayer != null,
+        onProgress = { progress, edge ->
+            transformedBackLayer = activeBackLayer
+            isPredictiveBackRunning = true
+            requestedBackProgress = progress
+            backSwipeEdge = edge
+        },
+        onConfirmed = {
+            when (activeBackLayer) {
                 AndroidBackLayer.PLAYER -> playerVisible = false
                 AndroidBackLayer.ARTIST -> controller.closeArtist()
                 AndroidBackLayer.SETTINGS -> controller.closeSettings()
                 AndroidBackLayer.ABOUT -> controller.closeAbout()
                 AndroidBackLayer.PLAYLIST -> controller.closePlaylist()
+                null -> Unit
             }
-        } finally {
             isPredictiveBackRunning = false
             requestedBackProgress = 0f
-        }
-    }
+        },
+    )
 
     val mainPage = when {
         controller.isAboutVisible -> AndroidMainPage(AndroidMainPageKind.ABOUT)
@@ -886,23 +881,20 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
         )
         else -> AndroidMainPage(AndroidMainPageKind.ROOT)
     }
-    val systemConfiguration = LocalConfiguration.current
+    val windowSize = LocalWindowInfo.current.containerSize
     val nowPlayingPaletteSeed = rememberAndroidArtworkSeed(
         playback.track.takeIf { controller.palette == LazerPalette.NowPlaying },
     )
     val paletteColorScheme = remember(
         controller.palette,
         controller.isDark,
-        systemConfiguration,
+        windowSize,
         nowPlayingPaletteSeed,
     ) {
         when (val palette = controller.palette) {
             LazerPalette.Default -> null
-            LazerPalette.System -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (controller.isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-            } else {
-                null
-            }
+            LazerPalette.System ->
+                if (screen.supportsSystemPalette) screen.dynamicColorScheme(controller.isDark) else null
             LazerPalette.NowPlaying -> nowPlayingPaletteSeed?.let {
                 seedColorScheme(it, controller.isDark)
             }
@@ -933,54 +925,34 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
         ) {
         val colors = MaterialTheme.colorScheme
         val launchScanner = {
-            scanLauncher.launch(
-                ScanOptions().apply {
-                    setBeepEnabled(false)
-                    setCaptureActivity(LazerScanActivity::class.java)
-                    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                    setOrientationLocked(false)
-                    setPrompt(tr("scan.prompt"))
-                    addExtra(LazerScanActivity.EXTRA_TITLE, tr("scan.open"))
-                    addExtra(LazerScanActivity.EXTRA_DESCRIPTION, tr("scan.description"))
-                    addExtra(LazerScanActivity.EXTRA_PROMPT, tr("scan.prompt"))
-                    addExtra(LazerScanActivity.EXTRA_BACK_DESCRIPTION, tr("common.back"))
-                    addExtra(LazerScanActivity.EXTRA_DARK_THEME, controller.isDark)
-                    addExtra(LazerScanActivity.EXTRA_BACKGROUND_COLOR, colors.background.toArgb())
-                    addExtra(LazerScanActivity.EXTRA_SURFACE_COLOR, colors.surface.toArgb())
-                    addExtra(LazerScanActivity.EXTRA_PRIMARY_COLOR, colors.primary.toArgb())
-                    addExtra(LazerScanActivity.EXTRA_PRIMARY_CONTAINER_COLOR, colors.primaryContainer.toArgb())
-                    addExtra(LazerScanActivity.EXTRA_ON_BACKGROUND_COLOR, colors.onBackground.toArgb())
-                    addExtra(LazerScanActivity.EXTRA_ON_SURFACE_VARIANT_COLOR, colors.onSurfaceVariant.toArgb())
-                    addExtra(LazerScanActivity.EXTRA_ON_PRIMARY_CONTAINER_COLOR, colors.onPrimaryContainer.toArgb())
-                },
+            screen.scanCode(
+                LazerScanTheme(
+                    isDark = controller.isDark,
+                    background = colors.background,
+                    surface = colors.surface,
+                    primary = colors.primary,
+                    primaryContainer = colors.primaryContainer,
+                    onBackground = colors.onBackground,
+                    onSurfaceVariant = colors.onSurfaceVariant,
+                    onPrimaryContainer = colors.onPrimaryContainer,
+                    title = tr("scan.open"),
+                    description = tr("scan.description"),
+                    prompt = tr("scan.prompt"),
+                    backLabel = tr("common.back"),
+                ),
+                onResult = ::handleScanned,
             )
         }
-        val view = LocalView.current
         // Picking a song is a playback decision, not a navigation one: the mini player already shows
         // what is playing, and the reader opens the full page from there when they want it.
         val playFromQueue: (List<LazerTrack>, LazerTrack) -> Unit = { queue, track ->
             controller.play(queue, track)
         }
         val shareListenTogether: (String) -> Unit = { url ->
-            context.startActivity(
-                Intent.createChooser(
-                    Intent(Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(Intent.EXTRA_TEXT, url)
-                    },
-                    tr("listen_together.share"),
-                ),
-            )
+            screen.shareText(url, tr("listen_together.share"))
         }
-        if (!view.isInEditMode) {
-            SideEffect {
-                (view.context as? Activity)?.window?.let { window ->
-                    WindowCompat.getInsetsController(window, view).apply {
-                        isAppearanceLightStatusBars = !controller.isDark
-                        isAppearanceLightNavigationBars = !controller.isDark
-                    }
-                }
-            }
+        SideEffect {
+            screen.setStatusBarAppearance(controller.isDark)
         }
         val wallpaper = controller.backgroundImage.takeIf {
             controller.backgroundMode == LazerBackgroundMode.IMAGE
@@ -1368,7 +1340,13 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
                 onConfirm = { request ->
                     coverSaveRequest = null
                     coverSaveTarget = request
-                    coverDocumentLauncher.launch(androidCoverFileName(request.title))
+                    screen.pickExportDestination(androidCoverFileName(request.title)) { target ->
+                        val pending = coverSaveTarget
+                        coverSaveTarget = null
+                        if (target != null && pending != null) {
+                            controller.saveArtwork(pending.url, target, pending.title)
+                        }
+                    }
                 },
             )
             CopyTextSheet(
@@ -1377,14 +1355,12 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
                 onConfirm = { request ->
                     copyTextRequest = null
                     clipboardScope.launch {
-                        clipboard.setClipEntry(
-                            ClipEntry(ClipData.newPlainText(tr(request.titleKey), request.value)),
-                        )
+                        clipboard.setClipEntry(ClipEntry(AnnotatedString(request.value)))
                         rootMessage = tr("song.copy.done")
                     }
                 },
             )
-            if ((context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            if (screen.isDebugBuild) {
                 LazerDebugWatermark(Modifier.fillMaxSize())
             }
         }
@@ -1395,9 +1371,10 @@ fun LazerApp(initialListenTogetherInvitation: String? = null) {
 @Composable
 private fun LazerDebugWatermark(modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
-    val watermarkText = remember {
-        val model = Build.MODEL.orEmpty().ifBlank { "Unknown device" }
-        val fingerprint = Build.FINGERPRINT.orEmpty().ifBlank { "Unknown fingerprint" }
+    val screen = LocalLazerScreenHost.current
+    val watermarkText = remember(screen) {
+        val model = screen.deviceLabel.ifBlank { "Unknown device" }
+        val fingerprint = screen.deviceFingerprint.ifBlank { "Unknown fingerprint" }
         "DEBUG  ·  $model  ·  $fingerprint"
     }
     val textMeasurer = rememberTextMeasurer()
@@ -1732,17 +1709,12 @@ private fun MePage(controller: LazerGatewayController) {
 @Composable
 private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
-    val systemMonetAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-    val context = LocalContext.current
-    val backgroundPicker = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.GetContent(),
-    ) { uri -> uri?.let { controller.setBackgroundImage(it.toString()) } }
+    val screen = LocalLazerScreenHost.current
+    val systemMonetAvailable = screen.supportsSystemPalette
     // The platform asks for the microphone even though the capture only reads back our own session,
     // so the switch stays off until the user grants it.
-    var microphoneGranted by remember { mutableStateOf(context.hasRecordAudioPermission()) }
-    val microphoneRequest = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
-    ) { granted ->
+    var microphoneGranted by remember { mutableStateOf(screen.microphoneGranted) }
+    fun requestMicrophone() = screen.requestMicrophonePermission { granted ->
         microphoneGranted = granted
         if (granted) {
             controller.updateAudioReactiveLevels(true)
@@ -1927,7 +1899,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                             onSelected = { mode ->
                                 controller.updateBackgroundMode(mode)
                                 if (mode == LazerBackgroundMode.IMAGE && controller.backgroundImage == null) {
-                                    backgroundPicker.launch("image/*")
+                                    screen.pickBackgroundImage { source -> source?.let(controller::setBackgroundImage) }
                                 }
                             },
                         )
@@ -1946,7 +1918,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                                 style = MaterialTheme.typography.bodySmall,
                                 color = colors.onSurfaceVariant,
                             )
-                            ThemeTextButton(onClick = { backgroundPicker.launch("image/*") }) {
+                            ThemeTextButton(onClick = { screen.pickBackgroundImage { source -> source?.let(controller::setBackgroundImage) } }) {
                                 Text(
                                     if (controller.backgroundImage == null) {
                                         tr("settings.background.pick")
@@ -2138,7 +2110,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                             when {
                                 audioLevelsEnabled -> controller.updateAudioReactiveLevels(false)
                                 microphoneGranted -> controller.updateAudioReactiveLevels(true)
-                                else -> microphoneRequest.launch(Manifest.permission.RECORD_AUDIO)
+                                else -> requestMicrophone()
                             }
                         }
                         .padding(horizontal = 16.dp, vertical = 10.dp),
@@ -2557,9 +2529,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             copied = cookieCopied,
             onCopy = { cookie ->
                 coroutineScope.launch {
-                    clipboard.setClipEntry(
-                        ClipEntry(ClipData.newPlainText(tr("login.cookie.label"), cookie)),
-                    )
+                    clipboard.setClipEntry(ClipEntry(AnnotatedString(cookie)))
                     cookieCopied = true
                 }
             },
@@ -3679,7 +3649,8 @@ private fun LiquidGlassPlaylistDetail(
     val colors = MaterialTheme.colorScheme
     val currentTrackIndex = tracks.indexOfFirst { it.id == currentId }
     // Keep the cover as the visual anchor without making it dominate the song list.
-    val artworkSize = if (isLandscapeLayout()) 112.dp else (LocalConfiguration.current.screenWidthDp.dp * 0.44f).coerceIn(140.dp, 200.dp)
+    val windowWidth = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.width.toDp() }
+    val artworkSize = if (isLandscapeLayout()) 112.dp else (windowWidth * 0.44f).coerceIn(140.dp, 200.dp)
     val primaryText = Color(0xFFF4FAFD)
     val secondaryText = primaryText.copy(alpha = 0.78f)
     val prominentInk = Color(0xFF183246)
