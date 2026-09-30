@@ -250,13 +250,13 @@ jobs:
           xcodebuild \
             -project iosApp/iosApp.xcodeproj \
             -scheme iosApp \
-            -configuration Release \
+            -configuration Debug \
             -sdk iphonesimulator \
             -destination "id=$simulator_udid" \
             -derivedDataPath iosApp/build/SimulatorDerivedData \
             CODE_SIGNING_ALLOWED=NO \
             build | tee ios-simulator-xcodebuild.log
-          app_path="$(find iosApp/build/SimulatorDerivedData/Build/Products/Release-iphonesimulator -maxdepth 1 -name '*.app' -print -quit)"
+          app_path="$(find iosApp/build/SimulatorDerivedData/Build/Products/Debug-iphonesimulator -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app_path"
           bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Info.plist")"
           xcrun simctl install "$simulator_udid" "$app_path"

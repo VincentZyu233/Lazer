@@ -60,12 +60,22 @@ import dev.naominet.lazer.gateway.model.Song
 import kotlinx.coroutines.delay
 
 private const val IOS_COMPOSE_READY_MARKER = "LAZER_IOS_COMPOSE_READY"
+private const val IOS_COMPOSE_STAGE_PREFIX = "LAZER_IOS_COMPOSE_STAGE:"
 private var didReportIOSComposeReady = false
+
+private fun reportIOSComposeStage(stage: String) {
+    println("$IOS_COMPOSE_STAGE_PREFIX$stage")
+}
 
 @Composable
 internal fun IOSLazerApp() {
-    val controller = remember { IOSGatewayController() }
+    reportIOSComposeStage("enter")
+    val controller = remember {
+        reportIOSComposeStage("controller:create")
+        IOSGatewayController().also { reportIOSComposeStage("controller:ready") }
+    }
     val settings = controller.settings
+    reportIOSComposeStage("effects")
 
     LaunchedEffect(controller) {
         controller.bootstrap()
@@ -88,14 +98,18 @@ internal fun IOSLazerApp() {
         isDark = settings.isDark,
         engine = settings.style.themeEngine,
     ) {
+        reportIOSComposeStage("theme")
         val colors = MaterialTheme.colorScheme
         val nativeGlass = settings.style.usesLiquidGlass && settings.usesNativeLiquidGlass
+        reportIOSComposeStage("glass:create")
         val composeGlass = rememberLazerLiquidGlass(
             enabled = settings.style.usesLiquidGlass && !nativeGlass,
             backgroundColor = colors.background,
         )
+        reportIOSComposeStage("glass:ready")
 
         Box(Modifier.fillMaxSize().background(colors.background)) {
+            reportIOSComposeStage("content")
             Box(
                 Modifier
                     .fillMaxSize()
@@ -138,6 +152,7 @@ internal fun IOSLazerApp() {
             }
         }
     }
+    reportIOSComposeStage("theme:ready")
 
     // Side effects run only after a successful composition commit. The CI launch test uses this
     // marker to distinguish a genuinely rendered first frame from a still-running blank shell.
