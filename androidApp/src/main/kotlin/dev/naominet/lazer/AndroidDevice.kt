@@ -86,11 +86,13 @@ class AndroidPlayer(private val context: Context) : LazerPlayer {
 
     override fun seekTo(positionMillis: Long) = AndroidPlaybackConnection.seekTo(context, positionMillis)
 
-    override fun updateExclusiveAudio() = AndroidPlaybackConnection.updateExclusiveAudio(context)
+    override fun updateExclusiveAudio(exclusive: Boolean) =
+        AndroidPlaybackConnection.updateExclusiveAudio(context)
 
-    override fun updatePlaybackInterface() = AndroidPlaybackConnection.updatePlaybackInterface(context)
+    override fun updatePlaybackInterface(systemMedia: Boolean) =
+        AndroidPlaybackConnection.updatePlaybackInterface(context)
 
-    override fun updateAudioLevels() = AndroidPlaybackConnection.updateAudioLevels(context)
+    override fun updateAudioLevels(enabled: Boolean) = AndroidPlaybackConnection.updateAudioLevels(context)
 
     override fun stopAndClearSession() = AndroidPlaybackConnection.stopAndClearSession(context)
 }
