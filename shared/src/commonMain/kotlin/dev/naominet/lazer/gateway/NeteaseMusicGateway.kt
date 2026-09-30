@@ -26,8 +26,6 @@ import dev.naominet.lazer.gateway.model.TopPlaylistsResponse
 import dev.naominet.lazer.gateway.model.UserDetailResponse
 import dev.naominet.lazer.gateway.model.UserPlaylistsResponse
 import io.ktor.client.HttpClient
-import io.ktor.client.plugins.HttpTimeout
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.accept
 import io.ktor.client.request.header
 import io.ktor.client.request.request
@@ -38,7 +36,6 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
-import io.ktor.serialization.kotlinx.json.json
 import io.ktor.util.date.getTimeMillis
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -105,7 +102,7 @@ const val SONG_COMMENT_CONTENT_LIMIT = 500
 class NeteaseMusicGateway(
     val config: GatewayConfig = GatewayConfig(),
     val sessionStore: GatewaySessionStore = InMemoryGatewaySessionStore(),
-    private val httpClient: HttpClient = createDefaultHttpClient(config),
+    private val httpClient: HttpClient = createLazerHttpClient(config),
     private val closeHttpClient: Boolean = true,
     private val nowMillis: () -> Long = { getTimeMillis() },
 ) {
@@ -654,16 +651,4 @@ internal val gatewayJson = Json {
     ignoreUnknownKeys = true
     isLenient = true
     coerceInputValues = true
-}
-
-private fun createDefaultHttpClient(config: GatewayConfig): HttpClient = HttpClient {
-    expectSuccess = false
-    install(HttpTimeout) {
-        requestTimeoutMillis = config.requestTimeoutMillis
-        connectTimeoutMillis = config.requestTimeoutMillis
-        socketTimeoutMillis = config.requestTimeoutMillis
-    }
-    install(ContentNegotiation) {
-        json(gatewayJson)
-    }
 }
