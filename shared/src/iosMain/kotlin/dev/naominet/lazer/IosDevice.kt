@@ -10,7 +10,8 @@ import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
@@ -52,8 +53,7 @@ private fun NSData.toByteArray(): ByteArray {
 private fun ByteArray.toNSData(): NSData? =
     if (isEmpty()) NSData() else usePinned { NSData.dataWithBytes(it.addressOf(0), size.toULong()) }
 
-/** iOS's answers to the file, download and diagnostics asks of the shared state layer. */
-internal class IosPlatformHost : LazerPlatformHost {
+internal class IosPlatformHost(private val bridge: IosShellBridge) : LazerPlatformHost {
     private val manager = NSFileManager.defaultManager
 
     override fun decodeImageFile(path: String): ImageBitmap? =
@@ -75,33 +75,27 @@ internal class IosPlatformHost : LazerPlatformHost {
         manager.removeItemAtPath(path, null)
     }
 
-    override fun writeExportedFile(target: String, bytes: ByteArray): Boolean {
-        val handle = NSFileHandle.fileHandleForWritingAtPath(target) ?: return false
-        return try {
-            bytes.toNSData()?.let { handle.writeData(it) }
-            true
-        } catch (_: Throwable) {
-            false
-        } finally {
-            handle.closeFile()
-        }
-    }
-
     override fun deleteExportedFile(target: String) {
         manager.removeItemAtPath(target, null)
     }
 
+    /** Swift downloads and writes in one job, so no byte buffer has to cross the bridge. */
+    override suspend fun saveRemoteFile(url: String, target: String): Boolean =
+        suspendCoroutine { continuation ->
+            bridge.downloadToDestination(url, target) { written -> continuation.resume(written) }
+        }
+
     override suspend fun downloadFile(url: String): ByteArray? =
-        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+        suspendCoroutine { continuation ->
         val address = NSURL.URLWithString(url)
         if (address == null) {
             continuation.resume(null)
-            return@suspendCancellableCoroutine
+            return@suspendCoroutine
         }
         val task = NSURLSession.sharedSession.dataTaskWithRequest(
             NSURLRequest.requestWithURL(address),
         ) { data, _, _ ->
-            if (continuation.isActive) continuation.resume(data?.toByteArray())
+            continuation.resume(data?.toByteArray())
         }
         task.resume()
     }
@@ -323,8 +317,8 @@ internal fun iosDevice(bridge: IosShellBridge): LazerDevice {
         preferences = iosPreferences(),
         sessionStore = sessionStore,
         cache = IosLibraryCache(),
-        player = IosPlayer(gateway),
-        host = IosPlatformHost(),
+        player = IosPlayer(gateway = gateway, bridge = bridge),
+        host = IosPlatformHost(bridge),
         gateway = gateway,
     )
 }

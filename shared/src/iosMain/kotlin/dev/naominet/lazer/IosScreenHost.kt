@@ -44,6 +44,35 @@ interface IosShellBridge {
      * sheet around it stays the same sheet every other platform draws.
      */
     fun makeAuthWebView(url: String, sessionCookie: String): UIView
+
+    /** Downloads into a file UIKit can write without a byte buffer crossing the bridge. */
+    fun downloadToFile(url: String, onDone: (path: String?) -> Unit)
+
+    /** Downloads straight into [destination], so no byte buffer has to cross the bridge. */
+    fun downloadToDestination(url: String, destination: String, onDone: (written: Boolean) -> Unit)
+
+    /**
+     * The audio side. Swift owns AVPlayer because Kotlin's view of its API is a translation, and a
+     * translation is exactly what a player should not rest on; every decision about what plays next
+     * stays in the shared queue.
+     */
+    fun playerLoad(url: String, startPlaying: Boolean, positionMillis: Long)
+
+    fun playerPlay()
+
+    fun playerPause()
+
+    fun playerSeekTo(positionMillis: Long)
+
+    fun playerRelease()
+
+    fun playerPositionMillis(): Long
+
+    fun playerDurationMillis(): Long
+
+    fun playerIsPlaying(): Boolean
+
+    fun playerSetEndedHandler(handler: () -> Unit)
 }
 
 /** iOS's answers to the screen-level asks of the shared interface. */

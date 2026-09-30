@@ -1,5 +1,3 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
-
 package dev.naominet.lazer
 
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
@@ -9,40 +7,38 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import platform.AVFAudio.AVAudioSession
-import platform.AVFAudio.AVAudioSessionCategoryPlayback
-import platform.AVFAudio.setActive
-import platform.AVFoundation.AVPlayer
-import platform.AVFoundation.AVPlayerItem
-import platform.CoreMedia.CMTimeMakeWithSeconds
-
-import platform.AVFoundation.AVPlayerTimeControlStatusPaused
-
-import platform.Foundation.NSURL
-import platform.Foundation.NSNotification
-import platform.Foundation.NSNotificationCenter
-import platform.Foundation.NSOperationQueue
-import platform.Foundation.addObserverForName
-import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Plays through AVPlayer and mirrors what it does into the shared snapshot, so every screen reads
- * the same state the Android media session publishes. Position is polled rather than observed:
- * the shared player surface only ever needs frame-rate accuracy, and polling keeps the Kotlin side
- * free of key-value observer plumbing.
+ * Drives playback through the Swift side of the bridge and mirrors what it hears into the shared
+ * snapshot, so every screen reads the same state the Android media session publishes. The queue, the
+ * advance rule and the repeat modes stay in shared code; Swift only ever answers "play this".
  */
-internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer {
-    private var player: AVPlayer? = null
-    private var endObserver: Any? = null
+internal class IosPlayer(
+    private val gateway: NeteaseMusicGateway,
+    private val bridge: IosShellBridge,
+) : LazerPlayer {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var ticker: Job? = null
-    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var pendingTrack: LazerTrack? = null
 
     override val snapshot: StateFlow<LazerPlaybackSnapshot> = LazerPlaybackStateStore.snapshot
     override val queue: StateFlow<LazerPlaybackQueueSnapshot> = LazerPlaybackQueue.snapshot
+
+    init {
+        bridge.playerSetEndedHandler {
+            scope.launch {
+                if (LazerPlaybackQueue.mode == LazerPlayMode.SingleLoop) {
+                    bridge.playerSeekTo(0L)
+                    bridge.playerPlay()
+                } else {
+                    LazerPlaybackQueue.next()?.let { play(LazerPlaybackQueue.tracks, it) }
+                }
+            }
+        }
+    }
 
     override fun currentQueue(): List<LazerTrack> = LazerPlaybackQueue.tracks
 
@@ -86,19 +82,18 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
     }
 
     override fun resume() {
-        val track = pendingTrack ?: snapshot.value.track
-        if (player == null && track != null) {
-            play(LazerPlaybackQueue.tracks, track)
+        if (snapshot.value.track == null) {
+            LazerPlaybackQueue.current()?.let { play(LazerPlaybackQueue.tracks, it) }
             return
         }
-        player?.play()
+        bridge.playerPlay()
         startTicker()
-        publish(playing = true)
+        publish()
     }
 
     override fun pause() {
-        player?.pause()
-        publish(playing = false)
+        bridge.playerPause()
+        publish()
     }
 
     override fun next() {
@@ -110,8 +105,8 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
     }
 
     override fun seekTo(positionMillis: Long) {
-        player?.seekToTime(CMTimeMakeWithSeconds(positionMillis.toDouble() / 1000.0, 1_000))
-        publish(playing = snapshot.value.isPlaying)
+        bridge.playerSeekTo(positionMillis)
+        publish()
     }
 
     /** Nothing on iOS takes another app's audio, exposes a system transport or captures levels. */
@@ -122,8 +117,9 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
     override fun updateAudioLevels() = Unit
 
     override fun stopAndClearSession() {
-        pause()
-        releasePlayer()
+        bridge.playerPause()
+        bridge.playerRelease()
+        ticker?.cancel()
         LazerPlaybackStateStore.update(LazerPlaybackSnapshot())
     }
 
@@ -133,91 +129,38 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
         }
         if (url.isNullOrBlank()) {
             LazerPlaybackStateStore.update(
-                LazerPlaybackSnapshot(track = track, message = "这首歌现在无法播放，可以试试其他歌曲。"),
+                LazerPlaybackSnapshot(
+                    track = track,
+                    message = "这首歌现在无法播放，可以试试其他歌曲。",
+                ),
             )
             return
         }
-        pendingTrack = track
-        releasePlayer()
-        ensureAudioSession()
-        val address = NSURL.URLWithString(url) ?: return
-        val next = AVPlayer()
-        next.replaceCurrentItemWithPlayerItem(AVPlayerItem(address))
-        player = next
-        watchForEndOfItem(item)
-        if (positionMillis > 0L) next.seekToTime(CMTimeMakeWithSeconds(positionMillis / 1000.0, 1_000))
-        if (startPlaying) {
-            next.play()
-            startTicker()
-            publish(playing = true, preparing = true)
-        } else {
-            publish(playing = false, preparing = true)
-        }
-    }
-
-    private fun ensureAudioSession() {
-        runCatching {
-            AVAudioSession.sharedInstance().setCategory(AVAudioSessionCategoryPlayback, error = null)
-            AVAudioSession.sharedInstance().setActive(true, error = null)
-        }
-    }
-
-    private fun watchForEndOfItem(item: AVPlayerItem) {
-        endObserver?.let { NSNotificationCenter.defaultCenter.removeObserver(it) }
-        endObserver = NSNotificationCenter.defaultCenter.addObserverForName(
-            name = "AVPlayerItemDidPlayToEndTimeNotification",
-            `object` = item,
-            queue = NSOperationQueue.mainQueue,
-        ) { _: NSNotification? ->
-            // A single loop repeats the track that just ended; everything else moves on.
-            if (LazerPlaybackQueue.mode == LazerPlayMode.SingleLoop) {
-                seekTo(0L)
-                player?.play()
-            } else {
-                LazerPlaybackQueue.next()?.let { play(LazerPlaybackQueue.tracks, it) }
-            }
-        }
+        bridge.playerLoad(url, startPlaying, positionMillis.coerceAtLeast(0L))
+        if (startPlaying) startTicker()
+        publish()
     }
 
     private fun startTicker() {
         if (ticker?.isActive == true) return
         ticker = scope.launch {
             while (isActive) {
-                publish(playing = player?.timeControlStatus != AVPlayerTimeControlStatusPaused)
+                publish()
                 delay(250L)
             }
         }
     }
 
-    private fun publish(playing: Boolean, preparing: Boolean = false) {
+    private fun publish() {
         val state = snapshot.value
         val track = state.track ?: return
         LazerPlaybackStateStore.update(
             state.copy(
-                isPlaying = playing,
-                isPreparing = preparing,
-                positionMillis = currentMillis(),
-                durationMillis = durationMillis() ?: track.durationMillis,
+                isPlaying = bridge.playerIsPlaying(),
+                isPreparing = false,
+                positionMillis = bridge.playerPositionMillis(),
+                durationMillis = bridge.playerDurationMillis().takeIf { it > 0L } ?: track.durationMillis,
             ),
         )
-    }
-
-    private fun currentMillis(): Long = player?.currentTime()?.useContents { seconds }
-        ?.let { (it * 1000).toLong() } ?: 0L
-
-    private fun durationMillis(): Long? = player?.currentItem?.duration?.useContents { seconds }
-        ?.takeIf { it.isFinite() && it > 0 }?.let { (it * 1000).toLong() }
-
-    private fun releasePlayer() {
-        endObserver?.let { NSNotificationCenter.defaultCenter.removeObserver(it) }
-        endObserver = null
-        player?.pause()
-        player = null
-    }
-
-    fun close() {
-        ticker?.cancel()
-        releasePlayer()
-        scope.cancel()
     }
 }

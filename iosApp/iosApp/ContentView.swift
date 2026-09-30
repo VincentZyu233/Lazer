@@ -80,6 +80,52 @@ final class LazerShell: NSObject, IosShellBridge {
         }
     }
 
+    func downloadToFile(url: String, onDone: @escaping (String?) -> Void) {
+        download(url, to: nil) { path, _ in onDone(path) }
+    }
+
+    func downloadToDestination(url: String, destination: String, onDone: @escaping (Bool) -> Void) {
+        download(url, to: destination) { _, written in onDone(written) }
+    }
+
+    private func download(_ url: String, to destination: String?, _ done: @escaping (String?, Bool) -> Void) {
+        guard let address = URL(string: url) else { done(nil, false); return }
+        let target = destination
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        URLSession.shared.dataTask(with: address) { data, _, _ in
+            guard let data else {
+                DispatchQueue.main.async { done(nil, false) }
+                return
+            }
+            do {
+                try data.write(to: URL(fileURLWithPath: target))
+                DispatchQueue.main.async { done(target, true) }
+            } catch {
+                DispatchQueue.main.async { done(nil, false) }
+            }
+        }.resume()
+    }
+
+    func playerLoad(url: String, startPlaying: Bool, positionMillis: Int64) {
+        audio.load(url: url, startPlaying: startPlaying, positionMillis: Double(positionMillis) / 1000)
+    }
+
+    func playerPlay() { audio.play() }
+
+    func playerPause() { audio.pause() }
+
+    func playerSeekTo(positionMillis: Int64) { audio.seek(toSeconds: Double(positionMillis) / 1000) }
+
+    func playerRelease() { audio.release() }
+
+    func playerPositionMillis() -> Int64 { Int64(audio.positionSeconds * 1000) }
+
+    func playerDurationMillis() -> Int64 { Int64(audio.durationSeconds * 1000) }
+
+    func playerIsPlaying() -> Bool { audio.isPlaying }
+
+    func playerSetEndedHandler(handler: @escaping () -> Void) { audio.onEnded = handler }
+
     private func present(_ controller: UIViewController) {
         let keyWindow = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.windows.first(where: \.isKeyWindow) }
@@ -190,4 +236,54 @@ private final class LazerPickerHandler: NSObject, PHPickerViewControllerDelegate
             }
         }
     }
+}
+
+/// Owns AVPlayer for the shared queue. Kotlin decides what plays next; this only makes it audible.
+private final class LazerAudio: NSObject {
+    var onEnded: (() -> Void)?
+
+    private var player: AVPlayer?
+
+    var positionSeconds: Double {
+        player?.currentTime().seconds ?? 0
+    }
+
+    var durationSeconds: Double {
+        guard let seconds = player?.currentItem?.duration.seconds, seconds.isFinite else { return 0 }
+        return max(0, seconds)
+    }
+
+    var isPlaying: Bool {
+        player?.timeControlStatus == .playing
+    }
+
+    func load(url: String, startPlaying: Bool, positionMillis: Double) {
+        guard let address = URL(string: url) else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let item = AVPlayerItem(url: address)
+        let next = AVPlayer(playerItem: item)
+        player = next
+        if positionMillis > 0 { next.seek(to: CMTime(seconds: positionMillis, preferredTimescale: 600)) }
+        if startPlaying { next.play() }
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(itemDidFinish), name: .AVPlayerItemDidPlayToEndTime, object: item
+        )
+    }
+
+    func play() { player?.play() }
+
+    func pause() { player?.pause() }
+
+    func seek(toSeconds seconds: Double) {
+        player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+    }
+
+    func release() {
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+    }
+
+    @objc private func itemDidFinish() { onEnded?() }
 }

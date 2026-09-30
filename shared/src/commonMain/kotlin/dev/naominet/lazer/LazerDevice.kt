@@ -102,9 +102,10 @@ interface LazerPlatformHost {
 
     fun deleteImportedImage(path: String)
 
-    fun writeExportedFile(target: String, bytes: ByteArray): Boolean
-
     fun deleteExportedFile(target: String)
+
+    /** Copies a remote file to [target]; the platform decides whether both steps can be one job. */
+    suspend fun saveRemoteFile(url: String, target: String): Boolean
 
     /** Fetches a cover at full size so the listener can keep it outside the app. */
     suspend fun downloadFile(url: String): ByteArray?

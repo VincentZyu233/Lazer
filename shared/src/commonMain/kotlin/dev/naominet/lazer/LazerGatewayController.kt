@@ -1191,8 +1191,7 @@ class LazerGatewayController(private val device: LazerDevice) {
             message = tr("cover.save.saving")
             val saved = withContext(Dispatchers.Default) {
                 runCatching {
-                    val bytes = host.downloadFile(url) ?: return@runCatching false
-                    host.writeExportedFile(target, bytes).also { written ->
+                    host.saveRemoteFile(url, target).also { written ->
                         if (!written) runCatching { host.deleteExportedFile(target) }
                     }
                 }.getOrDefault(false)

@@ -115,11 +115,13 @@ class AndroidHost(private val context: Context) : LazerPlatformHost {
         File(path).delete()
     }
 
-    override fun writeExportedFile(target: String, bytes: ByteArray): Boolean =
-        context.contentResolver.openOutputStream(Uri.parse(target), "w")?.use { output ->
+    override suspend fun saveRemoteFile(url: String, target: String): Boolean {
+        val bytes = downloadFile(url) ?: return false
+        return context.contentResolver.openOutputStream(Uri.parse(target), "w")?.use { output ->
             output.write(bytes)
             true
         } ?: false
+    }
 
     override fun deleteExportedFile(target: String) {
         runCatching { context.contentResolver.delete(Uri.parse(target), null, null) }
