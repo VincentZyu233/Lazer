@@ -151,6 +151,16 @@ class LyricEmphasizeTest {
     }
 
     @Test
+    fun theWordRiseCoversMostOfItsDistanceFirst() {
+        val word = TimedLyricWord(0L, 1_000L, "词")
+        fun liftAt(millis: Long): Float = -lyricWordFloatOffsetEm(word, millis) / SettledLyricWordFloatEm
+        // 先快后慢: a quarter of the time buys most of the travel, and the tail is barely moving.
+        assertTrue(liftAt(250L) > 0.5f)
+        assertTrue(liftAt(750L) > liftAt(250L))
+        assertTrue(1f - liftAt(750L) < 0.1f)
+    }
+
+    @Test
     fun aSungWordRisesToItsFloatHeightAndKeepsIt() {
         val word = TimedLyricWord(1_000L, 400L, "音")
         assertEquals(0f, lyricWordFloatOffsetEm(word, 900L), 0.0001f)

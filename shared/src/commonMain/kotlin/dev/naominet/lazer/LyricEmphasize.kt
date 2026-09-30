@@ -155,8 +155,12 @@ internal fun lyricWordFloatOffsetEm(word: TimedLyricWord, positionMillis: Long):
 /** The lift a finished word keeps, in em. */
 internal const val SettledLyricWordFloatEm = 0.05f
 
-/** CSS `ease-out`, which is what AMLL's word float runs on. */
-internal fun lyricEaseOut(x: Float): Float = cubicBezierEase(0f, 0f, EmpSharedX2, EmpSharedY2, x)
+/**
+ * The curve the word's rise follows. AMLL writes plain CSS `ease-out`, which over a whole second reads
+ * as a glide; this app wants the lift to look like a flick that settles, so the deceleration is
+ * stronger - most of the distance is covered at once and the last of it eases in.
+ */
+internal fun lyricEaseOut(x: Float): Float = cubicBezierEase(0f, 0f, 0.2f, 1f, x)
 
 private fun isLyricCjkCharacter(character: Char): Boolean =
     character.code in 0x3400..0x9FFF || character.code in 0xF900..0xFAFF
