@@ -131,6 +131,8 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 
     func playerDurationMillis() -> Int64 { audio.durationMillis }
 
+    func playerBufferedMillis() -> Int64 { audio.bufferedEndMillis }
+
     func playerIsPlaying() -> Bool { audio.isPlaying }
 
     func playerSetEndedHandler(handler: @escaping () -> Void) { audio.onEnded = handler }
@@ -188,6 +190,15 @@ private final class LazerAudio: NSObject {
     }
 
     var isPlaying: Bool { player?.timeControlStatus == .playing }
+
+    /// How far the audio has arrived. The shared seek bar paints that behind the playhead.
+    var bufferedEndMillis: Int64 {
+        guard let item = player?.currentItem, let value = item.loadedTimeRanges.first as? NSValue else {
+            return 0
+        }
+        let range = value.timeRangeValue
+        return Int64((CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)) * 1000)
+    }
 
     func load(url: String, startPlaying: Bool, positionMillis: Double) {
         guard let address = URL(string: url) else { return }

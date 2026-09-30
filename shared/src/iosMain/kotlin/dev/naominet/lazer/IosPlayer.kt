@@ -175,12 +175,19 @@ internal class IosPlayer(
         val position = bridge.playerPositionMillis()
         val duration = bridge.playerDurationMillis().takeIf { it > 0L } ?: track.durationMillis
         val playing = bridge.playerIsPlaying()
+        // The same share of the track the seek bar paints behind the playhead on Android.
+        val buffered = if (duration > 0L) {
+            ((bridge.playerBufferedMillis() - position).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
         LazerPlaybackStateStore.update(
             state.copy(
                 isPlaying = playing,
                 isPreparing = false,
                 positionMillis = position,
                 durationMillis = duration,
+                bufferedFraction = buffered,
             ),
         )
         if (!systemMedia) return

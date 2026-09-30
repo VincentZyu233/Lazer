@@ -64,6 +64,9 @@ interface IosShellBridge {
 
     fun playerDurationMillis(): Long
 
+    /** How far the audio has arrived, in milliseconds from the start of the track. */
+    fun playerBufferedMillis(): Long
+
     fun playerIsPlaying(): Boolean
 
     fun playerSetEndedHandler(handler: () -> Unit)
