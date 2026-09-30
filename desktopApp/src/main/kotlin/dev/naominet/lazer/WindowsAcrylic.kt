@@ -7,7 +7,7 @@ import com.sun.jna.Structure
 import java.awt.Window
 
 /**
- * Windows-only native backdrop for desktop Liquid Glass.
+ * Windows-only native acrylic backdrop for the desktop window.
  *
  * Uses the undocumented `user32!SetWindowCompositionAttribute` with an acrylic accent policy, which
  * asks DWM to blur the live operating-system content behind the window. This is the efficient,

@@ -41,14 +41,9 @@ internal object DesktopSettings {
             val stored = DesktopStateFile.get("appearance.style")?.let(::parseLazerStyle)
                 ?: run {
                     val legacyEngine = parseLazerThemeEngine(DesktopStateFile.get("appearance.theme_engine"))
-                    val legacyGlass = DesktopStateFile.get("appearance.liquid_glass")?.toBooleanStrictOrNull() ?: false
-                    when {
-                        legacyGlass -> LazerStyle.LIQUID_GLASS
-                        legacyEngine == LazerThemeEngine.MIUIX -> LazerStyle.MIUIX
-                        else -> LazerStyle.MATERIAL
-                    }
+                    if (legacyEngine == LazerThemeEngine.MIUIX) LazerStyle.MIUIX else LazerStyle.MATERIAL
                 }
-            return if (!isWindowsDesktop() && stored == LazerStyle.LIQUID_GLASS) LazerStyle.MATERIAL else stored
+            return stored
         }
         set(value) = DesktopStateFile.set("appearance.style", value.name)
 

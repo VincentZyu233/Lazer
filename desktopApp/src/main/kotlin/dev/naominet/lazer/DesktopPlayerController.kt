@@ -297,7 +297,6 @@ class DesktopPlayerController(
     var backgroundAlpha by mutableStateOf(DesktopSettings.backgroundAlpha)
         private set
     val themeEngine: LazerThemeEngine get() = style.themeEngine
-    val liquidGlassEnabled: Boolean get() = style.usesLiquidGlass
     var language by mutableStateOf(DesktopSettings.language)
         private set
     var lyricFollowDelayMillis by mutableStateOf(DesktopSettings.lyricFollowDelayMillis)

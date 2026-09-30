@@ -100,26 +100,12 @@ class LazerSettingsStore(private val preferences: LazerPreferences) {
             normalizeBackgroundImageBlurIntensity(value),
         )
 
-    var liquidGlassBlurIntensity: Float
-        get() = normalizeLiquidGlassBlurIntensity(
-            preferences.getFloat(
-                KEY_LIQUID_GLASS_BLUR_INTENSITY,
-                DEFAULT_LIQUID_GLASS_BLUR_INTENSITY,
-            ),
-        )
-        set(value) = preferences.putFloat(
-            KEY_LIQUID_GLASS_BLUR_INTENSITY,
-            normalizeLiquidGlassBlurIntensity(value),
-        )
-
-    /** Single appearance style. Migrates the legacy separate engine/glass keys on first read. */
+    /** Single appearance style. Migrates the legacy theme-engine key on first read. */
     var style: LazerStyle
         get() {
             preferences.getString(KEY_STYLE, null)?.let { return parseLazerStyle(it) }
             val legacyEngine = parseLazerThemeEngine(preferences.getString(KEY_THEME_ENGINE, null))
-            val legacyGlass = preferences.getBoolean(KEY_LIQUID_GLASS_ENABLED, false)
             return when {
-                legacyGlass -> LazerStyle.LIQUID_GLASS
                 legacyEngine == LazerThemeEngine.MIUIX -> LazerStyle.MIUIX
                 else -> LazerStyle.MATERIAL
             }
@@ -205,8 +191,6 @@ class LazerSettingsStore(private val preferences: LazerPreferences) {
         const val KEY_BACKGROUND_IMAGE_BLUR_ENABLED = "appearance.background_image_blur_enabled"
         const val KEY_BACKGROUND_IMAGE_BLUR_INTENSITY = "appearance.background_image_blur_intensity"
         const val KEY_THEME_ENGINE = "appearance.theme_engine"
-        const val KEY_LIQUID_GLASS_ENABLED = "appearance.liquid_glass"
-        const val KEY_LIQUID_GLASS_BLUR_INTENSITY = "appearance.liquid_glass_blur_intensity"
         const val KEY_LANGUAGE = "appearance.language"
         const val KEY_LYRIC_FOLLOW_DELAY = "lyrics.follow_delay_millis"
         const val KEY_LYRIC_ANIMATION_SPEED = "lyrics.animation_speed"

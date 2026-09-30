@@ -191,9 +191,9 @@ fun WindowScope.DesktopPlayerApp(
         ?.takeIf { controller.isPlaying }
         ?.let { "Lazer - ${it.title}" }
         ?: "Lazer"
-    // Liquid Glass on Windows keeps the native DWM acrylic backdrop active. App-rendered visual
-    // backgrounds are composited above it with transparency controlled by the content-opacity slider.
-    val osGlassRequested = isWindowsDesktop() && controller.style.usesLiquidGlass
+    // The liquid-glass style is gone, and with it the only switch that ever asked Windows for its
+    // native DWM acrylic backdrop. The rest of the acrylic plumbing stays in place, simply unasked.
+    val osGlassRequested = false
 
     val paletteColorScheme = remember(controller.palette, controller.isDark, controller.nowPlayingArtworkSeed) {
         when (val palette = controller.palette) {
@@ -2022,11 +2022,9 @@ private fun <T> DesktopSettingsDropdown(
     }
 }
 
-private val DesktopStyleOptions = LazerStyle.entries.filter { it != LazerStyle.LIQUID_GLASS }
+private val DesktopStyleOptions = LazerStyle.entries
 
-/** On desktop the Liquid Glass style is the native Windows Acrylic backdrop. */
-private fun desktopStyleLabel(style: LazerStyle): String =
-    if (style == LazerStyle.LIQUID_GLASS) tr("style.acrylic") else style.label
+private fun desktopStyleLabel(style: LazerStyle): String = style.label
 
 private fun paletteLabel(palette: LazerPalette): String = when (palette) {
     LazerPalette.Default -> tr("settings.palette.default")

@@ -181,10 +181,7 @@ class LazerGatewayController(private val device: LazerDevice) {
         private set
     var style by mutableStateOf(settings.style)
         private set
-    var liquidGlassBlurIntensity by mutableStateOf(settings.liquidGlassBlurIntensity)
-        private set
     val themeEngine: LazerThemeEngine get() = style.themeEngine
-    val liquidGlassEnabled: Boolean get() = style.usesLiquidGlass
     var language by mutableStateOf(settings.language)
         private set
     var lyricFollowDelayMillis by mutableStateOf(settings.lyricFollowDelayMillis)
@@ -893,6 +890,10 @@ class LazerGatewayController(private val device: LazerDevice) {
     init {
         LazerI18n.switchLanguage(language)
         observeListenTogetherPlayback()
+        // The player starts from its own defaults, so the saved audio choices have to be handed over
+        // once before the first track rather than only when the listener changes them.
+        player.updateExclusiveAudio(exclusiveAudio)
+        player.updatePlaybackInterface(playbackInterface == LazerPlaybackInterface.SYSTEM_MEDIA)
         scope.launch {
             loadLazerTranslations()
             loadBackgroundImage()
@@ -923,11 +924,6 @@ class LazerGatewayController(private val device: LazerDevice) {
     fun updateBackgroundImageBlurIntensity(value: Float) {
         backgroundImageBlurIntensity = normalizeBackgroundImageBlurIntensity(value)
         settings.backgroundImageBlurIntensity = backgroundImageBlurIntensity
-    }
-
-    fun updateLiquidGlassBlurIntensity(value: Float) {
-        liquidGlassBlurIntensity = normalizeLiquidGlassBlurIntensity(value)
-        settings.liquidGlassBlurIntensity = liquidGlassBlurIntensity
     }
 
     private suspend fun loadBackgroundImage() {

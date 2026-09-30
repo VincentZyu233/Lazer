@@ -74,6 +74,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -127,7 +129,6 @@ internal fun LazerLyricsViewport(
     lyricGlowEnabled: Boolean,
     lyricFontSizeSp: Int,
     showFullLyrics: Boolean,
-    glass: LazerLiquidGlass,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -151,19 +152,11 @@ internal fun LazerLyricsViewport(
     val displayLines = remember(timeline, renderedInterlude) {
         displayTimedLyricLines(timeline, renderedInterlude)
     }
-    val colors = MaterialTheme.colorScheme
     val clipboard = LocalClipboard.current
     val answerTap = rememberTapAnswer()
     val selectionScope = rememberCoroutineScope()
     val selection = remember(track?.id) { LazerLyricSelection() }
     val selectionKeys = remember(displayLines) { lyricLineKeys(displayLines) }
-    // A second, separate backdrop: the pill sits outside the sheet's own layer, and a layer cannot
-    // sample itself without feeding its own previous frame back through the glass.
-    val sheetGlass = rememberLazerLiquidGlass(
-        enabled = glass.isEnabled,
-        backgroundColor = colors.background,
-        blurIntensity = glass.blurIntensity,
-    )
 
     LaunchedEffect(selection.state.isActive) {
         if (!selection.state.isActive) selection.copied = false
@@ -199,13 +192,7 @@ internal fun LazerLyricsViewport(
                 showFullLyrics = showFullLyrics,
                 selection = selection,
                 onSeek = onSeek,
-                // Only while a passage is being picked: capturing a sheet that animates every frame
-                // would cost a full-screen layer copy for a pill that is not on screen.
-                modifier = Modifier
-                    .fillMaxSize()
-                    .then(
-                        if (selection.state.isActive) Modifier.captureLiquidGlass(sheetGlass) else Modifier,
-                    ),
+                modifier = Modifier.fillMaxSize(),
             )
             AnimatedVisibility(
                 visible = selection.state.isActive,
@@ -221,8 +208,6 @@ internal fun LazerLyricsViewport(
                 label = "lyric-selection-pill",
             ) {
                 LyricSelectionPill(
-                    glass = glass,
-                    sheetGlass = sheetGlass,
                     selectedCount = selection.state.selectedCount,
                     copied = selection.copied,
                     onSelectAll = {
@@ -335,7 +320,7 @@ private fun AnimatedLyricsViewport(
         speed = animationSpeed,
     )
     // The sheet gains a temporary safe area while the pill is up, so a marked line can rest clear of
-    // the glass rather than underneath it. It animates on the pill's own tempo so the two move as
+    // the pill rather than underneath it. It animates on the pill's own tempo so the two move as
     // one gesture.
     val selectionInsetPx by animateFloatAsState(
         targetValue = if (selection.state.isActive) with(density) { LyricSelectionSafeArea.toPx() } else 0f,
@@ -766,14 +751,12 @@ private fun AnimatedLyricsViewport(
 }
 
 /**
- * Selection's one control: a full-width glass bar on the same geometry as the transport card, so it
+ * Selection's one control: a full-width bar on the same geometry as the transport card, so it
  * reads as part of the page rather than a floating chip. It states how much is marked and what
  * copying does, and it rides the page's own easing.
  */
 @Composable
 private fun LyricSelectionPill(
-    glass: LazerLiquidGlass,
-    sheetGlass: LazerLiquidGlass,
     selectedCount: Int,
     copied: Boolean,
     onSelectAll: () -> Unit,
@@ -788,12 +771,7 @@ private fun LyricSelectionPill(
             .widthIn(max = 480.dp)
             .shadow(12.dp, shape, ambientColor = Color.Black, spotColor = Color.Black)
             .clip(shape)
-            .background(colors.surface.copy(alpha = if (glass.isEnabled) 0.66f else 0.97f), shape)
-            .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 12.dp)
-            // Second sample of its own backdrop: the lyric sheet. A layer cannot sample itself, so
-            // the sheet is captured into a separate glass and refracted over the cover-art one;
-            // without it the lines the bar actually covers vanish underneath.
-            .liquidGlassSurface(sheetGlass, shape, Color.Transparent, blurRadius = 12.dp)
+            .background(colors.surface.copy(alpha = 0.97f), shape)
             .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -826,23 +804,19 @@ private fun LyricSelectionPill(
             }
         }
         Spacer(Modifier.weight(1f))
-        LiquidGlassIconButton(
-            onClick = onSelectAll,
-            contentDescription = tr("lyrics.select.all"),
-            glass = glass,
-            size = LyricSelectionControlHeight,
-            tint = colors.onSurfaceVariant,
+        IconButton(
+            onClick = tapFeedback(onSelectAll),
+            modifier = Modifier.size(LyricSelectionControlHeight)
+                .semantics { this.contentDescription = tr("lyrics.select.all") },
         ) {
             Icon(Icons.Outlined.SelectAll, null, Modifier.size(22.dp))
         }
         // The action is an icon like its neighbours: a text capsule has to be measured before the
         // close control gets its turn, and at large font scales it ate the space the icons needed.
-        LiquidGlassIconButton(
-            onClick = onCopy,
-            contentDescription = tr("lyrics.select.copy"),
-            glass = glass,
-            size = LyricSelectionControlHeight,
-            tint = colors.primary,
+        IconButton(
+            onClick = tapFeedback(onCopy),
+            modifier = Modifier.size(LyricSelectionControlHeight)
+                .semantics { this.contentDescription = tr("lyrics.select.copy") },
         ) {
             Crossfade(
                 targetState = copied,
@@ -856,12 +830,10 @@ private fun LyricSelectionPill(
                 )
             }
         }
-        LiquidGlassIconButton(
-            onClick = onDismiss,
-            contentDescription = tr("lyrics.select.close"),
-            glass = glass,
-            size = LyricSelectionControlHeight,
-            tint = colors.onSurfaceVariant,
+        IconButton(
+            onClick = tapFeedback(onDismiss),
+            modifier = Modifier.size(LyricSelectionControlHeight)
+                .semantics { this.contentDescription = tr("lyrics.select.close") },
         ) {
             Icon(Icons.Outlined.Close, null, Modifier.size(22.dp))
         }

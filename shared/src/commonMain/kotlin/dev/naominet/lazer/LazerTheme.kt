@@ -59,24 +59,20 @@ fun parseLazerThemeEngine(value: String?): LazerThemeEngine =
     LazerThemeEngine.entries.firstOrNull { it.name == value } ?: LazerThemeEngine.MATERIAL3
 
 /**
- * Single user-facing appearance choice. Material, Miuix and Liquid Glass used to be separate
- * toggles; they are now one mutually exclusive style. Liquid Glass uses the Material component
- * engine underneath plus the glass effect layer.
+ * Single user-facing appearance choice. Material and Miuix used to be separate toggles; they are
+ * now one mutually exclusive style.
  */
 enum class LazerStyle(private val labelKey: String) {
     MATERIAL("style.material"),
-    MIUIX("style.miuix"),
-    LIQUID_GLASS("style.liquid_glass");
+    MIUIX("style.miuix");
 
     val label: String get() = tr(labelKey)
 
     val themeEngine: LazerThemeEngine
         get() = when (this) {
-            MATERIAL, LIQUID_GLASS -> LazerThemeEngine.MATERIAL3
+            MATERIAL -> LazerThemeEngine.MATERIAL3
             MIUIX -> LazerThemeEngine.MIUIX
         }
-
-    val usesLiquidGlass: Boolean get() = this == LIQUID_GLASS
 }
 
 fun parseLazerStyle(value: String?): LazerStyle =

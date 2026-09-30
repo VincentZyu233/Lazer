@@ -144,7 +144,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.rotate
@@ -201,17 +200,11 @@ import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import androidx.compose.ui.graphics.ImageBitmap
-import com.kashif_e.backdrop.backdrops.LayerBackdrop
-import com.kashif_e.backdrop.backdrops.layerBackdrop
-import com.kashif_e.backdrop.backdrops.rememberCombinedBackdrop
-import com.kashif_e.backdrop.backdrops.rememberLayerBackdrop
-import com.kashif_e.backdrop.drawBackdrop
-import com.kashif_e.backdrop.drawPlainBackdrop
-import com.kashif_e.backdrop.effects.blur
-import com.kashif_e.backdrop.effects.lens
-import com.kashif_e.backdrop.effects.vibrancy
-import com.kashif_e.backdrop.highlight.Highlight
-import com.kashif_e.backdrop.shadow.InnerShadow
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.layer.GraphicsLayer
+import androidx.compose.ui.graphics.layer.drawLayer
+import androidx.compose.ui.graphics.rememberGraphicsLayer
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.material.icons.outlined.Headphones
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
@@ -238,7 +231,7 @@ private const val PAGE_TRANSITION_MILLIS = LazerTokens.Motion.pageMillis
 private val LazerMotionEasing = LazerTokens.Motion.pageEasing
 
 // Extra bottom content padding for scrollable pages so their last rows stay reachable behind the
-// floating liquid-glass bottom controls.
+// floating landscape mini player.
 private val LocalLazerContentBottomInset = compositionLocalOf { 0.dp }
 
 private data class LazerCoverSaveRequest(val url: String, val title: String)
@@ -471,13 +464,25 @@ private fun Modifier.predictiveBackTransform(
     }
 }
 
+/** Records the fixed wallpaper canvas into [layer] so a moving page can repaint the same pixels. */
+private fun Modifier.capturePageBackground(layer: GraphicsLayer): Modifier =
+    drawWithContent {
+        layer.record(
+            this,
+            layoutDirection,
+            IntSize(size.width.roundToInt(), size.height.roundToInt()),
+        ) {
+            this@drawWithContent.drawContent()
+        }
+        drawLayer(layer)
+    }
+
 /** Paints the fixed wallpaper canvas inside a moving page, keeping transition seams hidden. */
-private fun Modifier.capturedPageBackground(backdrop: LayerBackdrop): Modifier =
-    drawPlainBackdrop(
-        backdrop = backdrop,
-        shape = { RectangleShape },
-        effects = {},
-    )
+private fun Modifier.capturedPageBackground(layer: GraphicsLayer): Modifier =
+    drawWithContent {
+        drawLayer(layer)
+        drawContent()
+    }
 
 @Composable
 private fun isLandscapeLayout(): Boolean =
@@ -497,142 +502,6 @@ private fun AdaptiveDetailHeader(artwork: @Composable () -> Unit, content: @Comp
             Spacer(Modifier.height(12.dp))
             content()
         }
-    }
-}
-
-@Composable
-internal fun LiquidGlassIconButton(
-    onClick: () -> Unit,
-    contentDescription: String,
-    glass: LazerLiquidGlass,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    tint: Color = Color.Unspecified,
-    size: Dp = 48.dp,
-    content: @Composable () -> Unit,
-) {
-    val tapped = tapFeedback(onClick)
-    if (!glass.isEnabled) {
-        IconButton(
-            onClick = tapped,
-            modifier = modifier.size(size).semantics { this.contentDescription = contentDescription },
-            enabled = enabled,
-            content = content,
-        )
-        return
-    }
-
-    val colors = MaterialTheme.colorScheme
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val pressProgress by animateFloatAsState(
-        targetValue = if (isPressed && enabled) 1f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium,
-        ),
-        label = "glass-icon-press",
-    )
-    var focused by remember { mutableStateOf(false) }
-    val contentColor = when {
-        !enabled -> colors.onSurface.copy(alpha = 0.38f)
-        tint.isSpecified -> colors.onPrimary
-        else -> colors.onSurface
-    }
-    CompositionLocalProvider(LocalContentColor provides contentColor) {
-        Box(
-            modifier
-                .liquidGlassControlSurface(
-                    glass = glass,
-                    shape = CircleShape,
-                    surfaceColor = colors.surface,
-                    tint = tint,
-                    pressProgress = pressProgress,
-                )
-                .size(size)
-                .then(
-                    if (focused) Modifier.border(2.dp, colors.primary, CircleShape) else Modifier,
-                )
-                .clip(CircleShape)
-                .onFocusChanged { focused = it.isFocused }
-                .clickable(
-                    interactionSource = interactionSource,
-                    indication = null,
-                    enabled = enabled,
-                    role = Role.Button,
-                    onClick = tapped,
-                )
-                .semantics { this.contentDescription = contentDescription },
-            contentAlignment = Alignment.Center,
-        ) {
-            content()
-        }
-    }
-}
-
-@Composable
-private fun LiquidGlassPillButton(
-    onClick: () -> Unit,
-    glass: LazerLiquidGlass,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    tint: Color = MaterialTheme.colorScheme.primary,
-    content: @Composable RowScope.() -> Unit,
-) {
-    val tapped = tapFeedback(onClick)
-    if (!glass.isEnabled) {
-        Button(
-            onClick = tapped,
-            modifier = modifier,
-            enabled = enabled,
-            shape = RoundedCornerShape(100.dp),
-            content = content,
-        )
-        return
-    }
-
-    val colors = MaterialTheme.colorScheme
-    val interactionSource = remember { MutableInteractionSource() }
-    val isPressed by interactionSource.collectIsPressedAsState()
-    val pressProgress by animateFloatAsState(
-        targetValue = if (isPressed && enabled) 1f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium,
-        ),
-        label = "glass-pill-press",
-    )
-    var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(100.dp)
-    val contentColor = if (enabled) colors.onPrimary else colors.onPrimary.copy(alpha = 0.45f)
-    CompositionLocalProvider(LocalContentColor provides contentColor) {
-        Row(
-            modifier
-                .liquidGlassControlSurface(
-                    glass = glass,
-                    shape = shape,
-                    surfaceColor = colors.surface,
-                    tint = tint,
-                    pressProgress = pressProgress,
-                )
-                .heightIn(min = 50.dp)
-                .then(
-                    if (focused) Modifier.border(2.dp, colors.onPrimary, shape) else Modifier,
-                )
-                .clip(shape)
-                .onFocusChanged { focused = it.isFocused }
-                .clickable(
-                    interactionSource = interactionSource,
-                    indication = null,
-                    enabled = enabled,
-                    role = Role.Button,
-                    onClick = tapped,
-                )
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            verticalAlignment = Alignment.CenterVertically,
-            content = content,
-        )
     }
 }
 
@@ -730,22 +599,6 @@ private fun SettingsCard(
         ) {
             content()
         }
-    }
-}
-
-@Composable
-private fun ExperimentalBadge() {
-    val colors = MaterialTheme.colorScheme
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = colors.secondaryContainer,
-        contentColor = colors.onSecondaryContainer,
-    ) {
-        Text(
-            tr("settings.glass.experimental"),
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            style = MaterialTheme.typography.labelSmall,
-        )
     }
 }
 
@@ -863,9 +716,6 @@ private fun LazerAppContent(
             "settings" -> controller.openSettings()
             "about" -> controller.openAbout()
             "login" -> controller.openLogin()
-            // The glass style samples what is behind each surface, which is the one visual the
-            // platforms are most likely to answer differently.
-            "glass" -> controller.updateStyle(LazerStyle.LIQUID_GLASS)
             "playlist" -> awaitLazerSmokeList(controller::featuredPlaylists).firstOrNull()
                 ?.let(controller::openPlaylist)
             "player", "comments", "queue" -> {
@@ -1008,27 +858,14 @@ private fun LazerAppContent(
         // The slider controls the opacity of app surfaces above visual backgrounds. The image or
         // artwork palette itself stays opaque, so navigation transitions never expose another page.
         val uiAlpha = resolveLazerUiAlpha(hasVisualBackground, controller.backgroundAlpha)
-        val pageBackgroundBackdrop = rememberLayerBackdrop()
-        val liquidGlass = rememberLazerLiquidGlass(
-            enabled = controller.liquidGlassEnabled,
-            backgroundColor = colors.background,
-            blurIntensity = controller.liquidGlassBlurIntensity,
-        )
+        val pageBackgroundBackdrop = rememberGraphicsLayer()
         val landscape = isLandscapeLayout()
         val floatingControlsInset = if (landscape) {
             if (playback.track != null) 60.dp + navigationBarBottomInset() else 0.dp
-        } else if (liquidGlass.isEnabled) {
-            navigationBarBottomInset() + if (playback.track != null) 176.dp else 104.dp
         } else {
             0.dp
         }
-        // The Liquid Glass playlist owns the status-bar backdrop. Do not leave the global
-        // wallpaper exposed above its artwork-derived background.
-        val playlistOwnsStatusBarBackdrop = liquidGlass.isEnabled && mainPage.kind == LazerMainPageKind.PLAYLIST
         Box(Modifier.fillMaxSize().background(colors.background)) {
-            // One opaque, full-window sampling plane: visual background first, page content next.
-            // Floating glass controls stay outside this box, so they never sample themselves.
-            Box(Modifier.fillMaxSize().captureLiquidGlass(liquidGlass)) {
             // Keep the wallpaper and its scrim in one fixed, capturable canvas. Animated pages
             // reuse this exact canvas, so their interiors and any exposed transition gaps match.
             Box(
@@ -1036,7 +873,7 @@ private fun LazerAppContent(
                     .fillMaxSize()
                     .then(
                         if (hasVisualBackground) {
-                            Modifier.layerBackdrop(pageBackgroundBackdrop)
+                            Modifier.capturePageBackground(pageBackgroundBackdrop)
                         } else {
                             Modifier
                         },
@@ -1097,7 +934,7 @@ private fun LazerAppContent(
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .height(if (landscape || playlistOwnsStatusBarBackdrop) 0.dp else statusBarTopInset()),
+                        .height(if (landscape) 0.dp else statusBarTopInset()),
                 )
                 Box(Modifier.weight(1f)) {
                     // Keep the root page mounted. Detail pages animate above it, so returning from
@@ -1108,7 +945,7 @@ private fun LazerAppContent(
                         onPlay = playFromQueue,
                         onListenTogether = controller::openListenTogether,
                         onScan = launchScanner,
-                        showHeaderControls = !liquidGlass.isEnabled || landscape,
+                        showHeaderControls = true,
                         modifier = Modifier.fillMaxSize(),
                     )
                     AnimatedContent(
@@ -1184,9 +1021,6 @@ private fun LazerAppContent(
                                         tracks = page.tracks,
                                         isLoading = page.isLoading,
                                         currentId = playback.track?.id,
-                                        isPlaying = playback.isPlaying && !playerVisible,
-                                        liquidGlassEnabled = controller.liquidGlassEnabled,
-                                        liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                                         onBack = controller::closePlaylist,
                                         onPlay = playFromQueue,
                                     )
@@ -1196,7 +1030,7 @@ private fun LazerAppContent(
                         }
                     }
                 }
-                if (!liquidGlass.isEnabled && !landscape) {
+                if (!landscape) {
                     playback.track?.let { track ->
                         MiniPlayer(track, playback.isPlaying, playback.isPreparing, { playerVisible = true }) {
                             controller.player.toggle()
@@ -1209,50 +1043,6 @@ private fun LazerAppContent(
                 }
             }
             }
-            }
-
-            if (liquidGlass.isEnabled && !landscape && mainPage.kind == LazerMainPageKind.ROOT) {
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(top = 12.dp, end = 20.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    LiquidGlassIconButton(
-                        onClick = launchScanner,
-                        contentDescription = tr("scan.open"),
-                        glass = liquidGlass,
-                    ) {
-                        Icon(Icons.Outlined.QrCodeScanner, null)
-                    }
-                    LiquidGlassIconButton(
-                        onClick = controller::openListenTogether,
-                        contentDescription = tr("listen_together.open"),
-                        glass = liquidGlass,
-                        tint = if (controller.listenTogether != null) colors.primary else Color.Unspecified,
-                    ) {
-                        Icon(Icons.Outlined.Headphones, null)
-                    }
-                    LiquidGlassIconButton(
-                        onClick = controller::toggleTheme,
-                        contentDescription = tr("player.toggle_theme"),
-                        glass = liquidGlass,
-                    ) {
-                        Icon(
-                            if (controller.isDark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode,
-                            null,
-                        )
-                    }
-                    LiquidGlassIconButton(
-                        onClick = controller::openSettings,
-                        contentDescription = tr("player.open_settings"),
-                        glass = liquidGlass,
-                    ) {
-                        Icon(Icons.Outlined.Settings, null)
-                    }
-                }
-            }
 
             if (landscape) {
                 LandscapeNavigationRail(
@@ -1261,7 +1051,7 @@ private fun LazerAppContent(
                     modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
-            if (liquidGlass.isEnabled || landscape) {
+            if (landscape) {
                 Column(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                     .padding(start = if (landscape) 64.dp else 0.dp)
                     .then(if (landscape) Modifier.navigationBarsPadding() else Modifier)) {
@@ -1271,16 +1061,10 @@ private fun LazerAppContent(
                             isPlaying = playback.isPlaying,
                             isPreparing = playback.isPreparing,
                             onOpen = { playerVisible = true },
-                            glass = liquidGlass,
                             compact = landscape,
                             onToggle = { controller.player.toggle() },
                         )
                     }
-                    if (!landscape) LiquidGlassBottomDock(
-                        selected = controller.destination,
-                        onSelect = controller::selectDestination,
-                        glass = liquidGlass,
-                    )
                 }
             }
 
@@ -1288,14 +1072,12 @@ private fun LazerAppContent(
                 MessageBanner(
                     text = text,
                     modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(16.dp),
-                    glass = liquidGlass,
                 )
             }
             rootMessage?.let { text ->
                 MessageBanner(
                     text = text,
                     modifier = Modifier.align(Alignment.TopCenter).safeDrawingPadding().padding(16.dp),
-                    glass = liquidGlass,
                 )
             }
             AnimatedVisibility(
@@ -1320,8 +1102,6 @@ private fun LazerAppContent(
                     lyricAnimationSpeed = controller.lyricAnimationSpeed,
                     wordLyricsEnabled = controller.wordLyricsEnabled,
                     lyricGlowEnabled = controller.lyricGlowEnabled,
-                    liquidGlassEnabled = controller.liquidGlassEnabled,
-                    liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                     lyricFontSizeSp = controller.lyricFontSizeSp,
                     showFullLyrics = controller.showFullLyrics,
                     animateAlbumBackground = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_DYNAMIC,
@@ -1362,7 +1142,7 @@ private fun LazerAppContent(
                     onDismiss = controller::closeSongComments,
                 )
             }
-            if (controller.isLoginVisible) LoginSheet(controller, liquidGlass)
+            if (controller.isLoginVisible) LoginSheet(controller)
             pendingQrAuthorizationUrl?.let { url ->
                 NeteaseQrAuthorizationSheet(
                     url = url,
@@ -1596,36 +1376,24 @@ private fun HomePage(controller: LazerGatewayController, currentId: Long?, onPla
 
 @Composable
 private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
-    val colors = MaterialTheme.colorScheme
-    val searchGlass = rememberLazerLiquidGlass(
-        enabled = controller.liquidGlassEnabled,
-        backgroundColor = colors.background,
-        blurIntensity = controller.liquidGlassBlurIntensity,
-    )
-    val searchShape = RoundedCornerShape(28.dp)
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
-            modifier = Modifier.fillMaxSize().captureLiquidGlass(searchGlass),
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item { Text(tr("search.title"), style = MaterialTheme.typography.headlineMedium) }
-            if (searchGlass.isEnabled) {
-                // The fixed search control floats above this reserved space and samples the list.
-                item { Spacer(Modifier.height(58.dp)) }
-            } else {
-                item {
-                    OutlinedTextField(
-                        value = controller.searchQuery,
-                        onValueChange = controller::updateSearchQuery,
-                        modifier = Modifier.fillMaxWidth(),
-                        leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                        placeholder = { Text(tr("search.hint")) },
-                        singleLine = true,
-                        shape = RoundedCornerShape(16.dp),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    )
-                }
+            item {
+                OutlinedTextField(
+                    value = controller.searchQuery,
+                    onValueChange = controller::updateSearchQuery,
+                    modifier = Modifier.fillMaxWidth(),
+                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                    placeholder = { Text(tr("search.hint")) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                )
             }
             when {
                 controller.searchQuery.isBlank() -> item { QuietState(tr("search.empty")) }
@@ -1634,39 +1402,6 @@ private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onP
                 else -> items(controller.searchResults, key = LazerTrack::id) {
                     TrackRow(it, it.id == currentId) { onPlay(it) }
                 }
-            }
-        }
-        if (searchGlass.isEnabled) {
-            Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, top = 48.dp, end = 16.dp),
-            ) {
-                OutlinedTextField(
-                    value = controller.searchQuery,
-                    onValueChange = controller::updateSearchQuery,
-                    modifier = Modifier
-                        .liquidGlassFrostedSurface(
-                            glass = searchGlass,
-                            shape = searchShape,
-                            surfaceColor = colors.surface,
-                            blurRadius = 6.dp,
-                        )
-                        .fillMaxWidth(),
-                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                    placeholder = { Text(tr("search.hint")) },
-                    singleLine = true,
-                    shape = searchShape,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        disabledContainerColor = Color.Transparent,
-                        focusedBorderColor = colors.primary.copy(alpha = 0.62f),
-                        unfocusedBorderColor = Color.Transparent,
-                    ),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                )
             }
         }
     }
@@ -1826,45 +1561,6 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         selected = controller.style,
                         onSelected = controller::updateStyle,
                     )
-                }
-            }
-        }
-        if (controller.liquidGlassEnabled) {
-            item {
-                SettingsCard {
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    tr("settings.glass.blur.title"),
-                                    style = MaterialTheme.typography.titleSmall,
-                                )
-                                Text(
-                                    tr("settings.glass.blur.hint"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = colors.onSurfaceVariant,
-                                )
-                            }
-                            Spacer(Modifier.width(12.dp))
-                            Text(
-                                "${(controller.liquidGlassBlurIntensity * 100).roundToInt()}%",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = colors.primary,
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
-                        TapSlider(
-                            engine = controller.themeEngine,
-                            value = controller.liquidGlassBlurIntensity,
-                            onValueChange = controller::updateLiquidGlassBlurIntensity,
-                            modifier = Modifier.fillMaxWidth(),
-                            valueRange = 0f..1f,
-                        )
-                    }
                 }
             }
         }
@@ -3586,42 +3282,19 @@ private fun PlaylistDetail(
     tracks: List<LazerTrack>,
     isLoading: Boolean,
     currentId: Long?,
-    isPlaying: Boolean,
-    liquidGlassEnabled: Boolean,
-    liquidGlassBlurIntensity: Float,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
     onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
 ) {
-    val colors = MaterialTheme.colorScheme
-    val pageGlass = rememberLazerLiquidGlass(
-        enabled = liquidGlassEnabled,
-        backgroundColor = colors.background,
-        blurIntensity = liquidGlassBlurIntensity,
+    StandardPlaylistDetail(
+        playlist = playlist,
+        tracks = tracks,
+        isLoading = isLoading,
+        currentId = currentId,
+        modifier = modifier,
+        onBack = onBack,
+        onPlay = onPlay,
     )
-    if (pageGlass.isEnabled) {
-        LiquidGlassPlaylistDetail(
-            playlist = playlist,
-            tracks = tracks,
-            isLoading = isLoading,
-            currentId = currentId,
-            isPlaying = isPlaying,
-            glass = pageGlass,
-            modifier = modifier,
-            onBack = onBack,
-            onPlay = onPlay,
-        )
-    } else {
-        StandardPlaylistDetail(
-            playlist = playlist,
-            tracks = tracks,
-            isLoading = isLoading,
-            currentId = currentId,
-            modifier = modifier,
-            onBack = onBack,
-            onPlay = onPlay,
-        )
-    }
 }
 
 @Composable
@@ -3684,268 +3357,6 @@ private fun StandardPlaylistDetail(
                 text = { Text(tr("playlist.locate"), style = MaterialTheme.typography.labelLarge) },
             )
         }
-    }
-}
-
-@Composable
-private fun LiquidGlassPlaylistDetail(
-    playlist: LazerPlaylist,
-    tracks: List<LazerTrack>,
-    isLoading: Boolean,
-    currentId: Long?,
-    isPlaying: Boolean,
-    glass: LazerLiquidGlass,
-    modifier: Modifier = Modifier,
-    onBack: () -> Unit,
-    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
-) {
-    val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
-    val colors = MaterialTheme.colorScheme
-    val currentTrackIndex = tracks.indexOfFirst { it.id == currentId }
-    // Keep the cover as the visual anchor without making it dominate the song list.
-    val windowWidth = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.width.toDp() }
-    val artworkSize = if (isLandscapeLayout()) 112.dp else (windowWidth * 0.44f).coerceIn(140.dp, 200.dp)
-    val primaryText = Color(0xFFF4FAFD)
-    val secondaryText = primaryText.copy(alpha = 0.78f)
-    val prominentInk = Color(0xFF183246)
-    val artworkShape = RoundedCornerShape(28.dp)
-    val hasTracks = tracks.isNotEmpty()
-    // Two backdrops, kept apart on purpose. The hero controls sit inside the list and sample the
-    // flow background; the back button sits outside the list and samples the pair. Neither samples
-    // a layer that contains it, which is what keeps the capture acyclic.
-    val backGlass = rememberLazerLiquidGlass(
-        enabled = glass.isEnabled,
-        backgroundColor = colors.background,
-        blurIntensity = glass.blurIntensity,
-    )
-
-    Box(modifier.fillMaxSize()) {
-        // Everything the back button samples: the flow background plus the list that scrolls under
-        // it.
-        Box(Modifier.fillMaxSize().captureLiquidGlass(backGlass)) {
-            LazerPlaylistFlowBackground(
-                playlist = playlist,
-                modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
-                cornerRadius = 0.dp,
-                veil = Color(0xFF0B2637).copy(alpha = 0.82f),
-            )
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize().then(if (isLandscapeLayout()) Modifier else Modifier.statusBarsPadding()),
-                contentPadding = PaddingValues(
-                    top = 39.dp,
-                    bottom = 28.dp + LocalLazerContentBottomInset.current,
-                ),
-            ) {
-                item(key = "playlist-hero") {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        AdaptiveDetailHeader(artwork = {
-                        MobileArtwork(
-                            url = playlist.coverUrl,
-                            label = playlist.title,
-                            modifier = Modifier
-                                .size(artworkSize)
-                                .border(1.dp, Color.White.copy(alpha = 0.20f), artworkShape),
-                            cornerRadius = 28.dp,
-                        )
-                        }) {
-                        Text(
-                            text = playlist.title,
-                            style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = primaryText,
-                            textAlign = TextAlign.Center,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        if (playlist.subtitle.isNotBlank()) {
-                            Spacer(Modifier.height(7.dp))
-                            Text(
-                                text = playlist.subtitle,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = primaryText.copy(alpha = 0.88f),
-                                textAlign = TextAlign.Center,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        Spacer(Modifier.height(5.dp))
-                        Text(
-                            text = tr("playlist.tracks", tracks.size.takeIf { it > 0 } ?: playlist.trackCount),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = secondaryText,
-                        )
-                        }
-                        Spacer(Modifier.height(12.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            LiquidGlassIconButton(
-                                onClick = {
-                                    val shuffled = tracks.shuffled()
-                                    shuffled.firstOrNull()?.let { onPlay(shuffled, it) }
-                                },
-                                contentDescription = tr("player.shuffle"),
-                                glass = glass,
-                                enabled = hasTracks,
-                                size = 56.dp,
-                            ) {
-                                Icon(
-                                    Icons.Filled.Shuffle,
-                                    null,
-                                    Modifier.size(24.dp),
-                                    tint = primaryText.copy(alpha = if (hasTracks) 1f else 0.38f),
-                                )
-                            }
-                            LiquidGlassPillButton(
-                                onClick = { tracks.firstOrNull()?.let { onPlay(tracks, it) } },
-                                glass = glass,
-                                modifier = Modifier.widthIn(min = 152.dp, max = 210.dp),
-                                enabled = hasTracks,
-                                tint = Color.White.copy(alpha = if (hasTracks) 1f else 0.42f),
-                            ) {
-                                Icon(
-                                    Icons.Filled.PlayArrow,
-                                    null,
-                                    Modifier.size(22.dp),
-                                    tint = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
-                                )
-                                Text(
-                                    tr("playlist.play_all"),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = prominentInk.copy(alpha = if (hasTracks) 1f else 0.44f),
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                            }
-                            if (currentTrackIndex >= 0) {
-                                LiquidGlassIconButton(
-                                    onClick = {
-                                        scope.launch { listState.animateScrollToItem(currentTrackIndex + 1) }
-                                    },
-                                    contentDescription = tr("playlist.locate"),
-                                    glass = glass,
-                                    size = 56.dp,
-                                ) {
-                                    Icon(Icons.Outlined.MyLocation, null, Modifier.size(23.dp), tint = primaryText)
-                                }
-                            } else {
-                                Spacer(Modifier.size(56.dp))
-                            }
-                        }
-                        Spacer(Modifier.height(28.dp))
-                    }
-                }
-
-                if (tracks.isEmpty()) {
-                    item(key = "playlist-state") {
-                        Text(
-                            text = if (isLoading) tr("playlist.opening") else tr("playlist.empty"),
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 34.dp),
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = secondaryText,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                } else {
-                    itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
-                        LiquidGlassPlaylistTrackRow(
-                            index = index,
-                            track = track,
-                            current = track.id == currentId,
-                            isPlaying = isPlaying,
-                            primaryText = primaryText,
-                            secondaryText = secondaryText,
-                            onClick = { onPlay(tracks, track) },
-                        )
-                    }
-                }
-            }
-        }
-
-        LiquidGlassIconButton(
-            onClick = onBack,
-            contentDescription = tr("playlist.back"),
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .statusBarsPadding()
-                .padding(start = 18.dp, top = 6.dp),
-            glass = backGlass,
-            size = 56.dp,
-        ) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, null, Modifier.size(27.dp), tint = primaryText)
-        }
-    }
-}
-
-@Composable
-private fun LiquidGlassPlaylistTrackRow(
-    index: Int,
-    track: LazerTrack,
-    current: Boolean,
-    isPlaying: Boolean,
-    primaryText: Color,
-    secondaryText: Color,
-    onClick: () -> Unit,
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
-                .background(if (current) Color.White.copy(alpha = 0.09f) else Color.Transparent)
-                .tapClickable(role = Role.Button, onClick = onClick)
-                .padding(start = 20.dp, end = 22.dp, top = 13.dp, bottom = 13.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(Modifier.width(36.dp), contentAlignment = Alignment.CenterStart) {
-                if (current) {
-                    NowPlayingBars(color = primaryText, isPlaying = isPlaying)
-                } else {
-                    Text(
-                        text = (index + 1).toString(),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = secondaryText,
-                    )
-                }
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = primaryText,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                TranslatedTrackTitle(track.translatedTitle, secondaryText)
-                if (track.artist.isNotBlank()) {
-                    LazerArtistNames(
-                        artists = track.artists,
-                        fallback = track.artist,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = secondaryText,
-                    )
-                }
-            }
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = track.durationLabel,
-                style = MaterialTheme.typography.labelSmall,
-                color = secondaryText,
-            )
-        }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = 56.dp, end = 20.dp)
-                .height(1.dp)
-                .background(Color.White.copy(alpha = 0.12f)),
-        )
     }
 }
 
@@ -4329,20 +3740,19 @@ private fun MiniPlayer(
     isPlaying: Boolean,
     isPreparing: Boolean,
     onOpen: () -> Unit,
-    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
     compact: Boolean = false,
     onToggle: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val content: @Composable () -> Unit = {
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = if (compact) 12.dp else if (glass.isEnabled) 14.dp else 20.dp),
+            Modifier.fillMaxWidth().padding(horizontal = if (compact) 12.dp else 20.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             MobileArtwork(
                 track.coverUrl,
                 track.title,
-                Modifier.size(if (compact) 40.dp else if (glass.isEnabled) 44.dp else 48.dp),
+                Modifier.size(if (compact) 40.dp else 48.dp),
                 if (compact) 10.dp else 12.dp,
                 saveOnLongPress = true,
             )
@@ -4370,8 +3780,8 @@ private fun MiniPlayer(
                 onClick = tapFeedback(onToggle),
                 modifier = Modifier.size(42.dp),
                 colors = IconButtonDefaults.iconButtonColors(
-                    containerColor = if (glass.isEnabled) Color.Transparent else colors.primaryContainer,
-                    contentColor = if (glass.isEnabled) colors.onSurface else colors.onPrimaryContainer,
+                    containerColor = colors.primaryContainer,
+                    contentColor = colors.onPrimaryContainer,
                 ),
             ) {
                 Icon(
@@ -4382,29 +3792,12 @@ private fun MiniPlayer(
         }
     }
 
-    if (glass.isEnabled) {
-        val shape = RoundedCornerShape(if (compact) 24.dp else 36.dp)
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .padding(start = if (compact) 8.dp else 16.dp, end = if (compact) 8.dp else 16.dp, bottom = if (compact) 0.dp else 2.dp)
-                .height(if (compact) 60.dp else 72.dp)
-                .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 10.dp)
-                .clip(shape)
-                .tapClickable(role = Role.Button, onClick = onOpen)
-                .semantics { contentDescription = tr("player.now_playing") },
-            contentAlignment = Alignment.Center,
-        ) {
-            content()
-        }
-    } else {
-        Surface(
-            modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).tapClickable(role = Role.Button, onClick = onOpen),
-            color = colors.surface.copy(alpha = 0.98f * LocalLazerUiAlpha.current),
-            border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.78f)),
-            content = content,
-        )
-    }
+    Surface(
+        modifier = Modifier.fillMaxWidth().height(if (compact) 60.dp else 76.dp).tapClickable(role = Role.Button, onClick = onOpen),
+        color = colors.surface.copy(alpha = 0.98f * LocalLazerUiAlpha.current),
+        border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.78f)),
+        content = content,
+    )
 }
 
 @Composable
@@ -4477,329 +3870,6 @@ private fun statusBarTopInset(): Dp =
     WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
 @Composable
-private fun LiquidGlassBottomDock(
-    selected: LazerRootDestination,
-    onSelect: (LazerRootDestination) -> Unit,
-    glass: LazerLiquidGlass,
-) {
-    val colors = MaterialTheme.colorScheme
-    val pageBackdrop = glass.backdrop ?: return
-    val isDark = colors.background.luminance() < 0.5f
-    val searchDestination = LazerRootDestination.SEARCH
-    val destinations = LazerRootDestination.entries.filterNot { it == searchDestination }
-    val barShape = RoundedCornerShape(30.dp)
-    val selectorShape = RoundedCornerShape(22.dp)
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    // While a long press is active the droplet follows the finger; otherwise `pressCenter` is null
-    // and the droplet rests under the selected tab.
-    var pressCenter by remember { mutableStateOf<Offset?>(null) }
-    var pressedDestination by remember { mutableStateOf<LazerRootDestination?>(null) }
-    // Set briefly on a tap while the droplet slides to the tapped tab. During the slide every icon
-    // except the target drops behind the droplet, so only the target stays on top.
-    var switchingTo by remember { mutableStateOf<LazerRootDestination?>(null) }
-    var keyboardFocusedDestination by remember { mutableStateOf<LazerRootDestination?>(null) }
-    var lastMainDestination by remember {
-        mutableStateOf(selected.takeUnless { it == searchDestination } ?: destinations.first())
-    }
-    LaunchedEffect(selected) {
-        if (selected != searchDestination) lastMainDestination = selected
-    }
-    val activeDestination = pressedDestination ?: lastMainDestination
-    val activeIndex = destinations.indexOf(activeDestination).coerceAtLeast(0)
-    // Captures the bar glass only, so the droplet can refract it as a second nested lens. The
-    // droplet is a sibling of this layer, so there is no cycle.
-    val dockBackdrop = rememberLayerBackdrop()
-    val nestedGlass = rememberCombinedBackdrop(pageBackdrop, dockBackdrop)
-
-    // Manual bottom gesture-bar inset instead of navigationBarsPadding, so the floating glass dock
-    // and a custom wallpaper do not fight over the system nav-bar region.
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp + navigationBarBottomInset()),
-    ) {
-        BoxWithConstraints(Modifier.fillMaxWidth().padding(end = 72.dp)) {
-        val slotWidth = maxWidth / destinations.size
-        val slotWidthPx = with(density) { slotWidth.toPx() }
-        val selectorWidth = slotWidth - 10.dp
-        val isDragging = pressCenter != null
-        val selectorExpansion by animateDpAsState(
-            targetValue = if (isDragging) 6.dp else 0.dp,
-            animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium),
-            label = "selector-expansion",
-        )
-        val selectorLift by animateDpAsState(
-            targetValue = if (isDragging) 2.dp else 0.dp,
-            animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium),
-            label = "selector-lift",
-        )
-        val pressedIconScale by animateFloatAsState(
-            targetValue = if (isDragging) 1.08f else 1f,
-            animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMedium),
-            label = "pressed-icon-scale",
-        )
-        val renderedSelectorWidth = selectorWidth + selectorExpansion
-        val renderedSelectorHeight = 50.dp + selectorExpansion
-        val selectorCenterX by animateDpAsState(
-            targetValue = with(density) {
-                val halfSelectorWidth = renderedSelectorWidth.toPx() / 2f
-                val rawCenter = pressCenter?.x ?: (slotWidthPx * activeIndex + slotWidthPx / 2f)
-                rawCenter.coerceIn(
-                    minimumValue = halfSelectorWidth,
-                    maximumValue = maxWidth.toPx() - halfSelectorWidth,
-                ).toDp()
-            },
-            animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
-            label = "selector-x",
-        )
-
-        // Render priority: 0 = above the glass, 1 = behind it (captured into dockBackdrop so the
-        // droplet refracts it). At rest every icon is priority 0. While a long press is active, or
-        // during a tap-to-switch, non-target icons become priority 1.
-        LaunchedEffect(switchingTo) {
-            if (switchingTo != null) {
-                kotlinx.coroutines.delay(420)
-                switchingTo = null
-            }
-        }
-        val renderIcons: @Composable (visible: (LazerRootDestination) -> Boolean) -> Unit = { visible ->
-            Row(Modifier.fillMaxSize().clearAndSetSemantics { }) {
-                destinations.forEach { destination ->
-                    // Always keep the slot so both layers stay aligned; only the content toggles.
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .fillMaxHeight(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (visible(destination)) {
-                            val active = destination == activeDestination &&
-                                (isDragging || selected != searchDestination)
-                            val isPressedTarget = isDragging && active
-                            val activeColor = if (isPressedTarget) colors.primary else colors.onSurface
-                            Column(
-                                modifier = Modifier.graphicsLayer {
-                                    val scale = if (isPressedTarget) pressedIconScale else 1f
-                                    scaleX = scale
-                                    scaleY = scale
-                                },
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                            ) {
-                                Icon(
-                                    destination.icon(),
-                                    null,
-                                    Modifier.size(20.dp),
-                                    tint = if (active) activeColor else colors.onSurfaceVariant,
-                                )
-                                Text(
-                                    destination.label,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (active) activeColor else colors.onSurfaceVariant,
-                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                    maxLines = 1,
-                                    softWrap = false,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        val priorityOne: (LazerRootDestination) -> Boolean = when {
-            pressCenter != null -> { destination -> destination != activeDestination }
-            switchingTo != null -> { destination -> destination != switchingTo }
-            else -> { _ -> false }
-        }
-        val priorityZero: (LazerRootDestination) -> Boolean = { destination -> !priorityOne(destination) }
-
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(64.dp)
-                // One gesture handler for the whole bar: quick release selects a tab, holding ~0.5s
-                // starts the finger-following droplet. Per-item clickable is intentionally omitted
-                // so it cannot swallow the long press.
-                .pointerInput(slotWidthPx) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        val downIndex = (down.position.x / slotWidthPx).toInt()
-                            .coerceIn(0, destinations.lastIndex)
-                        val longPress = awaitLongPressOrCancellation(down.id)
-                        if (longPress == null) {
-                            val target = destinations[downIndex]
-                            switchingTo = target
-                            onSelect(target)
-                            return@awaitEachGesture
-                        }
-                        pressCenter = longPress.position
-                        pressedDestination = destinations.getOrNull(
-                            (longPress.position.x / slotWidthPx).toInt(),
-                        ) ?: destinations[downIndex]
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                            if (!change.pressed) break
-                            pressCenter = change.position
-                            pressedDestination = destinations.getOrNull(
-                                (change.position.x / slotWidthPx).toInt(),
-                            ) ?: pressedDestination
-                            change.consume()
-                        }
-                        pressedDestination?.let(onSelect)
-                        pressCenter = null
-                        pressedDestination = null
-                    }
-                },
-        ) {
-            // Layer 1: the thick glass bar. Captured into dockBackdrop for the droplet to sample.
-            // While pressing, the icons live here too (priority 1) so the droplet can refract them.
-            Box(Modifier.fillMaxSize().layerBackdrop(dockBackdrop)) {
-                // Near-colourless thick glass: strong lens refraction + chromatic dispersion, a
-                // very faint milky surface, ambient edge highlight and inner shadow for depth.
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .drawBackdrop(
-                            backdrop = pageBackdrop,
-                            shape = { barShape },
-                            effects = {
-                                vibrancy()
-                                blur(glass.scaledBlurRadius(8.dp).toPx())
-                                lens(
-                                    refractionHeight = 16.dp.toPx(),
-                                    refractionAmount = 28.dp.toPx(),
-                                    depthEffect = true,
-                                    chromaticAberration = false,
-                                )
-                            },
-                            highlight = { Highlight.Plain.copy(alpha = 0.58f) },
-                            innerShadow = { InnerShadow(radius = 8.dp, color = Color.Black.copy(alpha = 0.06f)) },
-                            onDrawSurface = {
-                                drawRect(colors.surface.copy(alpha = if (isDark) 0.20f else 0.28f))
-                            },
-                        ),
-                )
-                renderIcons(priorityOne)
-            }
-
-            // Layer 2: the selected droplet. Always an empty lens; it never draws an icon, so there
-            // is nothing to fly in when it returns to its slot.
-            Box(
-                Modifier
-                    .graphicsLayer {
-                        alpha = if (selected == searchDestination && !isDragging) 0f else 1f
-                    }
-                    .offset {
-                        IntOffset(
-                            x = (selectorCenterX.toPx() - renderedSelectorWidth.toPx() / 2f).roundToInt(),
-                            y = (((64.dp - renderedSelectorHeight) / 2f) - selectorLift).toPx().roundToInt(),
-                        )
-                    }
-                    .size(renderedSelectorWidth, renderedSelectorHeight)
-                    .drawBackdrop(
-                        backdrop = nestedGlass,
-                        shape = { selectorShape },
-                        effects = {
-                            vibrancy()
-                            blur(
-                                glass.scaledBlurRadius(
-                                    if (isDragging) 4.dp else 2.5.dp,
-                                ).toPx(),
-                            )
-                            lens(
-                                refractionHeight = 14.dp.toPx(),
-                                refractionAmount = 32.dp.toPx(),
-                                depthEffect = true,
-                                chromaticAberration = false,
-                            )
-                        },
-                        highlight = { Highlight.Plain.copy(alpha = 0.76f) },
-                        innerShadow = { InnerShadow(radius = 7.dp, color = Color.Black.copy(alpha = 0.06f)) },
-                        onDrawSurface = {
-                            drawRect(
-                                colors.primaryContainer.copy(
-                                    alpha = when {
-                                        isDragging && isDark -> 0.34f
-                                        isDragging -> 0.42f
-                                        isDark -> 0.24f
-                                        else -> 0.32f
-                                    },
-                                ),
-                            )
-                        },
-                    ),
-            )
-
-            // Layer 3 (priority 0): icons above the glass. During a press/switch only the target
-            // remains crisp and readable while neighboring icons are refracted underneath.
-            renderIcons(priorityZero)
-
-            // A separate, visually transparent interaction layer keeps the custom drag gesture
-            // intact while exposing the main-tab actions to accessibility services and
-            // keyboards. Search is the independent circular action beside this pill.
-            Row(Modifier.fillMaxSize()) {
-                destinations.forEach { destination ->
-                    val focused = keyboardFocusedDestination == destination
-                    val destinationSelected = destination == selected
-                    Box(
-                        Modifier
-                            .weight(1f)
-                            .fillMaxHeight()
-                            .padding(4.dp)
-                            .then(
-                                if (focused) {
-                                    Modifier.border(2.dp, colors.primary, RoundedCornerShape(16.dp))
-                                } else {
-                                    Modifier
-                                },
-                            )
-                            .semantics {
-                                contentDescription = destination.label
-                                role = Role.Tab
-                                this.selected = destinationSelected
-                                onClick {
-                                    switchingTo = destination
-                                    onSelect(destination)
-                                    true
-                                }
-                            }
-                            .onFocusChanged { state ->
-                                if (state.isFocused) {
-                                    keyboardFocusedDestination = destination
-                                } else if (keyboardFocusedDestination == destination) {
-                                    keyboardFocusedDestination = null
-                                }
-                            }
-                            .onKeyEvent { event ->
-                                val activates = event.type == KeyEventType.KeyUp &&
-                                    (event.key == Key.Enter || event.key == Key.DirectionCenter)
-                                if (activates) {
-                                    switchingTo = destination
-                                    onSelect(destination)
-                                }
-                                activates
-                            }
-                            .focusable(),
-                    )
-                }
-            }
-        }
-        }
-        LiquidGlassIconButton(
-            onClick = { onSelect(searchDestination) },
-            contentDescription = searchDestination.label,
-            modifier = Modifier.align(Alignment.TopEnd),
-            glass = glass,
-            tint = if (selected == searchDestination) colors.primary else Color.Unspecified,
-            size = 64.dp,
-        ) {
-            Icon(searchDestination.icon(), null, Modifier.size(26.dp))
-        }
-    }
-}
-
-@Composable
 private fun LazerArtistNames(
     artists: List<Artist>,
     fallback: String,
@@ -4835,8 +3905,6 @@ private fun NowPlayingPage(
     lyricAnimationSpeed: LyricAnimationSpeed,
     wordLyricsEnabled: Boolean,
     lyricGlowEnabled: Boolean,
-    liquidGlassEnabled: Boolean,
-    liquidGlassBlurIntensity: Float,
     lyricFontSizeSp: Int,
     showFullLyrics: Boolean,
     animateAlbumBackground: Boolean,
@@ -4854,11 +3922,6 @@ private fun NowPlayingPage(
 ) {
     val track = snapshot.track ?: return
     val colors = MaterialTheme.colorScheme
-    val glass = rememberLazerLiquidGlass(
-        enabled = liquidGlassEnabled,
-        backgroundColor = colors.background,
-        blurIntensity = liquidGlassBlurIntensity,
-    )
     val duration = snapshot.durationMillis.takeIf { it > 0L } ?: track.durationMillis
     val target = if (duration > 0) snapshot.positionMillis.toFloat() / duration else 0f
     // A 100 ms service tick is already finer than this seek rail. Animating this value in the
@@ -4874,9 +3937,7 @@ private fun NowPlayingPage(
             Box(Modifier.fillMaxSize()) {
                 LazerAlbumFlowBackground(
                     track = track,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .captureLiquidGlass(glass),
+                    modifier = Modifier.fillMaxSize(),
                     cornerRadius = 0.dp,
                     veil = colors.background.copy(alpha = 0.38f),
                     animated = animateAlbumBackground,
@@ -4902,11 +3963,9 @@ private fun NowPlayingPage(
                             Modifier.fillMaxWidth().height(44.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            LiquidGlassIconButton(
-                                onClick = onDismiss,
-                                contentDescription = tr("player.collapse"),
-                                glass = glass,
-                                size = 40.dp,
+                            IconButton(
+                                onClick = tapFeedback(onDismiss),
+                                modifier = Modifier.size(40.dp).semantics { this.contentDescription = tr("player.collapse") },
                             ) { Icon(Icons.Filled.Close, null, tint = colors.onSurface) }
                             Spacer(Modifier.weight(1f))
                             IconButton(onClick = tapFeedback(onToggleLiked), modifier = Modifier.size(44.dp)) {
@@ -4943,7 +4002,6 @@ private fun NowPlayingPage(
                         Spacer(Modifier.weight(1f))
                         Column(
                             Modifier.fillMaxWidth()
-                                .liquidGlassSurface(glass, RoundedCornerShape(24.dp), colors.surface, blurRadius = 8.dp)
                                 .padding(horizontal = 12.dp, vertical = 4.dp),
                         ) {
                             Row(
@@ -5014,7 +4072,6 @@ private fun NowPlayingPage(
                         lyricGlowEnabled = lyricGlowEnabled,
                         lyricFontSizeSp = lyricFontSizeSp,
                         showFullLyrics = showFullLyrics,
-                        glass = glass,
                         onSeek = onSeek,
                         modifier = Modifier.weight(0.56f).fillMaxHeight().padding(horizontal = 4.dp),
                     )
@@ -5049,7 +4106,7 @@ private fun NowPlayingPage(
             Box(Modifier.fillMaxSize().onGloballyPositioned { coverCoordinates = it }) {
                 LazerAlbumFlowBackground(
                     track = track,
-                    modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
+                    modifier = Modifier.fillMaxSize(),
                     cornerRadius = 0.dp,
                     veil = colors.background.copy(alpha = 0.38f),
                     animated = animateAlbumBackground,
@@ -5062,10 +4119,9 @@ private fun NowPlayingPage(
                         .padding(horizontal = 20.dp, vertical = 12.dp),
                 ) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        LiquidGlassIconButton(
-                            onClick = onDismiss,
-                            contentDescription = tr("player.collapse"),
-                            glass = glass,
+                        IconButton(
+                            onClick = tapFeedback(onDismiss),
+                            modifier = Modifier.size(48.dp).semantics { this.contentDescription = tr("player.collapse") },
                         ) {
                             Icon(Icons.Filled.Close, null, tint = colors.onSurface)
                         }
@@ -5138,7 +4194,6 @@ private fun NowPlayingPage(
                                 lyricGlowEnabled = lyricGlowEnabled,
                                 lyricFontSizeSp = lyricFontSizeSp,
                                 showFullLyrics = showFullLyrics,
-                                glass = glass,
                                 onSeek = { if (!coverOpen) onSeek(it) },
                                 modifier = Modifier.fillMaxSize()
                                     .padding(top = 15.dp, bottom = 15.dp)
@@ -5151,7 +4206,6 @@ private fun NowPlayingPage(
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .liquidGlassSurface(glass, RoundedCornerShape(28.dp), colors.surface, blurRadius = 12.dp)
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                     ) {
                         Row(
@@ -5367,9 +4421,6 @@ private fun ArtistChoiceSheet(
     if (artists.isEmpty()) return
     val colors = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-    // Kept off the glass material on purpose: a bottom sheet is hosted in its own window, where the
-    // page backdrop it would sample holds the page *under* the now-playing overlay rather than what
-    // the sheet actually covers. Plain surface, like every other sheet in the app.
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -5411,8 +4462,6 @@ private fun CoverSaveSheet(
     request ?: return
     val colors = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-    // Same reason as the artist picker: a sheet window cannot sample the backdrop the sheet's own
-    // content is drawn over, so the glass material is skipped here.
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -5581,7 +4630,6 @@ private fun isAllowedNeteaseWebHost(host: String?): Boolean =
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun LoginSheet(
     controller: LazerGatewayController,
-    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
 ) {
     val colors = MaterialTheme.colorScheme
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -5590,13 +4638,9 @@ private fun LoginSheet(
     ModalBottomSheet(
         onDismissRequest = controller::closeLogin,
         sheetState = sheetState,
-        modifier = if (glass.isEnabled) {
-            Modifier.liquidGlassSurface(glass, shape, colors.surface, blurRadius = 14.dp)
-        } else {
-            Modifier
-        },
+        modifier = Modifier,
         shape = shape,
-        containerColor = if (glass.isEnabled) Color.Transparent else colors.surface,
+        containerColor = colors.surface,
         contentColor = colors.onSurface,
     ) {
         Column(
@@ -5761,32 +4805,15 @@ private fun QuietState(text: String) {
 private fun MessageBanner(
     text: String,
     modifier: Modifier,
-    glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
 ) {
     val colors = MaterialTheme.colorScheme
-    val shape = RoundedCornerShape(16.dp)
-    if (glass.isEnabled) {
-        Box(
-            modifier
-                .liquidGlassSurface(glass, shape, colors.surface, blurRadius = 10.dp)
-                .clip(shape),
-        ) {
-            Text(
-                text,
-                Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurface,
-            )
-        }
-    } else {
-        Surface(
-            modifier,
-            shape = RoundedCornerShape(14.dp),
-            color = colors.surfaceContainerHigh,
-            shadowElevation = 5.dp,
-        ) {
-            Text(text, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodySmall)
-        }
+    Surface(
+        modifier,
+        shape = RoundedCornerShape(14.dp),
+        color = colors.surfaceContainerHigh,
+        shadowElevation = 5.dp,
+    ) {
+        Text(text, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodySmall)
     }
 }
 
