@@ -95,10 +95,7 @@ internal const val LAZER_LIBRARY_TIP_COUNT = 10
 fun nextLazerLibraryTipIndex(current: Int): Int =
     (current + 1).mod(LAZER_LIBRARY_TIP_COUNT)
 
-/**
- * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
- * so composables only receive human-readable loading and failure states.
- */
+/** How the listen-together room is reachable right now, which is what the shared badge reports. */
 enum class LazerListenTogetherConnection {
     CONNECTING,
     CONNECTED,

@@ -8,11 +8,6 @@ internal fun parseAndroidLrc(lrc: String?): List<AndroidTimedLyricLine> = parseT
 internal fun parseAndroidWordLyrics(yrc: String?): List<AndroidTimedLyricLine> =
     parseTimedWordLyrics(yrc)
 
-internal fun mergeAndroidLyrics(
-    lyrics: List<AndroidTimedLyricLine>,
-    translations: List<AndroidTimedLyricLine>,
-): List<AndroidTimedLyricLine> = mergeTimedLyrics(lyrics, translations)
-
 internal fun activeAndroidLyricIndex(
     lines: List<AndroidTimedLyricLine>,
     positionMillis: Long,
