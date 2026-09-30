@@ -6,10 +6,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
+import dev.naominet.lazer.gateway.normalizeGatewaySessionCookie
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.Song
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,24 +34,30 @@ internal class IOSGatewayController {
         println("LAZER_IOS_CONTROLLER_STAGE:settings")
     }
 
-    // HttpClient engine discovery can touch native networking code. Keep it out of the first
-    // composition so an engine/setup failure becomes a recoverable page error instead of aborting
-    // the Compose root before iOS can draw its first frame.
-    private val gatewayDelegate = lazy(LazyThreadSafetyMode.NONE) {
-        println("LAZER_IOS_CONTROLLER_STAGE:gateway:create")
-        try {
-            NeteaseMusicGateway(sessionStore = IOSGatewaySessionStore()).also {
-                println("LAZER_IOS_CONTROLLER_STAGE:gateway:ready")
-            }
-        } catch (error: Throwable) {
-            println("LAZER_IOS_CONTROLLER_GATEWAY_ERROR:$error")
-            throw error
-        }
-    }
-    private val gateway: NeteaseMusicGateway
-        get() = gatewayDelegate.value
+    private val sessionStore = IOSGatewaySessionStore()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main).also {
+    // Building the Gateway creates an HttpClient, so this stays out of the first composition and a
+    // setup failure becomes a page error instead of aborting Compose before iOS draws a frame. The
+    // outcome is remembered: retrying would repeat the same failure, and throwing it again from a
+    // catch block ends the process.
+    private val gatewayResult = lazy(LazyThreadSafetyMode.NONE) {
+        println("LAZER_IOS_CONTROLLER_STAGE:gateway:create")
+        runCatching { NeteaseMusicGateway(sessionStore = sessionStore) }
+            .onSuccess { println("LAZER_IOS_CONTROLLER_STAGE:gateway:ready") }
+            .onFailure { println("LAZER_IOS_CONTROLLER_GATEWAY_ERROR:$it") }
+    }
+
+    private val gateway: NeteaseMusicGateway
+        get() = gatewayResult.value.getOrThrow()
+
+    // Kotlin/Native hands any coroutine failure that reaches the scope straight to the process,
+    // which bounces the app back to the home screen. Nothing the Gateway does is worth that.
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main + CoroutineExceptionHandler { _, error ->
+            println("LAZER_IOS_SCOPE_FAILURE:$error")
+            message = "应用遇到了一点问题，请稍后再试。"
+        },
+    ).also {
         println("LAZER_IOS_CONTROLLER_STAGE:scope")
     }
     private var searchJob: Job? = null
@@ -128,7 +136,7 @@ internal class IOSGatewayController {
             } catch (error: Throwable) {
                 currentProfile = null
                 userPlaylists = emptyList()
-                if (gateway.sessionCookie != null) {
+                if (normalizeGatewaySessionCookie(sessionStore.cookie) != null) {
                     handleFailure(error, "暂时无法同步音乐库，请稍后再试。")
                 }
             } finally {
@@ -162,7 +170,7 @@ internal class IOSGatewayController {
     fun logout() {
         scope.launch {
             runCatching { gateway.logoutSession() }
-            gateway.clearSession()
+            sessionStore.cookie = null
             currentProfile = null
             userPlaylists = emptyList()
         }
@@ -266,8 +274,8 @@ internal class IOSGatewayController {
     fun close() {
         searchJob?.cancel()
         scope.cancel()
-        if (gatewayDelegate.isInitialized()) {
-            gateway.close()
+        if (gatewayResult.isInitialized()) {
+            gatewayResult.value.getOrNull()?.close()
         }
     }
 
