@@ -95,6 +95,8 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
 
     override val deviceFingerprint: String get() = Build.FINGERPRINT.orEmpty()
 
+    override val supportsAudioSpectrum: Boolean get() = true
+
     override val microphoneGranted: Boolean
         get() = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED

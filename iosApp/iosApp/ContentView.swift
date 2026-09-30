@@ -156,20 +156,6 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         audio.applyMode(exclusive: exclusive, systemMedia: systemMedia)
     }
 
-    func requestMicrophoneAccess(onDone: @escaping () -> Void) {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized, .denied, .restricted: onDone()
-        default:
-            AVCaptureDevice.requestAccess(for: .audio) { _ in
-                DispatchQueue.main.async { onDone() }
-            }
-        }
-    }
-
-    func isMicrophoneGranted() -> Bool {
-        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-    }
-
     func setDarkStatusBar(dark: Bool) {
         LazerHostViewController.prefersDarkStatusBar = dark
         foregroundWindow()?.rootViewController?.setNeedsStatusBarAppearanceUpdate()

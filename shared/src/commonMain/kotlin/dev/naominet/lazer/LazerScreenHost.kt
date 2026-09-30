@@ -60,6 +60,12 @@ interface LazerScreenHost {
     fun shareText(text: String, title: String)
 
 
+    /**
+     * Whether the platform can read back the spectrum of the audio it is already playing. Where it
+     * cannot, the audio-reactive switch has nothing to switch on and the row stays hidden.
+     */
+    val supportsAudioSpectrum: Boolean
+
     fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit)
 
     /** Whether the microphone permission the audio-reactive switch needs is already held. */

@@ -91,13 +91,7 @@ interface IosShellBridge {
      */
     fun playerSetAudioMode(exclusive: Boolean, systemMedia: Boolean)
 
-    /** Asks for the microphone; Kotlin reads the answer back through [isMicrophoneGranted]. */
-    fun requestMicrophoneAccess(onDone: () -> Unit)
-
-    fun isMicrophoneGranted(): Boolean
-
-    fun setDarkStatusBar(dark: Boolean)
-}
+    fun setDarkStatusBar(dark: Boolean)}
 
 /**
  * The colours the Android scan activity receives as intent extras, flattened to plain integers:
@@ -181,10 +175,16 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
 
     override fun shareText(text: String, title: String) = bridge.share(text, title)
 
-    override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) =
-        bridge.requestMicrophoneAccess { onResult(bridge.isMicrophoneGranted()) }
+    /**
+     * AVPlayer gives back nothing but the file it is playing, so an honest spectrum would mean
+     * decoding the same stream a second time while the listener waits for it to buffer. The bars
+     * keep moving from the shared synthesizer, which is what Android draws with the switch off.
+     */
+    override val supportsAudioSpectrum: Boolean get() = false
 
-    override val microphoneGranted: Boolean get() = bridge.isMicrophoneGranted()
+    override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) = onResult(false)
+
+    override val microphoneGranted: Boolean get() = false
 
     override fun pickBackgroundImage(onPicked: (source: String?) -> Unit) = bridge.pickImage(onPicked)
 

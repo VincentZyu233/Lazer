@@ -2103,35 +2103,37 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                 }
             }
         }
-        item {
-            SettingsCard {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .tapClickable(role = Role.Switch) {
-                            when {
-                                audioLevelsEnabled -> controller.updateAudioReactiveLevels(false)
-                                microphoneGranted -> controller.updateAudioReactiveLevels(true)
-                                else -> requestMicrophone()
+        if (screen.supportsAudioSpectrum) {
+            item {
+                SettingsCard {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .tapClickable(role = Role.Switch) {
+                                when {
+                                    audioLevelsEnabled -> controller.updateAudioReactiveLevels(false)
+                                    microphoneGranted -> controller.updateAudioReactiveLevels(true)
+                                    else -> requestMicrophone()
+                                }
                             }
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(tr("settings.audio_levels.title"), style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                tr("settings.audio_levels.subtitle"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
                         }
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(tr("settings.audio_levels.title"), style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            tr("settings.audio_levels.subtitle"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = colors.onSurfaceVariant,
+                        Spacer(Modifier.width(12.dp))
+                        LazerSwitch(
+                            engine = controller.themeEngine,
+                            checked = audioLevelsEnabled,
+                            onCheckedChange = null,
                         )
                     }
-                    Spacer(Modifier.width(12.dp))
-                    LazerSwitch(
-                        engine = controller.themeEngine,
-                        checked = audioLevelsEnabled,
-                        onCheckedChange = null,
-                    )
                 }
             }
         }

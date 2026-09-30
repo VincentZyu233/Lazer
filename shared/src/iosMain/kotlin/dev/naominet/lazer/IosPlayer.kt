@@ -123,7 +123,10 @@ internal class IosPlayer(
         bridge.playerSetAudioMode(exclusive, systemMedia)
     }
 
-    /** iOS offers no tap on the playing audio's spectrum, so the level bars stay still. */
+    /**
+     * Nothing captures the playing audio here, so the indicator keeps the motion the shared screens
+     * synthesize; the switch that would ask for a capture is hidden with [IosScreenHost].
+     */
     override fun updateAudioLevels(enabled: Boolean) = Unit
 
     override fun stopAndClearSession() {
