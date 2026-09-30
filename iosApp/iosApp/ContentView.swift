@@ -126,11 +126,32 @@ final class LazerShell: NSObject, IosShellBridge {
 
     func playerSetEndedHandler(handler: @escaping () -> Void) { audio.onEnded = handler }
 
-    private func present(_ controller: UIViewController) {
-        let keyWindow = UIApplication.shared.connectedScenes
+    func requestMicrophoneAccess(onResult: @escaping (Bool) -> Void) {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: onResult(true)
+        case .denied, .restricted: onResult(false)
+        default:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async { onResult(granted) }
+            }
+        }
+    }
+
+    func isMicrophoneGranted() -> Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+
+    func setDarkStatusBar(dark: Bool) {
+        let manager = foregroundWindow()?.windowScene?.statusBarManager
+        manager?.statusBarStyle = dark ? .lightContent : .darkContent
+    }
+
+    private func foregroundWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.windows.first(where: \.isKeyWindow) }
             .first
-        guard let host = keyWindow?.rootViewController else { return }
+    }
+
+    private func present(_ controller: UIViewController) {
+        guard let host = foregroundWindow()?.rootViewController else { return }
         if controller.modalPresentationStyle == .automatic {
             controller.modalPresentationStyle = .pageSheet
         }

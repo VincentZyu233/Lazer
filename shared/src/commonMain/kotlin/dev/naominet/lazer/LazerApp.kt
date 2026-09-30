@@ -136,6 +136,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import io.ktor.util.date.getTimeMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
@@ -1356,7 +1357,7 @@ private fun LazerAppContent(
                 onConfirm = { request ->
                     copyTextRequest = null
                     clipboardScope.launch {
-                        clipboard.setClipEntry(lazerTextClipEntry(request.value))
+                        copyTextToClipboard(clipboard, request.value)
                         rootMessage = tr("song.copy.done")
                     }
                 },
@@ -2530,7 +2531,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             copied = cookieCopied,
             onCopy = { cookie ->
                 coroutineScope.launch {
-                    clipboard.setClipEntry(lazerTextClipEntry(cookie))
+                    copyTextToClipboard(clipboard, cookie)
                     cookieCopied = true
                 }
             },
@@ -3441,7 +3442,7 @@ private fun CommentReplyComposer(
 
 private fun relativeCommentTime(
     epochMillis: Long,
-    nowMillis: Long = System.currentTimeMillis(),
+    nowMillis: Long = getTimeMillis(),
 ): String {
     if (epochMillis <= 0L) return ""
     val elapsed = (nowMillis - epochMillis).coerceAtLeast(0L)

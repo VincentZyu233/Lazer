@@ -9,20 +9,13 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
-import platform.AVFoundation.AVCaptureDevice
-import platform.AVFoundation.AVAuthorizationStatusAuthorized
-import platform.AVFoundation.AVAuthorizationStatusDenied
-import platform.AVFoundation.AVAuthorizationStatusRestricted
-import platform.AVFoundation.AVMediaTypeAudio
-import platform.UIKit.UIApplication
 import platform.UIKit.UIDevice
 import platform.UIKit.UISceneActivationStateForegroundActive
 import platform.UIKit.UIWindow
 import platform.UIKit.UIWindowScene
 import platform.Foundation.NSTemporaryDirectory
+import platform.UIKit.UIApplication
 import platform.UIKit.UIView
-import platform.darwin.dispatch_async
-import platform.darwin.dispatch_get_main_queue
 
 /**
  * The sheets iOS only lets a native caller put on screen: a camera, a photo picker, a share panel,
@@ -73,6 +66,12 @@ interface IosShellBridge {
     fun playerIsPlaying(): Boolean
 
     fun playerSetEndedHandler(handler: () -> Unit)
+
+    fun requestMicrophoneAccess(onResult: (granted: Boolean) -> Unit)
+
+    fun isMicrophoneGranted(): Boolean
+
+    fun setDarkStatusBar(dark: Boolean)
 }
 
 /** iOS's answers to the screen-level asks of the shared interface. */
@@ -112,19 +111,10 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
 
     override fun shareText(text: String, title: String) = bridge.share(text, title)
 
-    override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) {
-        when (AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeAudio)) {
-            AVAuthorizationStatusAuthorized -> onResult(true)
-            AVAuthorizationStatusDenied, AVAuthorizationStatusRestricted -> onResult(false)
-            else -> AVCaptureDevice.requestAccessForMediaType(AVMediaTypeAudio) { granted ->
-                dispatch_async(dispatch_get_main_queue()) { onResult(granted) }
-            }
-        }
-    }
+    override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) =
+        bridge.requestMicrophoneAccess(onResult)
 
-    override val microphoneGranted: Boolean
-        get() = AVCaptureDevice.authorizationStatusForMediaType(AVMediaTypeAudio) ==
-            AVAuthorizationStatusAuthorized
+    override val microphoneGranted: Boolean get() = bridge.isMicrophoneGranted()
 
     override fun pickBackgroundImage(onPicked: (source: String?) -> Unit) = bridge.pickImage(onPicked)
 
@@ -138,14 +128,7 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
     override fun scanCode(theme: LazerScanTheme, onResult: (text: String?) -> Unit) =
         bridge.scanCode(onResult)
 
-    override fun setStatusBarAppearance(isDark: Boolean) {
-        val manager = foregroundWindow()?.windowScene?.statusBarManager ?: return
-        manager.statusBarStyle = if (isDark) {
-            platform.UIKit.UIStatusBarStyleLightContent
-        } else {
-            platform.UIKit.UIStatusBarStyleDarkContent
-        }
-    }
+    override fun setStatusBarAppearance(isDark: Boolean) = bridge.setDarkStatusBar(isDark)
 
     override fun decodeImageBytes(bytes: ByteArray): ImageBitmap? =
         runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()

@@ -186,8 +186,9 @@ private fun CommitStamp() {
             .border(1.dp, colors.outline, CircleShape)
             .clickable(onClickLabel = tr("about.commit.copy")) {
                 clipboardScope.launch {
-                    clipboard.setClipEntry(
-                        lazerTextClipEntry("${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}"),
+                    copyTextToClipboard(
+                        clipboard,
+                        "${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}",
                     )
                     copied = true
                 }

@@ -1,7 +1,8 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 package dev.naominet.lazer
 
-import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.Clipboard
+import platform.UIKit.UIPasteboard
 
-internal actual fun lazerTextClipEntry(text: String): ClipEntry = ClipEntry(AnnotatedString(text))
+internal actual suspend fun copyTextToClipboard(clipboard: Clipboard, text: String) {
+    UIPasteboard.generalPasteboard.string = text
+}

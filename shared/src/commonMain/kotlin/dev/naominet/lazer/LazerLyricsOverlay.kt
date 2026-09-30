@@ -57,6 +57,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.ui.Alignment
+import io.ktor.util.date.getTimeMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -172,7 +173,7 @@ internal fun LazerLyricsViewport(
         val text = buildLyricClipboardText(displayLines, selection.state.selectedKeys)
         if (text.isBlank()) return
         selectionScope.launch {
-            clipboard.setClipEntry(lazerTextClipEntry(text))
+            copyTextToClipboard(clipboard, text)
             selection.copied = true
             answerTap()
             delay(1_400L)
@@ -354,7 +355,7 @@ private fun AnimatedLyricsViewport(
         followPlayback = false
         isDragging = false
         flingVelocity = 0f
-        manualAtMillis = System.currentTimeMillis()
+        manualAtMillis = getTimeMillis()
     }
 
     LaunchedEffect(trackId, lyricFontSizeSp, showFullLyrics) {
@@ -394,7 +395,7 @@ private fun AnimatedLyricsViewport(
                 lastFrameNanos = now
                 if (!followPlayback && !isDragging && !selection.state.isActive &&
                     kotlin.math.abs(flingVelocity) < 8f &&
-                    System.currentTimeMillis() - manualAtMillis > currentFollowDelayMillis
+                    getTimeMillis() - manualAtMillis > currentFollowDelayMillis
                 ) {
                     lyricLineMotion.snapTo(lyricScroll)
                     followPlayback = true
@@ -425,7 +426,7 @@ private fun AnimatedLyricsViewport(
                     if (nextScroll == 0f || nextScroll == currentMaxScroll) flingVelocity = 0f
                     lyricScroll = nextScroll
                     flingVelocity *= kotlin.math.exp((-5.2f * deltaSeconds).toDouble()).toFloat()
-                    manualAtMillis = System.currentTimeMillis()
+                    manualAtMillis = getTimeMillis()
                 }
             }
         }
@@ -460,7 +461,7 @@ private fun AnimatedLyricsViewport(
                 detectVerticalDragGestures(
                     onDragStart = {
                         if (selection.state.isActive &&
-                            System.currentTimeMillis() - selection.dragArmedAt < SelectionDragWindowMillis
+                            getTimeMillis() - selection.dragArmedAt < SelectionDragWindowMillis
                         ) {
                             isExtendingSelection = true
                         } else {
@@ -472,13 +473,13 @@ private fun AnimatedLyricsViewport(
                     onDragEnd = {
                         isDragging = false
                         isExtendingSelection = false
-                        manualAtMillis = System.currentTimeMillis()
+                        manualAtMillis = getTimeMillis()
                     },
                     onDragCancel = {
                         isDragging = false
                         isExtendingSelection = false
                         flingVelocity = 0f
-                        manualAtMillis = System.currentTimeMillis()
+                        manualAtMillis = getTimeMillis()
                     },
                     onVerticalDrag = { change, dragAmount ->
                         change.consume()
@@ -493,7 +494,7 @@ private fun AnimatedLyricsViewport(
                                 flingVelocity = flingVelocity * 0.65f + measuredVelocity * 0.35f
                             }
                             lastDragNanos = now
-                            manualAtMillis = System.currentTimeMillis()
+                            manualAtMillis = getTimeMillis()
                             lyricScroll = (lyricScroll - dragAmount).coerceIn(0f, currentMaxScroll)
                         }
                     },
@@ -653,7 +654,7 @@ private fun AnimatedLyricsViewport(
                                     answerTap()
                                 }
                                 selection.waveOrigin = -1
-                                selection.dragArmedAt = System.currentTimeMillis()
+                                selection.dragArmedAt = getTimeMillis()
                                 // The sheet holds still the moment the marking starts; otherwise the
                                 // line under the finger would drift away mid-gesture.
                                 holdSheetForSelection()

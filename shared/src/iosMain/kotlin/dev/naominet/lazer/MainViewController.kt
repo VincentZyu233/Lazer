@@ -37,7 +37,7 @@ fun MainViewController(bridge: IosShellBridge): UIViewController = ComposeUIView
             screen = screen,
             authWebView = { url, sessionCookie, modifier ->
                 androidx.compose.ui.viewinterop.UIKitView(
-                    factory = { bridge.makeAuthWebView(url: url, sessionCookie: sessionCookie) },
+                    factory = { bridge.makeAuthWebView(url, sessionCookie) },
                     modifier = modifier,
                 )
             },

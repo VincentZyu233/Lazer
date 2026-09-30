@@ -1,9 +1,10 @@
 package dev.naominet.lazer
 
-import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.Clipboard
 
 /**
- * Plain text handed to the system clipboard. Each platform's clipboard object is its own type, so
- * the shared screens ask for this instead of naming a `ClipEntry` constructor that differs.
+ * Puts plain text where the platform keeps the clipboard. Each host has its own way in - Android and
+ * the desktop go through Compose's entry, iOS writes the system pasteboard - so the screens ask for
+ * a copy instead of naming a type that differs.
  */
-internal expect fun lazerTextClipEntry(text: String): ClipEntry
+internal expect suspend fun copyTextToClipboard(clipboard: Clipboard, text: String)
