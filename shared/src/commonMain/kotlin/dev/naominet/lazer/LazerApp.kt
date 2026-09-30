@@ -862,6 +862,7 @@ private fun LazerAppContent(
         when (route) {
             "settings" -> controller.openSettings()
             "about" -> controller.openAbout()
+            "login" -> controller.openLogin()
             "playlist" -> awaitLazerSmokeList(controller::featuredPlaylists).firstOrNull()
                 ?.let(controller::openPlaylist)
             "player", "comments" -> {
