@@ -1755,6 +1755,9 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
     val colors = MaterialTheme.colorScheme
     val screen = LocalLazerScreenHost.current
     val systemMonetAvailable = screen.supportsSystemPalette
+    // Only Android hands mixing to an audio-focus model. Where there is none, the copy says what the
+    // platform actually does instead of promising a rule the system never applies.
+    val audioFocusKeySuffix = if (screen.usesSystemAudioFocus) "" else ".ios"
     // The platform asks for the microphone even though the capture only reads back our own session,
     // so the switch stays off until the user grants it.
     var microphoneGranted by remember { mutableStateOf(screen.microphoneGranted) }
@@ -2094,7 +2097,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                             if (controller.independentPlayback) {
                                 tr("settings.independent.on")
                             } else {
-                                tr("settings.independent.off")
+                                tr("settings.independent.off$audioFocusKeySuffix")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
@@ -2125,7 +2128,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         Text(tr("settings.exclusive.title"), style = MaterialTheme.typography.titleSmall)
                         Text(
                             if (controller.independentPlayback) {
-                                tr("settings.exclusive.independent")
+                                tr("settings.exclusive.independent$audioFocusKeySuffix")
                             } else if (controller.exclusiveAudio) {
                                 tr("settings.exclusive.on")
                             } else if (screen.usesSystemAudioFocus) {
