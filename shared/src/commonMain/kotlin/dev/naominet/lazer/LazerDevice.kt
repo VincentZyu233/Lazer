@@ -106,7 +106,7 @@ interface LazerPlatformHost {
     fun deleteExportedFile(target: String)
 
     /** Fetches a cover at full size so the listener can keep it outside the app. */
-    fun downloadFile(url: String): ByteArray?
+    suspend fun downloadFile(url: String): ByteArray?
 
     /** Turns encoded image bytes into something the screens can draw. */
     fun decodeImageBytes(bytes: ByteArray): ImageBitmap?

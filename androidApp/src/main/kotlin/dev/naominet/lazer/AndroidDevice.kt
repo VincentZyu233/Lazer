@@ -122,7 +122,7 @@ class AndroidHost(private val context: Context) : LazerPlatformHost {
         runCatching { context.contentResolver.delete(Uri.parse(target), null, null) }
     }
 
-    override fun downloadFile(url: String): ByteArray? {
+    override suspend fun downloadFile(url: String): ByteArray? {
         val connection = URL(url).openConnection().apply {
             connectTimeout = 12_000
             readTimeout = 20_000
