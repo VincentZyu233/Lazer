@@ -201,9 +201,7 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
         val latestProgress = rememberUpdatedState(onProgress)
         val latestConfirmed = rememberUpdatedState(onConfirmed)
         DisposableEffect(enabled) {
-            backSink.onProgress = { value, fromLeft ->
-                latestProgress.value(value, if (fromLeft) LazerSwipeEdge.Left else LazerSwipeEdge.Right)
-            }
+            backSink.onProgress = { progress, edge -> latestProgress.value(progress, edge) }
             backSink.onConfirmed = { latestConfirmed.value() }
             bridge.setBackGesture(enabled, backSink)
             onDispose {
