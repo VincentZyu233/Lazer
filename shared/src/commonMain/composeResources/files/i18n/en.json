@@ -63,6 +63,7 @@
   "settings.quality.sheet.hint": "Higher quality uses more data; premium quality depends on your account.",
   "settings.independent.title": "Independent playback",
   "settings.independent.on": "Skip system media controls and play alongside other apps",
+  "settings.independent.on.ios": "Skip the system media controls",
   "settings.independent.off": "Use system media controls and audio focus",
   "settings.independent.off.ios": "Use the system media controls",
   "settings.exclusive.title": "Exclusive audio",

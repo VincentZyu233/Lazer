@@ -63,6 +63,7 @@
   "settings.quality.sheet.hint": "高音质会使用更多流量；会员音质以帐号权限为准。",
   "settings.independent.title": "独立播放",
   "settings.independent.on": "不接入系统媒体控制，可与其他应用同时发声",
+  "settings.independent.on.ios": "不接入系统媒体控制",
   "settings.independent.off": "使用系统媒体控制，并遵循音频焦点",
   "settings.independent.off.ios": "使用系统媒体控制",
   "settings.exclusive.title": "独占音频",
