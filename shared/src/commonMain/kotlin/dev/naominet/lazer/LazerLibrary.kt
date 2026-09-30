@@ -48,3 +48,28 @@ fun normalizedArtworkUrl(raw: String?): String? {
         else -> null
     }
 }
+
+private val ArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
+
+/**
+ * The CDN resizes on request, so asking for the size actually displayed keeps the palette thumbnail
+ * and the full player artwork on one cached image instead of two.
+ */
+fun enlargedArtworkUrl(raw: String?, sizePx: Int = 1024): String? {
+    require(sizePx > 0)
+    val normalized = normalizedArtworkUrl(raw) ?: return null
+    val host = normalized.substringAfter("://").substringBefore('/')
+        .substringAfterLast('@').substringBefore(':')
+    if (!host.equals("music.126.net", ignoreCase = true) &&
+        !host.endsWith(".music.126.net", ignoreCase = true)
+    ) return normalized
+    if (ArtworkSizeParameter.containsMatchIn(normalized)) {
+        return normalized.replace(ArtworkSizeParameter) { match ->
+            "${match.groupValues[1]}${sizePx}y$sizePx"
+        }
+    }
+    if (normalized.contains("param=", ignoreCase = true)) return normalized
+    val base = normalized.substringBefore('#')
+    val fragment = normalized.substringAfter('#', "").let { if ('#' in normalized) "#$it" else "" }
+    return base + (if ('?' in base) "&" else "?") + "param=${sizePx}y$sizePx" + fragment
+}

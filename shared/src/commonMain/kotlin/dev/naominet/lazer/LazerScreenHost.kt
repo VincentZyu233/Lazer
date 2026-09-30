@@ -87,12 +87,12 @@ interface LazerScreenHost {
 
 /**
  * The browser a QR sign-in needs, hosted by the platform but placed and sized by the shared sheet.
- * [onResult] receives the redirect the login page lands on, or null while it is still open.
+ * It stays on the login hosts and hands the session cookie to them, so the page can see the reader
+ * is already signed in without ever leaving the app.
  */
 typealias LazerAuthWebView = @Composable (
     url: String,
-    sessionCookie: String?,
-    onResult: (redirect: String?) -> Unit,
+    sessionCookie: String,
     modifier: Modifier,
 ) -> Unit
 

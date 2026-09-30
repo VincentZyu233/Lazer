@@ -1,3 +1,4 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 package dev.naominet.lazer
 
 import androidx.compose.animation.AnimatedContent
@@ -198,6 +199,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
+import coil3.compose.LocalPlatformContext
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
 import com.kashif_e.backdrop.backdrops.layerBackdrop
 import com.kashif_e.backdrop.backdrops.rememberCombinedBackdrop
@@ -4162,7 +4164,7 @@ private fun MobileArtwork(
     saveOnLongPress: Boolean = false,
     decodeSizePx: Int? = null,
 ) {
-    val imageContext = LocalContext.current
+    val imageContext = LocalPlatformContext.current
     val imageModel = remember(url, decodeSizePx, imageContext) {
         if (decodeSizePx == null) url else coil3.request.ImageRequest.Builder(imageContext)
             .data(url)
@@ -5463,14 +5465,6 @@ private fun NeteaseQrAuthorizationSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
-    var webView by remember(url) { mutableStateOf<WebView?>(null) }
-    DisposableEffect(url) {
-        onDispose {
-            webView?.stopLoading()
-            webView?.destroy()
-            webView = null
-        }
-    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -5488,32 +5482,10 @@ private fun NeteaseQrAuthorizationSheet(
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurfaceVariant,
             )
-            AndroidView(
-                factory = { context ->
-                    WebView(context).apply {
-                        webView = this
-                        val authorizationWebView = this
-                        setBackgroundColor(android.graphics.Color.WHITE)
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.allowFileAccess = false
-                        settings.allowContentAccess = false
-                        CookieManager.getInstance().apply {
-                            setAcceptCookie(true)
-                            setAcceptThirdPartyCookies(authorizationWebView, false)
-                            installNeteaseSessionCookies(sessionCookie)
-                            flush()
-                        }
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(
-                                view: WebView,
-                                request: WebResourceRequest,
-                            ): Boolean = !isAllowedNeteaseWebHost(request.url.host)
-                        }
-                        loadUrl(url)
-                    }
-                },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 360.dp, max = 560.dp)
+            LocalLazerAuthWebView.current(
+                url,
+                sessionCookie,
+                Modifier.fillMaxWidth().heightIn(min = 360.dp, max = 560.dp)
                     .clip(RoundedCornerShape(18.dp)),
             )
             ThemeTextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
@@ -5523,26 +5495,9 @@ private fun NeteaseQrAuthorizationSheet(
     }
 }
 
-private fun CookieManager.installNeteaseSessionCookies(sessionCookie: String) {
-    val allowed = setOf("MUSIC_U", "MUSIC_A", "NMTID", "deviceId", "__csrf")
-    sessionCookie.split(';').forEach { field ->
-        val name = field.substringBefore('=').trim()
-        val value = field.substringAfter('=', "").trim()
-        if (name in allowed && value.isNotBlank()) {
-            setCookie(
-                "https://music.163.com",
-                "$name=$value; Domain=.music.163.com; Path=/; Secure; SameSite=Lax",
-            )
-        }
-    }
-}
-
 private fun isAllowedNeteaseWebHost(host: String?): Boolean =
     host.equals("music.163.com", ignoreCase = true) ||
         host.equals("st.music.163.com", ignoreCase = true)
-
-private fun Context.hasRecordAudioPermission(): Boolean =
-    checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
