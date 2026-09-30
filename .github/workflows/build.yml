@@ -302,6 +302,25 @@ jobs:
           fi
           xcrun simctl terminate "$simulator_udid" "$bundle_id"
           wait "$console_pid" || true
+          # One home screen proves little: a page that only fails once it is opened is invisible in
+          # that shot. Each route gets its own process, its own screenshot and the same survival
+          # check, driven through the app's own navigation rather than a test-only fixture.
+          for route in search library me settings about; do
+            xcrun simctl launch --terminate-running-process --console \
+              "$simulator_udid" "$bundle_id" "LAZER_IOS_ROUTE=$route" \
+              > "ios-simulator-$route-console.log" 2>&1 &
+            route_pid=$!
+            sleep 12
+            xcrun simctl io "$simulator_udid" screenshot "ios-simulator-$route.png"
+            if ! kill -0 "$route_pid" 2>/dev/null; then
+              echo "Console output for the $route screen:"
+              cat "ios-simulator-$route-console.log"
+              echo "::error::Lazer exited while showing the iOS $route screen."
+              exit 1
+            fi
+            xcrun simctl terminate "$simulator_udid" "$bundle_id" || true
+            wait "$route_pid" || true
+          done
       - name: Upload iOS Simulator diagnostics
         if: always()
         uses: actions/upload-artifact@v7
@@ -311,7 +330,8 @@ jobs:
             ios-simulator-xcodebuild.log
             ios-simulator-console.log
             ios-simulator-runtime.log
-            ios-simulator.png
+            ios-simulator*.png
+            ios-simulator-*-console.log
             ios-simulator-crash-reports/
           if-no-files-found: ignore
       - name: Build unsigned iOS device app
