@@ -5,6 +5,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlin.math.max
+import kotlin.math.min
 
 /** The colours the shared scan screen hands to the platform's own camera view. */
 data class LazerScanTheme(
@@ -115,3 +117,15 @@ val LocalLazerAuthWebView = androidx.compose.runtime.staticCompositionLocalOf<La
 /** Storage and download access for the decorative layers, which sit below the screens. */
 val LocalLazerPlatformHost =
     androidx.compose.runtime.staticCompositionLocalOf<LazerPlatformHost?> { null }
+
+/**
+ * The side of the square the camera sheet frames a code with: 62% of the shorter edge of the
+ * preview, never smaller than 190 nor larger than 330 points. Both platforms measure their own
+ * preview and ask here, so the corner guides cannot drift apart from the frame they mark.
+ */
+fun lazerScanFrameSidePt(shorterSidePt: Float): Float {
+    val shorter = shorterSidePt.coerceAtLeast(1f)
+    val minimum = min(shorter, 190f)
+    val maximum = max(min(shorter, 330f), minimum)
+    return (shorter * 0.62f).coerceIn(minimum, maximum)
+}

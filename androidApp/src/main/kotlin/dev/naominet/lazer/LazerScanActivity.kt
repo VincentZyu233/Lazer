@@ -187,9 +187,7 @@ class LazerScanActivity : CaptureActivity() {
 
 internal fun scanFrameSizePx(previewWidth: Int, previewHeight: Int, density: Float): Int {
     val shorterSide = min(previewWidth, previewHeight).coerceAtLeast(1)
-    val minimum = min(shorterSide, (190f * density).roundToInt())
-    val maximum = min(shorterSide, (330f * density).roundToInt()).coerceAtLeast(minimum)
-    return (shorterSide * 0.62f).roundToInt().coerceIn(minimum, maximum)
+    return (lazerScanFrameSidePt(shorterSide / density) * density).roundToInt()
 }
 
 /** Draws only the corner guides; the stock mask is transparent to avoid four dark seam lines. */

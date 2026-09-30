@@ -476,12 +476,10 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
         guides.path = LazerScanGlyph.cornerGuides(around: rect, arm: side * 0.12)
     }
 
-    /// The Android viewfinder measures 62% of the shorter side, kept between 190 and 330 points.
+    /// The frame is measured by the shared code, the same measurement the Android viewfinder uses.
     private func framingSide(for size: CGSize) -> CGFloat {
-        let shorter = max(1, min(size.width, size.height))
-        let minimum = min(shorter, 190)
-        let maximum = max(min(shorter, 330), minimum)
-        return min(max((shorter * 0.62).rounded(), minimum), maximum)
+        let shorter = min(size.width, size.height)
+        return CGFloat(LazerScreenHostKt.lazerScanFrameSidePt(shorterSidePt: Float(shorter)))
     }
 
     override func viewDidAppear(_ animated: Bool) {
