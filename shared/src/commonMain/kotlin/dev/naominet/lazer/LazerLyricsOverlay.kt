@@ -173,7 +173,7 @@ internal fun LazerLyricsViewport(
         val text = buildLyricClipboardText(displayLines, selection.state.selectedKeys)
         if (text.isBlank()) return
         selectionScope.launch {
-            copyTextToClipboard(clipboard, text)
+            copyTextToClipboard(clipboard, text, tr("lyrics.select.copy"))
             selection.copied = true
             answerTap()
             delay(1_400L)

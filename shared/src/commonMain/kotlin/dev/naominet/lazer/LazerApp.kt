@@ -1396,7 +1396,7 @@ private fun LazerAppContent(
                 onConfirm = { request ->
                     copyTextRequest = null
                     clipboardScope.launch {
-                        copyTextToClipboard(clipboard, request.value)
+                        copyTextToClipboard(clipboard, request.value, tr(request.titleKey))
                         rootMessage = tr("song.copy.done")
                     }
                 },
@@ -2574,7 +2574,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             copied = cookieCopied,
             onCopy = { cookie ->
                 coroutineScope.launch {
-                    copyTextToClipboard(clipboard, cookie)
+                    copyTextToClipboard(clipboard, cookie, tr("login.cookie.label"))
                     cookieCopied = true
                 }
             },

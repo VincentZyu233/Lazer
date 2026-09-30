@@ -189,6 +189,7 @@ private fun CommitStamp() {
                     copyTextToClipboard(
                         clipboard,
                         "${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}",
+                        tr("about.commit.copy"),
                     )
                     copied = true
                 }
