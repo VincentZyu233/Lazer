@@ -26,15 +26,15 @@ class AndroidAppearanceSettingsTest {
     fun libraryTipsCycleThroughTenEntriesWithoutImmediateRepeats() {
         val visited = buildList {
             var current = -1
-            repeat(ANDROID_LIBRARY_TIP_COUNT) {
+            repeat(LAZER_LIBRARY_TIP_COUNT) {
                 val next = nextAndroidLibraryTipIndex(current)
                 assertNotEquals(current, next)
                 add(next)
                 current = next
             }
         }
-        assertEquals(ANDROID_LIBRARY_TIP_COUNT, visited.toSet().size)
-        assertTrue(visited.all { it in 0 until ANDROID_LIBRARY_TIP_COUNT })
+        assertEquals(LAZER_LIBRARY_TIP_COUNT, visited.toSet().size)
+        assertTrue(visited.all { it in 0 until LAZER_LIBRARY_TIP_COUNT })
         assertEquals(visited.first(), nextAndroidLibraryTipIndex(visited.last()))
     }
 }

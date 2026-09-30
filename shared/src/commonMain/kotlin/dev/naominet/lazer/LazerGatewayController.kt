@@ -90,10 +90,10 @@ private data class LazerCachedBootstrap(
 )
 
 private const val MESSAGE_BANNER_DURATION_MILLIS = 15_000L
-internal const val ANDROID_LIBRARY_TIP_COUNT = 10
+internal const val LAZER_LIBRARY_TIP_COUNT = 10
 
 fun nextLazerLibraryTipIndex(current: Int): Int =
-    (current + 1).mod(ANDROID_LIBRARY_TIP_COUNT)
+    (current + 1).mod(LAZER_LIBRARY_TIP_COUNT)
 
 /**
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
@@ -1791,7 +1791,7 @@ private fun toLazerTrack(song: Song): LazerTrack = LazerTrack(
     id = song.id,
     title = song.name.ifBlank { tr("track.unknown_song") },
     translatedTitle = song.translations.map(String::trim).filter { it.isNotBlank() && it != song.name }.distinct().joinToString(" / ").takeIf(String::isNotBlank),
-    artist = song.artists.joinToString(" / ") { it.name }.ifBlank { tr("track.unknown_artist.android") },
+    artist = song.artists.joinToString(" / ") { it.name }.ifBlank { tr("track.unknown_artist") },
     album = song.album?.name.orEmpty(),
     durationMillis = song.durationMillis ?: 0L,
     coverUrl = normalizedArtworkUrl(song.album?.picUrl),
