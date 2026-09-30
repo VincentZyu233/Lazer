@@ -100,6 +100,9 @@ class AndroidHost(private val context: Context) : LazerPlatformHost {
     override fun decodeImageFile(path: String): ImageBitmap? =
         BitmapFactory.decodeFile(path)?.asImageBitmap()
 
+    override fun decodeImageBytes(bytes: ByteArray): ImageBitmap? =
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+
     override fun importImageFile(source: String, name: String): String? {
         val target = File(context.filesDir, name)
         context.contentResolver.openInputStream(Uri.parse(source))?.use { input ->

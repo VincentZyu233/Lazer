@@ -10,8 +10,7 @@ import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
@@ -20,6 +19,7 @@ import kotlinx.serialization.json.Json
 import platform.Foundation.NSCachesDirectory
 import platform.Foundation.NSData
 import platform.Foundation.NSDocumentDirectory
+import platform.Foundation.NSFileHandle
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSSearchPathForDirectoriesInDomains
 import platform.Foundation.NSURL
@@ -75,18 +75,28 @@ internal class IosPlatformHost : LazerPlatformHost {
         manager.removeItemAtPath(path, null)
     }
 
-    override fun writeExportedFile(target: String, bytes: ByteArray): Boolean =
-        bytes.toNSData()?.writeToFile(target, atomically = true) == true
+    override fun writeExportedFile(target: String, bytes: ByteArray): Boolean {
+        val handle = NSFileHandle.fileHandleForWritingAtPath(target) ?: return false
+        return try {
+            bytes.toNSData()?.let { handle.writeData(it) }
+            true
+        } catch (_: Throwable) {
+            false
+        } finally {
+            handle.closeFile()
+        }
+    }
 
     override fun deleteExportedFile(target: String) {
         manager.removeItemAtPath(target, null)
     }
 
-    override suspend fun downloadFile(url: String): ByteArray? = suspendCoroutine { continuation ->
+    override suspend fun downloadFile(url: String): ByteArray? =
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
         val address = NSURL.URLWithString(url)
         if (address == null) {
             continuation.resume(null)
-            return@suspendCoroutine
+            return@suspendCancellableCoroutine
         }
         val task = NSURLSession.sharedSession.dataTaskWithRequest(
             NSURLRequest.requestWithURL(address),

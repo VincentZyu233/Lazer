@@ -9,13 +9,13 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** Bars the playlist indicator draws, and therefore the bands the analyzer reports. */
-internal const val AUDIO_LEVEL_BAND_COUNT = 4
+const val AUDIO_LEVEL_BAND_COUNT = 4
 
 /** Capture size the visualizer is configured with; roughly 43 Hz per bin at 44.1 kHz. */
-internal const val AUDIO_LEVEL_CAPTURE_SIZE = 1024
+const val AUDIO_LEVEL_CAPTURE_SIZE = 1024
 
 /** Capture rate in milliHertz, matched to the frame rate the bars are drawn at. */
-internal const val AUDIO_LEVEL_CAPTURE_RATE_MILLIHERTZ = 25_000
+const val AUDIO_LEVEL_CAPTURE_RATE_MILLIHERTZ = 25_000
 
 /** Lowest and highest band edge. Log spacing follows how music is actually balanced. */
 private const val BandLowHz = 60f
@@ -35,7 +35,7 @@ private const val ReleaseRate = 0.18f
  * captured (feature off, microphone permission missing, or playback stopped). Only the row showing
  * the current track collects this, so the rest of the UI is not recomposed at capture rate.
  */
-internal object LazerAudioLevels {
+object LazerAudioLevels {
     private val mutableLevels = MutableStateFlow<List<Float>?>(null)
 
     val levels: StateFlow<List<Float>?> = mutableLevels.asStateFlow()
@@ -57,7 +57,7 @@ internal object LazerAudioLevels {
  * loudness is spread across the bands. Keeping them apart means the indicator needs no per-device
  * calibration of the FFT's 8-bit magnitude scale.
  */
-internal class AudioLevelAnalyzer(
+class AudioLevelAnalyzer(
     sampleRateHz: Int,
     captureSize: Int,
     private val bandCount: Int = AUDIO_LEVEL_BAND_COUNT,

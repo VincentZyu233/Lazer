@@ -12,12 +12,13 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.PredictiveBackHandler
+import androidx.activity.BackEventCompat
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.ColorScheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.asImageBitmap
@@ -33,29 +34,26 @@ import com.journeyapps.barcodescanner.ScanOptions
  */
 class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHost {
     private val registry = activity.activityResultRegistry
+    private val imageLauncher = registry.register(KEY_BACKGROUND, ActivityResultContracts.GetContent()) { uri ->
+        pendingImage?.invoke(uri?.toString())
+        pendingImage = null
+    }
+    private val exportLauncher = registry.register(KEY_EXPORT, ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
+        pendingTarget?.invoke(uri?.toString())
+        pendingTarget = null
+    }
+    private val scanLauncher = registry.register(KEY_SCAN, ScanContract()) { result ->
+        pendingScan?.invoke(result.contents)
+        pendingScan = null
+    }
+    private val microphoneLauncher = registry.register(KEY_MICROPHONE, ActivityResultContracts.RequestPermission()) { granted ->
+        pendingMicrophone?.invoke(granted)
+        pendingMicrophone = null
+    }
     private var pendingImage: ((String?) -> Unit)? = null
     private var pendingTarget: ((String?) -> Unit)? = null
     private var pendingScan: ((String?) -> Unit)? = null
     private var pendingMicrophone: ((Boolean) -> Unit)? = null
-
-    init {
-        registry.register(KEY_BACKGROUND, ActivityResultContracts.GetContent()) { uri ->
-            pendingImage?.invoke(uri?.toString())
-            pendingImage = null
-        }
-        registry.register(KEY_EXPORT, ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
-            pendingTarget?.invoke(uri?.toString())
-            pendingTarget = null
-        }
-        registry.register(KEY_SCAN, ScanContract()) { result ->
-            pendingScan?.invoke(result.contents)
-            pendingScan = null
-        }
-        registry.register(KEY_MICROPHONE, ActivityResultContracts.RequestPermission()) { granted ->
-            pendingMicrophone?.invoke(granted)
-            pendingMicrophone = null
-        }
-    }
 
     override val supportsSystemPalette: Boolean
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
@@ -112,7 +110,7 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
                 events.collect { event ->
                     onProgress(
                         event.progress,
-                        if (event.swipeEdge == android.hardware.SwipeToBackEdge.RIGHT) {
+                        if (event.swipeEdge == BackEventCompat.EDGE_RIGHT) {
                             LazerSwipeEdge.Right
                         } else {
                             LazerSwipeEdge.Left
@@ -140,23 +138,22 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
 
     override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) {
         pendingMicrophone = onResult
-        registry.launch(KEY_MICROPHONE, Manifest.permission.RECORD_AUDIO)
+        microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
     }
 
     override fun pickBackgroundImage(onPicked: (source: String?) -> Unit) {
         pendingImage = onPicked
-        registry.launch(KEY_BACKGROUND, "image/*")
+        imageLauncher.launch("image/*")
     }
 
     override fun pickExportDestination(suggestedName: String, onPicked: (target: String?) -> Unit) {
         pendingTarget = onPicked
-        registry.launch(KEY_EXPORT, suggestedName)
+        exportLauncher.launch(suggestedName)
     }
 
     override fun scanCode(theme: LazerScanTheme, onResult: (text: String?) -> Unit) {
         pendingScan = onResult
-        registry.launch(
-            KEY_SCAN,
+        scanLauncher.launch(
             ScanOptions().apply {
                 setBeepEnabled(false)
                 setCaptureActivity(LazerScanActivity::class.java)

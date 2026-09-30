@@ -17,6 +17,7 @@ import platform.AVFAudio.AVAudioSessionCategoryPlayback
 import platform.AVFAudio.setActive
 import platform.AVFoundation.AVPlayer
 import platform.AVFoundation.AVPlayerItem
+import platform.CoreMedia.CMTimeMakeWithSeconds
 
 import platform.AVFoundation.AVPlayerTimeControlStatusPaused
 
@@ -109,7 +110,7 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
     }
 
     override fun seekTo(positionMillis: Long) {
-        player?.seekToSeconds(positionMillis.toDouble() / 1000.0)
+        player?.seekToTime(CMTimeMakeWithSeconds(positionMillis.toDouble() / 1000.0, 1_000))
         publish(playing = snapshot.value.isPlaying)
     }
 
@@ -140,11 +141,11 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
         releasePlayer()
         ensureAudioSession()
         val address = NSURL.URLWithString(url) ?: return
-        val item = AVPlayerItem(address)
-        val next = AVPlayer.playerWithPlayerItem(item)
+        val next = AVPlayer()
+        next.replaceCurrentItemWithPlayerItem(AVPlayerItem(address))
         player = next
         watchForEndOfItem(item)
-        if (positionMillis > 0L) next.seekToSeconds(positionMillis / 1000.0)
+        if (positionMillis > 0L) next.seekToTime(CMTimeMakeWithSeconds(positionMillis / 1000.0, 1_000))
         if (startPlaying) {
             next.play()
             startTicker()
