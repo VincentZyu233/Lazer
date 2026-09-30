@@ -1,8 +1,15 @@
 package dev.naominet.lazer
 
 import android.content.Context
+import android.graphics.BitmapFactory
+import android.net.Uri
+import android.util.Log
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.coroutines.flow.StateFlow
+import java.io.File
+import java.net.URL
 
 // Android's answers to the seams the shared app is written against. The cache and the media session
 // stay here because they are Android's own; everything above them is the shared code iOS reuses.
@@ -87,3 +94,83 @@ class AndroidPlayer(private val context: Context) : LazerPlayer {
 
     override fun stopAndClearSession() = AndroidPlaybackConnection.stopAndClearSession(context)
 }
+
+/** Storage, export and diagnostics the shared state layer cannot reach by itself. */
+class AndroidHost(private val context: Context) : LazerPlatformHost {
+    override fun decodeImageFile(path: String): ImageBitmap? =
+        BitmapFactory.decodeFile(path)?.asImageBitmap()
+
+    override fun importImageFile(source: String, name: String): String? {
+        val target = File(context.filesDir, name)
+        context.contentResolver.openInputStream(Uri.parse(source))?.use { input ->
+            target.outputStream().use(input::copyTo)
+        } ?: return null
+        return target.absolutePath
+    }
+
+    override fun deleteImportedImage(path: String) {
+        File(path).delete()
+    }
+
+    override fun writeExportedFile(target: String, bytes: ByteArray): Boolean =
+        context.contentResolver.openOutputStream(Uri.parse(target), "w")?.use { output ->
+            output.write(bytes)
+            true
+        } ?: false
+
+    override fun deleteExportedFile(target: String) {
+        runCatching { context.contentResolver.delete(Uri.parse(target), null, null) }
+    }
+
+    override fun downloadFile(url: String): ByteArray? {
+        val connection = URL(url).openConnection().apply {
+            connectTimeout = 12_000
+            readTimeout = 20_000
+            setRequestProperty("User-Agent", "Lazer/1.2")
+        }
+        return connection.getInputStream().use { it.readBytes() }
+    }
+
+    override fun clearPlatformCache(): Int =
+        context.cacheDir.listFiles().orEmpty().count { it.deleteRecursively() }
+
+    override fun publishLyrics(trackId: Long, lines: List<TimedLyricLine>) {
+        SuperLyricPublisher.updateLyrics(trackId, lines)
+    }
+
+    override fun log(message: String, error: Throwable) {
+        Log.w("LazerGatewayController", message, error)
+    }
+}
+
+/** The Android answer to every seam the shared app is written against. */
+fun androidDevice(context: Context): LazerDevice {
+    val appContext = context.applicationContext
+    return LazerDevice(
+        preferences = androidPreferences(appContext),
+        sessionStore = AndroidGatewaySessionStore(appContext),
+        cache = AndroidLibraryCache(appContext),
+        player = AndroidPlayer(appContext),
+        host = AndroidHost(appContext),
+    )
+}
+
+/** The screens and service still name these the way they always have. */
+typealias AndroidGatewayController = LazerGatewayController
+
+typealias AndroidRootDestination = LazerRootDestination
+
+typealias AndroidLoginMethod = LazerLoginMethod
+
+typealias AndroidListenTogetherState = LazerListenTogetherState
+
+typealias AndroidSongCommentState = LazerSongCommentState
+
+typealias AndroidListenTogetherConnection = LazerListenTogetherConnection
+
+typealias AndroidQrLoginState = LazerQrLoginState
+
+internal fun AndroidGatewayController(context: Context): LazerGatewayController =
+    LazerGatewayController(androidDevice(context))
+
+internal fun nextAndroidLibraryTipIndex(current: Int): Int = nextLazerLibraryTipIndex(current)

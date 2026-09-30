@@ -1,13 +1,13 @@
 package dev.naominet.lazer
 
-import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.graphics.asImageBitmap
+
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.GatewayHttpException
+import dev.naominet.lazer.gateway.GatewaySessionStore
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
@@ -47,7 +47,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.math.abs
 
-enum class AndroidRootDestination(private val labelKey: String, val motionIndex: Int) {
+enum class LazerRootDestination(private val labelKey: String, val motionIndex: Int) {
     HOME("nav.today", 0),
     SEARCH("nav.search", 1),
     LIBRARY("nav.library", 2),
@@ -56,7 +56,7 @@ enum class AndroidRootDestination(private val labelKey: String, val motionIndex:
     val label: String get() = tr(labelKey)
 }
 
-enum class AndroidLoginMethod(private val labelKey: String) {
+enum class LazerLoginMethod(private val labelKey: String) {
     CAPTCHA("login.method.captcha"),
     PASSWORD("login.method.password"),
     QR_CODE("login.method.qr"),
@@ -65,7 +65,7 @@ enum class AndroidLoginMethod(private val labelKey: String) {
     val label: String get() = tr(labelKey)
 }
 
-enum class AndroidQrLoginState {
+enum class LazerQrLoginState {
     IDLE,
     CREATING,
     WAITING_FOR_SCAN,
@@ -74,12 +74,12 @@ enum class AndroidQrLoginState {
     ERROR,
 }
 
-private data class AndroidCachedSignedInContent(
+private data class LazerCachedSignedInContent(
     val userPlaylists: List<LazerPlaylist>,
     val likedSongIds: Set<Long>,
 )
 
-private data class AndroidCachedBootstrap(
+private data class LazerCachedBootstrap(
     val hasSavedSession: Boolean,
     val featuredPlaylists: List<LazerPlaylist>,
     val homeTracks: List<LazerTrack>,
@@ -91,30 +91,30 @@ private data class AndroidCachedBootstrap(
 private const val MESSAGE_BANNER_DURATION_MILLIS = 15_000L
 internal const val ANDROID_LIBRARY_TIP_COUNT = 10
 
-internal fun nextAndroidLibraryTipIndex(current: Int): Int =
+internal fun nextLazerLibraryTipIndex(current: Int): Int =
     (current + 1).mod(ANDROID_LIBRARY_TIP_COUNT)
 
 /**
  * Android presentation state backed by the shared Gateway client. All Gateway access stays here,
  * so composables only receive human-readable loading and failure states.
  */
-enum class AndroidListenTogetherConnection {
+enum class LazerListenTogetherConnection {
     CONNECTING,
     CONNECTED,
     RECONNECTING,
 }
 
-data class AndroidListenTogetherState(
+data class LazerListenTogetherState(
     val roomId: String,
     val inviterId: Long,
     val isHost: Boolean,
-    val connection: AndroidListenTogetherConnection = AndroidListenTogetherConnection.CONNECTING,
+    val connection: LazerListenTogetherConnection = LazerListenTogetherConnection.CONNECTING,
     val participants: List<ListenTogetherParticipant> = emptyList(),
     val remoteTrackId: Long? = null,
 )
 
 /** One page of song comments, accumulated so the sheet can keep its scroll position. */
-data class AndroidSongCommentState(
+data class LazerSongCommentState(
     val songId: Long = 0,
     val loading: Boolean = false,
     val loadingMore: Boolean = false,
@@ -125,7 +125,7 @@ data class AndroidSongCommentState(
     val comments: List<SongComment> = emptyList(),
 )
 
-private data class AndroidListenTogetherPlaybackKey(
+private data class LazerListenTogetherPlaybackKey(
     val trackId: Long?,
     val isPlaying: Boolean,
 )
@@ -135,11 +135,13 @@ private const val LISTEN_TOGETHER_HEARTBEAT_MILLIS = 10_000L
 private const val LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS = 4_000L
 private const val COMMENT_PAGE_SIZE = 20
 
-class AndroidGatewayController(context: Context) {
-    private val appContext = context.applicationContext
-    private val cache = AndroidPlaylistCache(appContext)
-    private val settings = AndroidSettingsStore(appContext)
-    private val gatewaySessionStore = AndroidGatewaySessionStore(appContext)
+class LazerGatewayController(private val device: LazerDevice) {
+    private val cache: LazerLibraryCache = device.cache
+    private val player: LazerPlayer = device.player
+    private val host: LazerPlatformHost = device.host
+
+    private val settings: LazerSettingsStore = device.settings
+    private val gatewaySessionStore: GatewaySessionStore = device.sessionStore
     private val gateway = NeteaseMusicGateway(
         sessionStore = gatewaySessionStore,
     )
@@ -155,7 +157,7 @@ class AndroidGatewayController(context: Context) {
     private var playlistRequestGeneration = 0L
     private var hasCompletedBootstrap = false
 
-    var destination by mutableStateOf(AndroidRootDestination.HOME)
+    var destination by mutableStateOf(LazerRootDestination.HOME)
         private set
     var libraryTipIndex by mutableIntStateOf(-1)
         private set
@@ -210,7 +212,7 @@ class AndroidGatewayController(context: Context) {
     var hapticsEnabled by mutableStateOf(settings.hapticsEnabled)
         private set
     val independentPlayback: Boolean
-        get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
+        get() = playbackInterface == LazerPlaybackInterface.INDEPENDENT
     var currentUser by mutableStateOf<UserProfile?>(null)
         private set
     var featuredPlaylists by mutableStateOf<List<LazerPlaylist>>(emptyList())
@@ -260,7 +262,7 @@ class AndroidGatewayController(context: Context) {
     var isSearching by mutableStateOf(false)
         private set
 
-    var lyrics by mutableStateOf<List<AndroidTimedLyricLine>>(emptyList())
+    var lyrics by mutableStateOf<List<TimedLyricLine>>(emptyList())
         private set
     var lyricsLoading by mutableStateOf(false)
         private set
@@ -269,7 +271,7 @@ class AndroidGatewayController(context: Context) {
 
     var isLoginVisible by mutableStateOf(false)
         private set
-    var loginMethod by mutableStateOf(AndroidLoginMethod.CAPTCHA)
+    var loginMethod by mutableStateOf(LazerLoginMethod.CAPTCHA)
         private set
     var loginPhone by mutableStateOf("")
         private set
@@ -289,7 +291,7 @@ class AndroidGatewayController(context: Context) {
         private set
     var qrImageData by mutableStateOf<String?>(null)
         private set
-    var qrState by mutableStateOf(AndroidQrLoginState.IDLE)
+    var qrState by mutableStateOf(LazerQrLoginState.IDLE)
         private set
 
     val currentSessionCookie: String?
@@ -297,7 +299,7 @@ class AndroidGatewayController(context: Context) {
 
     var isListenTogetherVisible by mutableStateOf(false)
         private set
-    var listenTogether by mutableStateOf<AndroidListenTogetherState?>(null)
+    var listenTogether by mutableStateOf<LazerListenTogetherState?>(null)
         private set
     var isListenTogetherBusy by mutableStateOf(false)
         private set
@@ -313,15 +315,15 @@ class AndroidGatewayController(context: Context) {
     private var lastListenTogetherRoomQueueIds: List<Long> = emptyList()
     private var lastReportedQueueIds: List<Long> = emptyList()
     private var lastAppliedRemoteSequence = -1L
-    private var lastStablePlayback: AndroidListenTogetherPlaybackKey? = null
-    private var pendingRemotePlayback: AndroidListenTogetherPlaybackKey? = null
+    private var lastStablePlayback: LazerListenTogetherPlaybackKey? = null
+    private var pendingRemotePlayback: LazerListenTogetherPlaybackKey? = null
     private var pendingListenTogetherInvitation: String? = null
     private var lastHeartbeatMillis = 0L
 
     val listenTogetherShareUrl: String?
         get() {
             val room = listenTogether ?: return null
-            val songId = AndroidPlaybackConnection.snapshot.value.track?.id
+            val songId = player.snapshot.value.track?.id
                 ?: room.remoteTrackId
                 ?: LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
             return dev.naominet.lazer.gateway.model.ListenTogetherInvite(
@@ -359,28 +361,28 @@ class AndroidGatewayController(context: Context) {
         isQueueSheetVisible = false
     }
 
-    fun setPlayMode(mode: LazerPlayMode) = AndroidPlaybackConnection.setPlayMode(appContext, mode)
+    fun setPlayMode(mode: LazerPlayMode) = player.setPlayMode(mode)
 
-    fun playQueueAt(position: Int) = AndroidPlaybackConnection.playAt(appContext, position)
+    fun playQueueAt(position: Int) = player.playAt(position)
 
-    fun removeFromQueue(position: Int) = AndroidPlaybackConnection.removeAt(appContext, position)
+    fun removeFromQueue(position: Int) = player.removeAt(position)
 
-    fun moveInQueue(from: Int, to: Int) = AndroidPlaybackConnection.moveTrack(from, to)
+    fun moveInQueue(from: Int, to: Int) = player.moveTrack(from, to)
 
     var isCommentSheetVisible by mutableStateOf(false)
         private set
-    var comments by mutableStateOf(AndroidSongCommentState())
+    var comments by mutableStateOf(LazerSongCommentState())
         private set
 
     private var commentJob: Job? = null
-    private val commentPages = mutableMapOf<Long, AndroidSongCommentState>()
+    private val commentPages = mutableMapOf<Long, LazerSongCommentState>()
 
     /** Paints the cached page first, then asks the service for the same page again. */
     fun openSongComments() {
-        val songId = AndroidPlaybackConnection.snapshot.value.track?.id ?: return
+        val songId = player.snapshot.value.track?.id ?: return
         isCommentSheetVisible = true
         val cached = commentPages[songId]
-        comments = cached ?: AndroidSongCommentState(songId = songId, loading = true)
+        comments = cached ?: LazerSongCommentState(songId = songId, loading = true)
         requestSongComments(songId, offset = 0, append = false)
     }
 
@@ -509,7 +511,7 @@ class AndroidGatewayController(context: Context) {
                 }
                 return@launch
             }
-            val merged = AndroidSongCommentState(
+            val merged = LazerSongCommentState(
                 songId = songId,
                 total = page.total,
                 hasMore = page.more,
@@ -538,13 +540,13 @@ class AndroidGatewayController(context: Context) {
                     ListenTogetherRoomKind.Multi -> gateway.listenTogetherCreateMultiRoom(
                         songId = currentPlaybackTrack()?.id ?: error("no track to share"),
                         nextSongIds = upcomingTrackIds(),
-                        playedTimeMillis = AndroidPlaybackConnection.snapshot.value.positionMillis,
+                        playedTimeMillis = player.snapshot.value.positionMillis,
                     )
                 }
                 requireListenTogetherSuccess(response)
                 val roomId = listenTogetherCreatedRoomId(response) ?: error("room id missing")
                 requireListenTogetherSuccess(gateway.listenTogetherRoomCheck(roomId))
-                listenTogether = AndroidListenTogetherState(
+                listenTogether = LazerListenTogetherState(
                     roomId = roomId,
                     inviterId = user.userId,
                     isHost = true,
@@ -560,7 +562,7 @@ class AndroidGatewayController(context: Context) {
         }
     }
 
-    private fun currentPlaybackTrack(): LazerTrack? = AndroidPlaybackConnection.snapshot.value.track
+    private fun currentPlaybackTrack(): LazerTrack? = player.snapshot.value.track
 
     /** Songs after the current one, which is what a multi-person room seeds its queue with. */
     private fun upcomingTrackIds(): List<Long> {
@@ -597,7 +599,7 @@ class AndroidGatewayController(context: Context) {
             runCatching {
                 requireListenTogetherSuccess(gateway.listenTogetherAccept(invite.roomId, invite.inviterId))
                 requireListenTogetherSuccess(gateway.listenTogetherRoomCheck(invite.roomId))
-                listenTogether = AndroidListenTogetherState(
+                listenTogether = LazerListenTogetherState(
                     roomId = invite.roomId,
                     inviterId = invite.inviterId,
                     isHost = false,
@@ -635,12 +637,12 @@ class AndroidGatewayController(context: Context) {
     /** Starts local playback and remembers its queue so room participants receive the same order. */
     fun play(queue: List<LazerTrack>, track: LazerTrack) {
         listenTogetherQueue = queue.ifEmpty { listOf(track) }.distinctBy(LazerTrack::id)
-        AndroidPlaybackConnection.play(appContext, listenTogetherQueue, track)
+        player.play(listenTogetherQueue, track)
     }
 
     fun seekTo(positionMillis: Long) {
-        AndroidPlaybackConnection.seekTo(appContext, positionMillis)
-        val snapshot = AndroidPlaybackConnection.snapshot.value
+        player.seekTo(positionMillis)
+        val snapshot = player.snapshot.value
         scope.launch {
             if (listenTogether != null) {
                 runCatching { reportPlaybackCommand("SEEK", snapshot.copy(positionMillis = positionMillis)) }
@@ -697,13 +699,13 @@ class AndroidGatewayController(context: Context) {
                         }
                     }
                     listenTogether = room.copy(
-                        connection = AndroidListenTogetherConnection.CONNECTED,
+                        connection = LazerListenTogetherConnection.CONNECTED,
                         participants = status?.participants ?: room.participants,
                         remoteTrackId = remote?.targetSongId?.takeIf { it > 0L } ?: room.remoteTrackId,
                     )
 
                     val now = System.currentTimeMillis()
-                    val snapshot = AndroidPlaybackConnection.snapshot.value
+                    val snapshot = player.snapshot.value
                     val heartbeatTrack = snapshot.track
                     if (heartbeatTrack != null && now - lastHeartbeatMillis >= LISTEN_TOGETHER_HEARTBEAT_MILLIS) {
                         val heartbeat = gateway.listenTogetherHeartbeat(
@@ -728,7 +730,7 @@ class AndroidGatewayController(context: Context) {
                         message = tr("listen_together.closed_remote")
                         break
                     }
-                    listenTogether = room.copy(connection = AndroidListenTogetherConnection.RECONNECTING)
+                    listenTogether = room.copy(connection = LazerListenTogetherConnection.RECONNECTING)
                 }
                 delay(LISTEN_TOGETHER_REFRESH_MILLIS)
             }
@@ -739,7 +741,7 @@ class AndroidGatewayController(context: Context) {
         listenTogetherSequence = 1L
         listenTogetherPlaylistState = null
         listenTogetherVersions = emptyList()
-        listenTogetherQueue = AndroidPlaybackConnection.currentQueue()
+        listenTogetherQueue = player.currentQueue()
         listenTogetherRoomQueue = emptyList()
         lastListenTogetherRoomQueueIds = emptyList()
         lastReportedQueueIds = emptyList()
@@ -757,10 +759,10 @@ class AndroidGatewayController(context: Context) {
 
     private fun observeListenTogetherPlayback() {
         scope.launch {
-            AndroidPlaybackConnection.snapshot
+            player.snapshot
                 .map { snapshot ->
                     Triple(
-                        AndroidListenTogetherPlaybackKey(snapshot.track?.id, snapshot.isPlaying),
+                        LazerListenTogetherPlaybackKey(snapshot.track?.id, snapshot.isPlaying),
                         snapshot.isPreparing,
                         snapshot,
                     )
@@ -793,7 +795,7 @@ class AndroidGatewayController(context: Context) {
     }
 
     private suspend fun reportCurrentPlaybackToRoom(forceQueue: Boolean) {
-        val snapshot = AndroidPlaybackConnection.snapshot.value
+        val snapshot = player.snapshot.value
         if (snapshot.track != null) reportPlaybackCommand("GOTO", snapshot, forceQueue)
     }
 
@@ -844,22 +846,22 @@ class AndroidGatewayController(context: Context) {
         val targetId = remote.targetSongId.takeIf { it > 0L } ?: return
         if (remote.clientSequence <= lastAppliedRemoteSequence) return
         val shouldPlay = remote.playStatus.equals("PLAY", ignoreCase = true)
-        val local = AndroidPlaybackConnection.snapshot.value
+        val local = player.snapshot.value
         val alreadyAligned = local.track?.id == targetId &&
             local.isPlaying == shouldPlay &&
             abs(local.positionMillis - remote.progressMillis) < LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS
         lastAppliedRemoteSequence = remote.clientSequence
         if (alreadyAligned) return
 
-        pendingRemotePlayback = AndroidListenTogetherPlaybackKey(targetId, shouldPlay)
+        pendingRemotePlayback = LazerListenTogetherPlaybackKey(targetId, shouldPlay)
         if (local.track?.id != targetId) {
             val ids = remote.trackIds.ifEmpty { listOf(targetId) }
             val tracks = loadListenTogetherTracks(ids)
             val target = tracks.firstOrNull { it.id == targetId } ?: return
             listenTogetherQueue = tracks
             lastReportedQueueIds = ids
-            AndroidPlaybackConnection.play(
-                context = appContext,
+            player.play(
+
                 queue = tracks,
                 track = target,
                 startPlaying = shouldPlay,
@@ -871,11 +873,11 @@ class AndroidGatewayController(context: Context) {
         if (abs(local.positionMillis - remote.progressMillis) >= LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS &&
             remote.commandType.uppercase() in setOf("GOTO", "SEEK")
         ) {
-            AndroidPlaybackConnection.seekTo(appContext, remote.progressMillis)
+            player.seekTo(remote.progressMillis)
         }
         when {
-            shouldPlay && !local.isPlaying -> AndroidPlaybackConnection.resume(appContext)
-            !shouldPlay && local.isPlaying -> AndroidPlaybackConnection.pause(appContext)
+            shouldPlay && !local.isPlaying -> player.resume()
+            !shouldPlay && local.isPlaying -> player.pause()
             else -> pendingRemotePlayback = null
         }
     }
@@ -910,7 +912,7 @@ class AndroidGatewayController(context: Context) {
         settings.backgroundAlpha = backgroundAlpha
     }
 
-    fun updateBackgroundMode(value: AndroidBackgroundMode) {
+    fun updateBackgroundMode(value: LazerBackgroundMode) {
         backgroundMode = value
         settings.backgroundMode = value
     }
@@ -932,49 +934,47 @@ class AndroidGatewayController(context: Context) {
 
     private suspend fun loadBackgroundImage() {
         val path = settings.backgroundImagePath ?: return
-        val bitmap = withContext(Dispatchers.IO) {
-            runCatching {
-                android.graphics.BitmapFactory.decodeFile(path)?.asImageBitmap()
-            }.getOrNull()
+        backgroundImage = withContext(Dispatchers.Default) {
+            runCatching { host.decodeImageFile(path) }.getOrNull()
         }
-        backgroundImage = bitmap
     }
 
     /** Copies the picked image into app storage and decodes it as the new background. */
-    fun setBackgroundImage(uri: android.net.Uri) {
+    fun setBackgroundImage(source: String) {
         scope.launch {
-            val decoded = withContext(Dispatchers.IO) {
-                runCatching {
-                    val target = java.io.File(appContext.filesDir, BACKGROUND_IMAGE_FILE)
-                    appContext.contentResolver.openInputStream(uri)?.use { input ->
-                        target.outputStream().use(input::copyTo)
-                    }
-                    android.graphics.BitmapFactory.decodeFile(target.absolutePath)?.asImageBitmap()
-                }.onFailure { android.util.Log.w("AndroidGatewayController", "background load failed", it) }
+            val stored = withContext(Dispatchers.Default) {
+                runCatching { host.importImageFile(source, BACKGROUND_IMAGE_FILE) }
+                    .onFailure { host.log("background load failed", it) }
                     .getOrNull()
+            } ?: return@launch
+            val decoded = withContext(Dispatchers.Default) {
+                runCatching { host.decodeImageFile(stored) }.getOrNull()
             }
             if (decoded != null) {
                 backgroundImage = decoded
-                settings.backgroundImagePath = java.io.File(appContext.filesDir, BACKGROUND_IMAGE_FILE).absolutePath
-                updateBackgroundMode(AndroidBackgroundMode.IMAGE)
+                settings.backgroundImagePath = stored
+                updateBackgroundMode(LazerBackgroundMode.IMAGE)
             }
         }
     }
 
     fun clearBackgroundImage() {
         backgroundImage = null
+        val stored = settings.backgroundImagePath
         settings.backgroundImagePath = null
-        if (backgroundMode == AndroidBackgroundMode.IMAGE) {
-            updateBackgroundMode(AndroidBackgroundMode.SOLID)
+        if (backgroundMode == LazerBackgroundMode.IMAGE) {
+            updateBackgroundMode(LazerBackgroundMode.SOLID)
         }
-        runCatching { java.io.File(appContext.filesDir, BACKGROUND_IMAGE_FILE).delete() }
+        stored?.let { path ->
+            scope.launch { runCatching { host.deleteImportedImage(path) } }
+        }
     }
 
     val isSignedIn: Boolean get() = currentUser != null
 
-    fun selectDestination(value: AndroidRootDestination) {
-        if (value == AndroidRootDestination.LIBRARY && destination != AndroidRootDestination.LIBRARY) {
-            libraryTipIndex = nextAndroidLibraryTipIndex(libraryTipIndex)
+    fun selectDestination(value: LazerRootDestination) {
+        if (value == LazerRootDestination.LIBRARY && destination != LazerRootDestination.LIBRARY) {
+            libraryTipIndex = nextLazerLibraryTipIndex(libraryTipIndex)
         }
         destination = value
         isSettingsVisible = false
@@ -1056,7 +1056,7 @@ class AndroidGatewayController(context: Context) {
     }
 
     fun updateAudioQuality(value: AudioQuality) {
-        if (value !in ANDROID_AUDIO_QUALITY_OPTIONS || value == audioQuality) return
+        if (value !in lazerAudioQualityOptions || value == audioQuality) return
         audioQuality = value
         settings.audioQuality = value
     }
@@ -1065,14 +1065,14 @@ class AndroidGatewayController(context: Context) {
         if (exclusiveAudio == enabled) return
         exclusiveAudio = enabled
         settings.exclusiveAudio = enabled
-        AndroidPlaybackConnection.updateExclusiveAudio(appContext)
+        player.updateExclusiveAudio()
     }
 
     fun updateAudioReactiveLevels(enabled: Boolean) {
         if (audioReactiveLevels == enabled) return
         audioReactiveLevels = enabled
         settings.audioReactiveLevels = enabled
-        AndroidPlaybackConnection.updateAudioLevels(appContext)
+        player.updateAudioLevels()
     }
 
     fun updateHapticsEnabled(enabled: Boolean) {
@@ -1087,14 +1087,14 @@ class AndroidGatewayController(context: Context) {
 
     fun updateIndependentPlayback(enabled: Boolean) {
         val value = if (enabled) {
-            AndroidPlaybackInterface.INDEPENDENT
+            LazerPlaybackInterface.INDEPENDENT
         } else {
-            AndroidPlaybackInterface.SYSTEM_MEDIA
+            LazerPlaybackInterface.SYSTEM_MEDIA
         }
         if (playbackInterface == value) return
         playbackInterface = value
         settings.playbackInterface = value
-        AndroidPlaybackConnection.updatePlaybackInterface(appContext)
+        player.updatePlaybackInterface()
     }
 
     fun isSongLiked(songId: Long): Boolean = songId in likedSongIds
@@ -1128,7 +1128,7 @@ class AndroidGatewayController(context: Context) {
         isPlaylistLoading = true
         playlistJob = scope.launch {
             val persistedTracks = if (cachedTracks.isEmpty()) {
-                withContext(Dispatchers.IO) { cache.loadTracks(playlist.id) }
+                withContext(Dispatchers.Default) { cache.loadTracks(playlist.id) }
             } else {
                 cachedTracks
             }
@@ -1185,23 +1185,16 @@ class AndroidGatewayController(context: Context) {
         isArtistLoading = false
     }
 
-    fun saveArtwork(url: String, destination: android.net.Uri, title: String) {
+    fun saveArtwork(url: String, target: String, title: String) {
         scope.launch {
             message = tr("cover.save.saving")
-            val saved = withContext(Dispatchers.IO) {
+            val saved = withContext(Dispatchers.Default) {
                 runCatching {
-                    val connection = java.net.URL(url).openConnection().apply {
-                        connectTimeout = 12_000
-                        readTimeout = 20_000
-                        setRequestProperty("User-Agent", "Lazer/1.2")
+                    val bytes = host.downloadFile(url) ?: return@runCatching false
+                    host.writeExportedFile(target, bytes).also { written ->
+                        if (!written) runCatching { host.deleteExportedFile(target) }
                     }
-                    connection.getInputStream().buffered().use { input ->
-                        checkNotNull(appContext.contentResolver.openOutputStream(destination, "w"))
-                            .buffered().use(input::copyTo)
-                    }
-                }.isSuccess.also { success ->
-                    if (!success) runCatching { appContext.contentResolver.delete(destination, null, null) }
-                }
+                }.getOrDefault(false)
             }
             message = if (saved) tr("cover.save.success", title) else tr("cover.save.fail")
         }
@@ -1244,24 +1237,24 @@ class AndroidGatewayController(context: Context) {
     fun loadLyrics(trackId: Long) {
         lyricJob?.cancel()
         lyrics = emptyList()
-        SuperLyricPublisher.updateLyrics(trackId, emptyList())
+        host.publishLyrics(trackId, emptyList())
         lyricsMessage = null
         lyricsLoading = true
         lyricJob = scope.launch {
             try {
                 val response = gateway.preferredLyrics(trackId)
-                val timedLyrics = parseAndroidWordLyrics(response.yrc?.lyric)
-                    .ifEmpty { parseAndroidLrc(response.lrc?.lyric) }
-                val merged = mergeAndroidLyrics(
+                val timedLyrics = parseTimedWordLyrics(response.yrc?.lyric)
+                    .ifEmpty { parseTimedLrc(response.lrc?.lyric) }
+                val merged = mergeTimedLyrics(
                     timedLyrics,
-                    parseAndroidLrc(response.tlyric?.lyric),
+                    parseTimedLrc(response.tlyric?.lyric),
                 )
                 lyrics = merged
-                SuperLyricPublisher.updateLyrics(trackId, merged)
+                host.publishLyrics(trackId, merged)
                 lyricsMessage = if (merged.isEmpty()) tr("status.no_lyrics") else null
             } catch (_: Throwable) {
                 lyrics = emptyList()
-                SuperLyricPublisher.updateLyrics(trackId, emptyList())
+                host.publishLyrics(trackId, emptyList())
                 lyricsMessage = tr("status.lyrics_fail")
             } finally {
                 lyricsLoading = false
@@ -1271,25 +1264,25 @@ class AndroidGatewayController(context: Context) {
 
     fun openLogin() {
         isLoginVisible = true
-        loginMethod = AndroidLoginMethod.CAPTCHA
+        loginMethod = LazerLoginMethod.CAPTCHA
         loginMessage = null
     }
 
     fun closeLogin() {
         isLoginVisible = false
         qrLoginJob?.cancel()
-        qrState = AndroidQrLoginState.IDLE
+        qrState = LazerQrLoginState.IDLE
         qrImageData = null
         loginCookie = ""
         loginMessage = null
     }
 
-    fun selectLoginMethod(method: AndroidLoginMethod) {
+    fun selectLoginMethod(method: LazerLoginMethod) {
         loginMethod = method
         loginMessage = null
-        if (method != AndroidLoginMethod.QR_CODE) {
+        if (method != LazerLoginMethod.QR_CODE) {
             qrLoginJob?.cancel()
-            qrState = AndroidQrLoginState.IDLE
+            qrState = LazerQrLoginState.IDLE
             qrImageData = null
         } else {
             startQrLogin()
@@ -1413,7 +1406,7 @@ class AndroidGatewayController(context: Context) {
     fun startQrLogin() {
         qrLoginJob?.cancel()
         qrLoginJob = scope.launch {
-            qrState = AndroidQrLoginState.CREATING
+            qrState = LazerQrLoginState.CREATING
             qrImageData = null
             loginMessage = null
             try {
@@ -1422,29 +1415,29 @@ class AndroidGatewayController(context: Context) {
                 val code = gateway.createQrCode(key, includeImage = true).data
                 qrImageData = code?.qrimg
                 check(!qrImageData.isNullOrBlank()) { tr("login.qr_empty") }
-                qrState = AndroidQrLoginState.WAITING_FOR_SCAN
+                qrState = LazerQrLoginState.WAITING_FOR_SCAN
                 while (isActive) {
                     delay(QR_POLL_INTERVAL_MILLIS)
                     when (val result = gateway.checkQrCode(key).code) {
                         800 -> {
-                            qrState = AndroidQrLoginState.EXPIRED
+                            qrState = LazerQrLoginState.EXPIRED
                             return@launch
                         }
-                        801 -> qrState = AndroidQrLoginState.WAITING_FOR_SCAN
-                        802 -> qrState = AndroidQrLoginState.WAITING_FOR_CONFIRMATION
+                        801 -> qrState = LazerQrLoginState.WAITING_FOR_SCAN
+                        802 -> qrState = LazerQrLoginState.WAITING_FOR_CONFIRMATION
                         803 -> {
                             finishLogin()
                             return@launch
                         }
                         else -> {
-                            qrState = AndroidQrLoginState.ERROR
+                            qrState = LazerQrLoginState.ERROR
                             loginMessage = tr("login.qr_fail")
                             return@launch
                         }
                     }
                 }
             } catch (_: Throwable) {
-                qrState = AndroidQrLoginState.ERROR
+                qrState = LazerQrLoginState.ERROR
                 loginMessage = tr("login.qr_gen_fail_retry")
             }
         }
@@ -1456,7 +1449,7 @@ class AndroidGatewayController(context: Context) {
         clearListenTogetherSession()
         isListenTogetherVisible = false
         scope.launch {
-            AndroidPlaybackConnection.stopAndClearSession(appContext)
+            player.stopAndClearSession()
             try {
                 gateway.logoutSession()
             } catch (_: Throwable) {
@@ -1466,7 +1459,7 @@ class AndroidGatewayController(context: Context) {
             cache.clearCurrentUser()
             userPlaylists = emptyList()
             likedSongIds = emptySet()
-            destination = AndroidRootDestination.HOME
+            destination = LazerRootDestination.HOME
             message = tr("status.logged_out")
             runCatching { loadPublicContent() }
         }
@@ -1485,8 +1478,8 @@ class AndroidGatewayController(context: Context) {
     fun clearSongCache() {
         maintenanceJob?.cancel()
         maintenanceJob = scope.launch {
-            val removed = withContext(Dispatchers.IO) {
-                appContext.cacheDir.listFiles().orEmpty().count { it.deleteRecursively() }
+            val removed = withContext(Dispatchers.Default) {
+                runCatching { host.clearPlatformCache() }.getOrDefault(0)
             }
             message = if (removed > 0) tr("status.songs_cleared") else tr("status.songs_empty")
         }
@@ -1495,7 +1488,7 @@ class AndroidGatewayController(context: Context) {
     fun clearPlaylistCache() {
         maintenanceJob?.cancel()
         maintenanceJob = scope.launch {
-            val removed = withContext(Dispatchers.IO) { cache.clearPlaylistData() }
+            val removed = withContext(Dispatchers.Default) { cache.clearPlaylistData() }
             message = if (removed > 0) tr("status.playlists_cleared") else tr("status.playlists_empty")
         }
     }
@@ -1526,10 +1519,10 @@ class AndroidGatewayController(context: Context) {
         isLoading = true
         val gatewayAtStart = gateway
         bootstrapJob = scope.launch {
-            val cached = withContext(Dispatchers.IO) {
+            val cached = withContext(Dispatchers.Default) {
                 val hasSavedSession = !gatewayAtStart.sessionCookie.isNullOrBlank()
                 val profile = cache.loadCurrentUser().takeIf { hasSavedSession }
-                AndroidCachedBootstrap(
+                LazerCachedBootstrap(
                     hasSavedSession = hasSavedSession,
                     featuredPlaylists = cache.loadFeaturedPlaylists(),
                     homeTracks = cache.loadTracks(HOME_TRACKS_CACHE_ID),
@@ -1586,7 +1579,7 @@ class AndroidGatewayController(context: Context) {
     }
 
     private suspend fun loadPublicContent(forceRefresh: Boolean = false) {
-        val freshPlaylists = withContext(Dispatchers.IO) {
+        val freshPlaylists = withContext(Dispatchers.Default) {
             gateway.topPlaylists(limit = 12, forceRefresh = forceRefresh)
                 .playlists.map(::toLazerPlaylist)
         }
@@ -1595,7 +1588,7 @@ class AndroidGatewayController(context: Context) {
             cache.saveFeaturedPlaylists(freshPlaylists)
         }
         val source = featuredPlaylists.firstOrNull() ?: return
-        val freshTracks = withContext(Dispatchers.IO) {
+        val freshTracks = withContext(Dispatchers.Default) {
             gateway.playlistTracks(source.id, limit = 50, forceRefresh = forceRefresh)
                 .songs.map(::toLazerTrack)
         }
@@ -1606,8 +1599,8 @@ class AndroidGatewayController(context: Context) {
     }
 
     private suspend fun restoreCachedSignedInContent(profile: UserProfile) {
-        val cached = withContext(Dispatchers.IO) {
-            AndroidCachedSignedInContent(
+        val cached = withContext(Dispatchers.Default) {
+            LazerCachedSignedInContent(
                 userPlaylists = cache.loadUserPlaylists(profile.userId),
                 likedSongIds = cache.loadLikedSongIds(profile.userId),
             )
@@ -1620,18 +1613,18 @@ class AndroidGatewayController(context: Context) {
         supervisorScope {
             // These endpoints are independent. Starting them together shortens a refresh by the
             // slowest request instead of the sum of all four round trips.
-            val likedSongIdsRequest = async(Dispatchers.IO) {
+            val likedSongIdsRequest = async(Dispatchers.Default) {
                 gatewayOrNull { gateway.likedSongIds(profile.userId, forceRefresh).ids.toSet() }
             }
-            val userPlaylistsRequest = async(Dispatchers.IO) {
+            val userPlaylistsRequest = async(Dispatchers.Default) {
                 gatewayOrNull { loadAllUserPlaylists(profile.userId, forceRefresh) }.orEmpty()
             }
-            val recommendedPlaylistsRequest = async(Dispatchers.IO) {
+            val recommendedPlaylistsRequest = async(Dispatchers.Default) {
                 gatewayOrNull {
                     gateway.dailyRecommendedPlaylists(forceRefresh).recommend.map(::toLazerPlaylist)
                 }.orEmpty()
             }
-            val recommendedTracksRequest = async(Dispatchers.IO) {
+            val recommendedTracksRequest = async(Dispatchers.Default) {
                 gatewayOrNull {
                     gateway.dailyRecommendedSongs(forceRefresh).data?.dailySongs.orEmpty().map(::toLazerTrack)
                 }.orEmpty()
@@ -1690,7 +1683,7 @@ class AndroidGatewayController(context: Context) {
         val refreshed = mutableListOf<LazerTrack>()
         var offset = 0
         do {
-            val page = withContext(Dispatchers.IO) {
+            val page = withContext(Dispatchers.Default) {
                 gateway.playlistTracks(
                     playlist.id,
                     limit = PLAYLIST_PAGE_SIZE,
@@ -1743,7 +1736,7 @@ class AndroidGatewayController(context: Context) {
         loginCookie = ""
         isLoginVisible = false
         qrLoginJob = null
-        qrState = AndroidQrLoginState.IDLE
+        qrState = LazerQrLoginState.IDLE
         qrImageData = null
         message = tr("status.login_success_syncing")
         pendingListenTogetherInvitation?.let { invitation ->

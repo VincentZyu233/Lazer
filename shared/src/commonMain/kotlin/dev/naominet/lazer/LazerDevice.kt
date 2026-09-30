@@ -1,5 +1,7 @@
 package dev.naominet.lazer
 
+import androidx.compose.ui.graphics.ImageBitmap
+import dev.naominet.lazer.gateway.GatewaySessionStore
 import dev.naominet.lazer.gateway.model.UserProfile
 import kotlinx.coroutines.flow.StateFlow
 
@@ -87,40 +89,38 @@ interface LazerPlayer {
 }
 
 /**
- * The screen-level asks a platform answers in its own way: scan a QR code, authorize a login in a
- * browser, hand a link to another app. Each shared screen calls these instead of a platform API, so
- * the layout and the flow stay identical while the sheet that opens belongs to the host.
+ * The file, cache and diagnostics work the shared state layer cannot do itself. Everything here is
+ * decided by the platform's storage rules; the listener never sees it, so the screens stay identical.
  */
 interface LazerPlatformHost {
-    /** Human-readable device name the About page and the lyric overlay show. */
-    val deviceLabel: String
+    /** Decodes an image the platform can read from disk, or null when it no longer exists. */
+    fun decodeImageFile(path: String): ImageBitmap?
 
-    /** Whether this build was compiled for debugging, which is what the watermark checks. */
-    val isDebugBuild: Boolean
+    /** Copies a picked image into app storage so it survives the picker going away. */
+    fun importImageFile(source: String, name: String): String?
 
-    /** Radius of the display's own corners, so sheets can meet them instead of clipping. */
-    val screenCornerRadiusPx: Float
+    fun deleteImportedImage(path: String)
 
-    fun startQrLogin(url: String, onComplete: (result: String?) -> Unit)
+    fun writeExportedFile(target: String, bytes: ByteArray): Boolean
 
-    fun scanCode(onResult: (text: String?) -> Unit)
+    fun deleteExportedFile(target: String)
 
-    fun shareText(text: String, title: String)
+    /** Fetches a cover at full size so the listener can keep it outside the app. */
+    fun downloadFile(url: String): ByteArray?
 
-    fun openExternally(url: String): Boolean
+    /** Drops the platform's own downloaded media cache. Returns how many files went away. */
+    fun clearPlatformCache(): Int
 
-    fun openSystemSoundSettings()
+    /** Hands the loaded lyric lines to whatever lyric surface the platform owns. */
+    fun publishLyrics(trackId: Long, lines: List<TimedLyricLine>)
 
-    fun pickBackgroundImage(onPicked: (path: String?) -> Unit)
-
-    fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit)
-
-    fun vibrate(durationMillis: Long)
+    fun log(message: String, error: Throwable)
 }
 
 /** Everything a platform contributes to the shared app, in one object the UI is handed. */
 class LazerDevice(
     val preferences: LazerPreferences,
+    val sessionStore: GatewaySessionStore,
     val cache: LazerLibraryCache,
     val player: LazerPlayer,
     val host: LazerPlatformHost,

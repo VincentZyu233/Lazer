@@ -831,7 +831,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     val coverDocumentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
         val request = coverSaveTarget
         coverSaveTarget = null
-        if (uri != null && request != null) controller.saveArtwork(request.url, uri, request.title)
+        if (uri != null && request != null) controller.saveArtwork(request.url, uri.toString(), request.title)
     }
     var requestedBackProgress by remember { mutableFloatStateOf(0f) }
     var isPredictiveBackRunning by remember { mutableStateOf(false) }

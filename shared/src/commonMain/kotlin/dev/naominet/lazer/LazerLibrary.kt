@@ -34,3 +34,17 @@ fun formatPlaybackTime(millis: Long): String {
     val remainder = seconds % 60
     return if (remainder < 10) "${seconds / 60}:0$remainder" else "${seconds / 60}:$remainder"
 }
+
+/**
+ * Netease cover URLs come back from different endpoints in several shapes. Every platform's image
+ * loader is handed the same absolute https form, including values cached before this existed.
+ */
+fun normalizedArtworkUrl(raw: String?): String? {
+    val value = raw?.trim()?.takeIf(String::isNotBlank) ?: return null
+    return when {
+        value.startsWith("//") -> "https:$value"
+        value.startsWith("http://", ignoreCase = true) -> "https://${value.substringAfter("://")}"
+        value.startsWith("https://", ignoreCase = true) -> value
+        else -> null
+    }
+}

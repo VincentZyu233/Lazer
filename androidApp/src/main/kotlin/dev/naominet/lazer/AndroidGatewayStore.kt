@@ -22,20 +22,6 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * Netease cover URLs are returned by different Gateway endpoints in several forms. Android 9+
- * blocks clear-text image requests, so make both fresh responses and older cached values usable
- * before Coil sees them.
- */
-internal fun normalizedArtworkUrl(raw: String?): String? {
-    val value = raw?.trim()?.takeIf(String::isNotBlank) ?: return null
-    return when {
-        value.startsWith("//") -> "https:$value"
-        value.startsWith("http://", ignoreCase = true) -> "https://${value.substringAfter("://")}"
-        value.startsWith("https://", ignoreCase = true) -> value
-        else -> null
-    }
-}
 
 /** CDN sizing is shared by the palette thumbnail and the full player artwork. */
 internal val AndroidArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
