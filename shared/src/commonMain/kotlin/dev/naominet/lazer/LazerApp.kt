@@ -239,7 +239,7 @@ private val LazerMotionEasing = LazerTokens.Motion.pageEasing
 
 // Extra bottom content padding for scrollable pages so their last rows stay reachable behind the
 // floating liquid-glass bottom controls.
-private val LocalAndroidContentBottomInset = compositionLocalOf { 0.dp }
+private val LocalLazerContentBottomInset = compositionLocalOf { 0.dp }
 
 private data class LazerCoverSaveRequest(val url: String, val title: String)
 
@@ -1077,7 +1077,7 @@ private fun LazerAppContent(
             // Android 16 forces edge-to-edge. Keep the visual canvas under the status bar, while
             // placing every interactive root-page element below its dynamic inset.
             CompositionLocalProvider(
-                LocalAndroidContentBottomInset provides floatingControlsInset,
+                LocalLazerContentBottomInset provides floatingControlsInset,
                 LocalLazerUiAlpha provides uiAlpha,
             ) {
             Column(
@@ -1095,7 +1095,7 @@ private fun LazerAppContent(
                 Box(Modifier.weight(1f)) {
                     // Keep the root page mounted. Detail pages animate above it, so returning from
                     // a playlist cannot replay the root page or bottom-edge entrance animation.
-                    AndroidRootContent(
+                    LazerRootContent(
                         controller = controller,
                         currentTrackId = playback.track?.id,
                         onPlay = playFromQueue,
@@ -1125,7 +1125,7 @@ private fun LazerAppContent(
                             }
                         },
                         contentKey = LazerMainPage::contentKey,
-                        label = "android-main-page",
+                        label = "lazer-main-page",
                     ) { page ->
                         if (page.kind == LazerMainPageKind.ROOT) {
                             Box(Modifier.fillMaxSize())
@@ -1455,7 +1455,7 @@ private fun LazerDebugWatermark(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun AndroidRootContent(
+private fun LazerRootContent(
     controller: LazerGatewayController,
     currentTrackId: Long?,
     onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
@@ -1489,7 +1489,7 @@ private fun AndroidRootContent(
                 ) + fadeOut(tween(PAGE_TRANSITION_MILLIS, easing = LazerMotionEasing))
                 enter togetherWith exit
             },
-            label = "android-root",
+            label = "lazer-root",
         ) { destination ->
             when (destination) {
                 LazerRootDestination.HOME -> HomePage(controller, currentTrackId) { track ->
@@ -1570,7 +1570,7 @@ private fun LandscapeNavigationRail(
 private fun HomePage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
@@ -1599,7 +1599,7 @@ private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onP
     Box(Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize().captureLiquidGlass(searchGlass),
-            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item { Text(tr("search.title"), style = MaterialTheme.typography.headlineMedium) }
@@ -1669,7 +1669,7 @@ private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onP
 private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
@@ -1702,7 +1702,7 @@ private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, on
 private fun MePage(controller: LazerGatewayController) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (!controller.isSignedIn) {
@@ -1780,7 +1780,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
     val animationSpeedOptions = LyricAnimationSpeed.entries
     LazyColumn(
         modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 18.dp + LocalAndroidContentBottomInset.current),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 18.dp + LocalLazerContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
@@ -2124,8 +2124,10 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                                 tr("settings.exclusive.independent")
                             } else if (controller.exclusiveAudio) {
                                 tr("settings.exclusive.on")
-                            } else {
+                            } else if (screen.usesSystemAudioFocus) {
                                 tr("settings.exclusive.off.android")
+                            } else {
+                                tr("settings.exclusive.off")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
@@ -2588,7 +2590,7 @@ private fun AboutPage(onBack: () -> Unit, modifier: Modifier = Modifier) {
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp)
-            .padding(bottom = 28.dp + LocalAndroidContentBottomInset.current),
+            .padding(bottom = 28.dp + LocalLazerContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         IconButton(onClick = tapFeedback(onBack)) {
@@ -3510,7 +3512,7 @@ private fun ArtistPage(
     val colors = MaterialTheme.colorScheme
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 24.dp + LocalAndroidContentBottomInset.current),
+        contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 24.dp + LocalLazerContentBottomInset.current),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         item {
@@ -3629,7 +3631,7 @@ private fun StandardPlaylistDetail(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, (if (currentTrackIndex >= 0) 96.dp else 20.dp) + LocalAndroidContentBottomInset.current),
+            contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, (if (currentTrackIndex >= 0) 96.dp else 20.dp) + LocalLazerContentBottomInset.current),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
@@ -3722,7 +3724,7 @@ private fun LiquidGlassPlaylistDetail(
                 modifier = Modifier.fillMaxSize().then(if (isLandscapeLayout()) Modifier else Modifier.statusBarsPadding()),
                 contentPadding = PaddingValues(
                     top = 39.dp,
-                    bottom = 28.dp + LocalAndroidContentBottomInset.current,
+                    bottom = 28.dp + LocalLazerContentBottomInset.current,
                 ),
             ) {
                 item(key = "playlist-hero") {
@@ -3911,7 +3913,7 @@ private fun LiquidGlassPlaylistTrackRow(
                 )
                 TranslatedTrackTitle(track.translatedTitle, secondaryText)
                 if (track.artist.isNotBlank()) {
-                    AndroidArtistNames(
+                    LazerArtistNames(
                         artists = track.artists,
                         fallback = track.artist,
                         style = MaterialTheme.typography.bodySmall,
@@ -4170,7 +4172,7 @@ private fun TrackRow(track: LazerTrack, current: Boolean, onClick: () -> Unit) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // Artist names size to their content but cap out at roughly a third of the row, so
                 // a long list ellipsizes early instead of squeezing the album caption off the card.
-                AndroidArtistNames(
+                LazerArtistNames(
                     artists = track.artists,
                     fallback = track.artist,
                     style = MaterialTheme.typography.bodySmall,
@@ -4350,7 +4352,7 @@ private fun MiniPlayer(
                 if (!compact && isPreparing) {
                     Text(tr("player.preparing"), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
                 } else if (!compact) {
-                    AndroidArtistNames(track.artists, track.artist, MaterialTheme.typography.labelSmall, colors.onSurfaceVariant)
+                    LazerArtistNames(track.artists, track.artist, MaterialTheme.typography.labelSmall, colors.onSurfaceVariant)
                 }
             }
             IconButton(
@@ -4787,7 +4789,7 @@ private fun LiquidGlassBottomDock(
 }
 
 @Composable
-private fun AndroidArtistNames(
+private fun LazerArtistNames(
     artists: List<Artist>,
     fallback: String,
     style: TextStyle,
@@ -4922,7 +4924,7 @@ private fun NowPlayingPage(
                             textAlign = TextAlign.Center,
                         )
                         TranslatedTrackTitle(track.translatedTitle)
-                        AndroidArtistNames(
+                        LazerArtistNames(
                             track.artists, track.artist,
                             MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant,
                             offerCopy = true,
@@ -5083,7 +5085,7 @@ private fun NowPlayingPage(
                                 overflow = TextOverflow.Ellipsis,
                             )
                             TranslatedTrackTitle(track.translatedTitle)
-                            AndroidArtistNames(
+                            LazerArtistNames(
                                 track.artists, track.artist,
                                 MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
                                 offerCopy = true,

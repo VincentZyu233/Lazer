@@ -68,6 +68,12 @@ interface LazerScreenHost {
      */
     val supportsAudioSpectrum: Boolean
 
+    /**
+     * Whether the platform hands mixing with other apps to its own audio-focus model. The settings
+     * hint for sharing audio says so, and where there is no focus model it should not.
+     */
+    val usesSystemAudioFocus: Boolean
+
     fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit)
 
     /** Whether the microphone permission the audio-reactive switch needs is already held. */

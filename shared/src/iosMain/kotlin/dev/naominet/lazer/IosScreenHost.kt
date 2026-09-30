@@ -182,6 +182,9 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
      */
     override val supportsAudioSpectrum: Boolean get() = false
 
+    /** iOS mixes through an audio session, not a focus stack, so the focus wording would mislead. */
+    override val usesSystemAudioFocus: Boolean get() = false
+
     override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) = onResult(false)
 
     override val microphoneGranted: Boolean get() = false
