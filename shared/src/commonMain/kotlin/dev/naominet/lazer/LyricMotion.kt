@@ -6,7 +6,6 @@ import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
-import kotlin.math.sin
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -257,108 +256,6 @@ fun amllLyricBlurRadiusDp(
 
 fun lyricWordSmoothingMillis(speed: LyricAnimationSpeed): Int =
     (96.0 / speed.scrollMultiplier).roundToInt().coerceIn(56, 180)
-
-internal data class AmllCharacterMotion(
-    val scale: Float,
-    val offsetXEm: Float,
-    val offsetYEm: Float,
-    val glowAlpha: Float,
-    val glowRadiusEm: Float,
-)
-
-/** AMLL's character emphasis: bell-shaped scale, outward spread, lift, and soft white glow. */
-internal fun amllCharacterMotion(
-    word: TimedLyricWord,
-    positionMillis: Long,
-    characterIndex: Int,
-    characterCount: Int,
-    isLastWord: Boolean,
-    speed: LyricAnimationSpeed,
-): AmllCharacterMotion {
-    val count = characterCount.coerceAtLeast(1)
-    var duration = max(1_000f, word.durationMillis.toFloat())
-    var amount = duration / 2_000f
-    amount = if (amount > 1f) sqrt(amount) else amount.pow(3)
-    var blur = duration / 3_000f
-    blur = if (blur > 1f) sqrt(blur) else blur.pow(3)
-    amount *= 0.6f
-    blur *= 0.5f
-    if (isLastWord) {
-        amount *= 1.6f
-        blur *= 1.5f
-        duration *= 1.2f
-    }
-    amount = min(1.2f, amount)
-    blur = min(0.8f, blur)
-
-    val rate = speed.scrollMultiplier.toFloat()
-    val visualDuration = duration / rate
-    val delay = word.startTimeMillis + (visualDuration / 2.5f / count) * characterIndex
-    val phase = ((positionMillis - delay) / visualDuration).coerceIn(0f, 1f)
-    val emphasis = amllEmphasisEasing(phase)
-    // AMLL layers a longer sine-shaped character float under the bell-shaped emphasis. It starts
-    // 400 ms early, which makes a held syllable rise into focus instead of popping at its timestamp.
-    val floatPhase = (
-        (positionMillis - (delay - 400f / rate)) /
-            (visualDuration * 1.4f).coerceAtLeast(1f)
-        ).coerceIn(0f, 1f)
-    val characterFloat = -sin(floatPhase * kotlin.math.PI.toFloat()) * 0.05f
-
-    return AmllCharacterMotion(
-        scale = 1f + emphasis * 0.1f * amount,
-        offsetXEm = -emphasis * 0.03f * amount * (count / 2f - characterIndex),
-        offsetYEm = amllWordFloatOffsetEm(word, positionMillis, speed) +
-            characterFloat - emphasis * 0.025f * amount,
-        glowAlpha = emphasis * blur,
-        glowRadiusEm = min(0.3f, blur * 0.3f),
-    )
-}
-
-internal fun amllWordFloatOffsetEm(
-    word: TimedLyricWord,
-    positionMillis: Long,
-    speed: LyricAnimationSpeed,
-): Float {
-    val floatDuration = max(1_000f, word.durationMillis.toFloat()) / speed.scrollMultiplier.toFloat()
-    val floatPhase = ((positionMillis - word.startTimeMillis) / floatDuration).coerceIn(0f, 1f)
-    return -cubicBezierEasing(floatPhase, 0f, 0f, 0.58f, 1f) * 0.05f
-}
-
-internal fun shouldEmphasizeLyricWord(word: TimedLyricWord): Boolean {
-    if (word.durationMillis < 1_000L) return false
-    val trimmed = word.text.trim()
-    if (trimmed.isEmpty()) return false
-    return if (trimmed.any(::isCjkCharacter)) true else trimmed.length in 2..7
-}
-
-internal fun amllEmphasisEasing(value: Float): Float {
-    val x = value.coerceIn(0f, 1f)
-    return if (x < 0.5f) {
-        cubicBezierEasing(x / 0.5f, 0.2f, 0.4f, 0.58f, 1f)
-    } else {
-        1f - cubicBezierEasing((x - 0.5f) / 0.5f, 0.3f, 0f, 0.58f, 1f)
-    }
-}
-
-private fun cubicBezierEasing(x: Float, x1: Float, y1: Float, x2: Float, y2: Float): Float {
-    var low = 0f
-    var high = 1f
-    repeat(14) {
-        val t = (low + high) / 2f
-        if (cubicBezierCoordinate(t, x1, x2) < x) low = t else high = t
-    }
-    return cubicBezierCoordinate((low + high) / 2f, y1, y2)
-}
-
-private fun cubicBezierCoordinate(t: Float, first: Float, second: Float): Float {
-    val oneMinusT = 1f - t
-    return 3f * oneMinusT * oneMinusT * t * first +
-        3f * oneMinusT * t * t * second +
-        t * t * t
-}
-
-private fun isCjkCharacter(character: Char): Boolean =
-    character.code in 0x3400..0x9FFF || character.code in 0xF900..0xFAFF
 
 internal data class TimedLyricGlyph(
     val startOffset: Int,

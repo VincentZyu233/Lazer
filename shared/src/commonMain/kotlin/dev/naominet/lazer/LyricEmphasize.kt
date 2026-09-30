@@ -130,6 +130,9 @@ internal data class LyricCharEmphasis(
 /**
  * The whole per-character answer: [glowProgress] drives scale, lean and halo, [floatProgress] drives
  * the sine-shaped lift that starts 400ms before the glow and runs 1.4 times as long.
+ *
+ * [isBackgroundLine] is AMLL's rule for its second, backing vocal sheet: it throws twice as far.
+ * Lazer has one lyric sheet, so the renderer leaves it at its default.
  */
 internal fun lyricCharEmphasis(
     strength: LyricEmphasizeStrength,
@@ -137,7 +140,7 @@ internal fun lyricCharEmphasis(
     floatProgress: Float,
     charIndex: Int,
     characterCount: Int,
-    isBackgroundLine: Boolean,
+    isBackgroundLine: Boolean = false,
 ): LyricCharEmphasis {
     val t = lyricEmphasizeEasing(glowProgress)
     val count = characterCount.coerceAtLeast(1)

@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.BlurEffect
@@ -24,10 +25,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
@@ -126,6 +129,8 @@ fun AmllLyricText(
         shaderShadowRadius.times(3f),
         MinimumLyricGlowOverflow,
     )
+    // AMLL expresses the emphasis offsets in em, so the row's own em is what converts them.
+    val emPx = with(density) { lyricEm.toPx() }
     // onTextLayout is called during measure, before the draw pass. Keep the result in a stable
     // holder so custom drawing sees the layout measured for this frame instead of the state value
     // from the previous frame.
@@ -199,19 +204,38 @@ fun AmllLyricText(
                         val measured = layoutResult.value ?: return@drawBehind
                         drawRect(color = Color.Transparent, blendMode = BlendMode.Clear)
                         val timed = timedLayout.resolve(measured, glyphs, words)
+                        val clock = animatedPosition.value.roundToLong()
                         val inset = glowOverflowPadding.toPx()
                         translate(left = inset, top = inset) {
+                            val masks = if (temporaryGlow) {
+                                emptyList()
+                            } else {
+                                timed.masksAt(clock, speed)
+                            }
                             drawLyricShaderShadow(
                                 layout = measured,
                                 // Click feedback lights the whole line, including before seek completes.
                                 hasTimedGlyphs = !temporaryGlow && timed.hasTimedGlyphs,
-                                wordMasks = if (temporaryGlow) {
-                                    emptyList()
-                                } else {
-                                    timed.masksAt(animatedPosition.value.roundToLong(), speed)
-                                },
+                                wordMasks = masks,
                                 shadowColor = shadowColor,
                             )
+                            // AMLL gives each character mid-emphasis its own blurred duplicate; the
+                            // layer's Gaussian makes that a halo, so the only extra work here is the
+                            // per-character opacity AMLL's easing curve produces. Only the line being
+                            // sung animates, so a word-less row must not sample a frozen clock.
+                            if (!temporaryGlow && active) {
+                                timed.emphasisAt(clock, speed).forEach { state ->
+                                    val alpha = state.emphasis.glowAlpha
+                                    if (alpha <= 0.001f) return@forEach
+                                    drawEmphasizedCharacter(
+                                        layout = measured,
+                                        state = state,
+                                        wordMasks = masks,
+                                        color = shadowColor.copy(alpha = shadowColor.alpha * alpha),
+                                        emPx = emPx,
+                                    )
+                                }
+                            }
                         }
                     }
                     .clearAndSetSemantics { },
@@ -243,12 +267,15 @@ fun AmllLyricText(
                     } else if (!active && effectStrength.value <= 0.001f) {
                         drawText(measured, color = color)
                     } else {
+                        val clock = animatedPosition.value.roundToLong()
                         drawAmllGlyphs(
                             layout = measured,
                             hasTimedGlyphs = true,
-                            wordMasks = timed.masksAt(animatedPosition.value.roundToLong(), speed),
+                            wordMasks = timed.masksAt(clock, speed),
+                            emphasized = timed.emphasisAt(clock, speed),
                             color = color,
                             effectStrength = effectStrength.value,
+                            emPx = emPx,
                         )
                     }
                 }
@@ -278,9 +305,13 @@ private class TimedLyricLayout {
     private var sourceWords: List<TimedLyricWord> = emptyList()
     private var timedGlyphs: List<LaidOutLyricGlyph> = emptyList()
     private var laidOutWords: List<LaidOutLyricWord> = emptyList()
+    private var wordStrengths: List<LyricEmphasizeStrength> = emptyList()
     private var cachedPosition = Long.MIN_VALUE
     private var cachedSpeed: LyricAnimationSpeed? = null
     private var cachedMasks = emptyList<LyricWordMask>()
+    private var cachedEmphasisPosition = Long.MIN_VALUE
+    private var cachedEmphasisSpeed: LyricAnimationSpeed? = null
+    private var cachedEmphasis = emptyList<LyricCharEmphasisState>()
 
     var hasTimedGlyphs: Boolean = false
         private set
@@ -297,10 +328,19 @@ private class TimedLyricLayout {
             val laidOutGlyphs = buildLaidOutGlyphs(layout, glyphs)
             timedGlyphs = laidOutGlyphs.filter { it.timing.wordIndex >= 0 }
             laidOutWords = buildLaidOutWords(layout, timedGlyphs, words)
+            wordStrengths = words.mapIndexed { index, word ->
+                lyricEmphasizeStrength(
+                    wordDurationMillis = word.durationMillis,
+                    isLastWord = index == words.lastIndex,
+                )
+            }
             hasTimedGlyphs = timedGlyphs.isNotEmpty()
             cachedPosition = Long.MIN_VALUE
             cachedSpeed = null
             cachedMasks = emptyList()
+            cachedEmphasisPosition = Long.MIN_VALUE
+            cachedEmphasisSpeed = null
+            cachedEmphasis = emptyList()
         }
         return this
     }
@@ -313,9 +353,76 @@ private class TimedLyricLayout {
         }
         return cachedMasks
     }
+
+    /**
+     * Where every timed character of the line stands this frame, with AMLL's emphasis transform
+     * already resolved. Characters outside their animation window are left out entirely: AMLL's
+     * `fill: "both"` parks them at the identity transform there, so the ordinary masked pass already
+     * paints them correctly.
+     */
+    fun emphasisAt(positionMillis: Long, speed: LyricAnimationSpeed): List<LyricCharEmphasisState> {
+        if (cachedEmphasisPosition == positionMillis && cachedEmphasisSpeed == speed) {
+            return cachedEmphasis
+        }
+        cachedEmphasisPosition = positionMillis
+        cachedEmphasisSpeed = speed
+        val layout = sourceLayout
+        if (layout == null || timedGlyphs.isEmpty()) {
+            cachedEmphasis = emptyList()
+            return cachedEmphasis
+        }
+        cachedEmphasis = buildList(timedGlyphs.size) {
+            for (glyph in timedGlyphs) {
+                val wordIndex = glyph.timing.wordIndex
+                if (wordIndex !in sourceWords.indices) continue
+                val word = sourceWords[wordIndex]
+                val strength = wordStrengths[wordIndex]
+                val glowStart = lyricEmphasizeCharStartMillis(
+                    wordStartMillis = word.startTimeMillis,
+                    strength = strength,
+                    charIndex = glyph.timing.indexInWord,
+                    characterCount = glyph.timing.characterCount,
+                )
+                val glowProgress = lyricEmphasizeElapsed(
+                    positionMillis = positionMillis,
+                    startMillis = glowStart,
+                    durationMillis = strength.durationMillis,
+                )
+                val floatProgress = lyricEmphasizeElapsed(
+                    positionMillis = positionMillis,
+                    startMillis = lyricCharFloatStartMillis(glowStart),
+                    durationMillis = lyricCharFloatDurationMillis(strength),
+                )
+                if (glowProgress <= 0f && floatProgress <= 0f) continue
+                if (glowProgress >= 1f && floatProgress >= 1f) continue
+                add(
+                    LyricCharEmphasisState(
+                        glyph = glyph,
+                        emphasis = lyricCharEmphasis(
+                            strength = strength,
+                            glowProgress = glowProgress,
+                            floatProgress = floatProgress,
+                            charIndex = glyph.timing.indexInWord,
+                            characterCount = glyph.timing.characterCount,
+                        ),
+                        lineClip = glyphLineClip(layout, glyph),
+                    ),
+                )
+            }
+        }
+        return cachedEmphasis
+    }
 }
 
-private data class LaidOutLyricGlyph(
+/** A character that is mid-emphasis this frame, and how far along it is. */
+internal class LyricCharEmphasisState(
+    val glyph: LaidOutLyricGlyph,
+    val emphasis: LyricCharEmphasis,
+    /** The line box the character belongs to, so a transform never bleeds into the next row. */
+    val lineClip: Rect,
+)
+
+internal data class LaidOutLyricGlyph(
     val timing: TimedLyricGlyph,
     val bounds: Rect,
 )
@@ -423,13 +530,80 @@ private fun DrawScope.drawAmllGlyphs(
     layout: TextLayoutResult,
     hasTimedGlyphs: Boolean,
     wordMasks: List<LyricWordMask>,
+    emphasized: List<LyricCharEmphasisState>,
     color: Color,
     effectStrength: Float,
+    emPx: Float,
 ) {
     val effect = effectStrength.coerceIn(0f, 1f)
     val dimColor = color.copy(alpha = color.alpha * (1f - effect * (1f - lyricBaseMaskAlpha())))
     drawText(textLayoutResult = layout, color = dimColor)
-    if (hasTimedGlyphs) drawTextInWordMasks(layout, wordMasks, color)
+    if (!hasTimedGlyphs) return
+    // The line is painted in two passes: everything that is merely being revealed goes in one
+    // clipped pass, and only the few characters AMLL is mid-emphasis on are drawn on their own, so
+    // the cost of the animation stays proportional to the characters that are actually moving.
+    drawTextInWordMasks(layout, wordMasks, color, punched = emphasized.map { it.glyph.bounds })
+    emphasized.forEach { state ->
+        drawEmphasizedCharacter(layout, state, wordMasks, color, emPx)
+    }
+}
+
+/**
+ * Paints one mid-emphasis character where AMLL would have it: scaled about its own centre, leaned
+ * and lifted in em, and revealed only as far as its word's mask has got by now.
+ *
+ * The character is isolated by clipping rather than by drawing a text range, which is how the rest
+ * of the line is masked too: the layout stays the single source of shaping and baseline position.
+ */
+private fun DrawScope.drawEmphasizedCharacter(
+    layout: TextLayoutResult,
+    state: LyricCharEmphasisState,
+    wordMasks: List<LyricWordMask>,
+    color: Color,
+    emPx: Float,
+) {
+    val mask = wordMasks.firstOrNull { it.wordIndex == state.glyph.timing.wordIndex } ?: return
+    val box = state.glyph.bounds
+    val emphasis = state.emphasis
+    val top = state.lineClip.top
+    val bottom = state.lineClip.bottom
+
+    translate(
+        left = emphasis.offsetXEm * emPx,
+        top = (emphasis.offsetYEm + emphasis.floatOffsetEm) * emPx,
+    ) {
+        scale(
+            pivot = Offset((box.left + box.right) / 2f, (box.top + box.bottom) / 2f),
+            scaleX = emphasis.scale,
+            scaleY = emphasis.scale,
+        ) {
+            val revealedUpTo = if (mask.fullyRevealed) {
+                mask.bounds.right
+            } else {
+                mask.fadeStartX.coerceIn(mask.bounds.left, mask.bounds.right)
+            }
+            val solidRight = box.right.coerceAtMost(revealedUpTo)
+            if (solidRight > box.left) {
+                clipRect(box.left, top, solidRight, bottom) {
+                    drawText(textLayoutResult = layout, color = color)
+                }
+            }
+            if (mask.fullyRevealed) return@scale
+            val fadeLeft = mask.fadeStartX.coerceAtLeast(box.left)
+            val fadeRight = mask.edgeX.coerceAtMost(box.right)
+            if (fadeRight <= fadeLeft) return@scale
+            clipRect(fadeLeft, top, fadeRight, bottom) {
+                drawText(
+                    textLayoutResult = layout,
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(color, color.copy(alpha = 0f)),
+                        startX = mask.fadeStartX,
+                        endX = mask.edgeX,
+                    ),
+                )
+            }
+        }
+    }
 }
 
 /** Paint AMLL's bright side over the dim base text, including the moving half-em fade band. */
@@ -437,9 +611,11 @@ private fun DrawScope.drawTextInWordMasks(
     layout: TextLayoutResult,
     wordMasks: List<LyricWordMask>,
     color: Color,
+    punched: List<Rect> = emptyList(),
 ) {
     if (wordMasks.isEmpty()) return
     val solidMask = Path().apply {
+        fillType = PathFillType.EvenOdd
         wordMasks.forEach { mask ->
             val solidRight = if (mask.fullyRevealed) {
                 mask.bounds.right
@@ -450,6 +626,8 @@ private fun DrawScope.drawTextInWordMasks(
                 addRect(Rect(mask.bounds.left, mask.bounds.top, solidRight, mask.bounds.bottom))
             }
         }
+        // Even-odd turns a character that is being drawn on its own into a hole in this pass.
+        punched.forEach { bounds -> addRect(bounds) }
     }
     if (!solidMask.isEmpty) {
         clipPath(solidMask) {

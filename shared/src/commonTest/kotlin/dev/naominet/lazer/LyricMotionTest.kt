@@ -130,29 +130,6 @@ class LyricMotionTest {
     }
 
     @Test
-    fun amllEmphasisIsBellShapedAndOnlyTargetsLongWords() {
-        assertEquals(0f, amllEmphasisEasing(0f), 0.001f)
-        assertTrue(amllEmphasisEasing(0.5f) > 0.99f)
-        assertEquals(0f, amllEmphasisEasing(1f), 0.001f)
-        assertTrue(shouldEmphasizeLyricWord(TimedLyricWord(0L, 1_100L, "长")))
-        assertTrue(!shouldEmphasizeLyricWord(TimedLyricWord(0L, 500L, "短")))
-    }
-
-    @Test
-    fun amllHeldCharacterFloatsInEarlyAndReturnsToTheWordBaseline() {
-        val word = TimedLyricWord(1_000L, 1_500L, "长音")
-        val early = amllCharacterMotion(word, 800L, 0, 2, false, LyricAnimationSpeed.STANDARD)
-        val peak = amllCharacterMotion(word, 1_750L, 0, 2, false, LyricAnimationSpeed.STANDARD)
-        val settled = amllCharacterMotion(word, 3_000L, 0, 2, false, LyricAnimationSpeed.STANDARD)
-
-        assertTrue(early.offsetYEm < 0f)
-        assertTrue(peak.scale > 1f)
-        assertTrue(peak.glowAlpha > 0f)
-        assertEquals(-0.05f, settled.offsetYEm, 0.001f)
-        assertEquals(1f, settled.scale, 0.001f)
-    }
-
-    @Test
     fun glyphMappingKeepsYrcSyllablesOnTheirTimedWords() {
         val words = listOf(
             TimedLyricWord(16_210L, 670L, "还"),
