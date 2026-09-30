@@ -8,9 +8,7 @@ import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.tooling.preview.Preview
 
 class MainActivity : ComponentActivity() {
     private val listenTogetherInvitation = mutableStateOf<String?>(null)
@@ -20,8 +18,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         listenTogetherInvitation.value = intent?.dataString
 
+        val controller = LazerGatewayController(androidDevice(this))
+        val screen = AndroidScreenHost(this)
         setContent {
-            AndroidLazerApp(listenTogetherInvitation.value)
+            LazerApp(
+                controller = controller,
+                screen = screen,
+                authWebView = ::AndroidNeteaseAuthWebView,
+                initialListenTogetherInvitation = listenTogetherInvitation.value,
+            )
         }
 
         if (
@@ -43,8 +48,3 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@Preview
-@Composable
-fun AppAndroidPreview() {
-    AndroidLazerApp()
-}

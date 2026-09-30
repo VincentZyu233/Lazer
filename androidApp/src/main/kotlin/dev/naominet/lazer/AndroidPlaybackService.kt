@@ -196,7 +196,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         override fun onFftDataCapture(visualizer: Visualizer?, fft: ByteArray?, samplingRate: Int) {
             val analyzer = audioLevelAnalyzer ?: return
             val waveform = latestWaveform ?: return
-            AndroidAudioLevels.publish(analyzer.analyze(waveform, fft ?: return))
+            LazerAudioLevels.publish(analyzer.analyze(waveform, fft ?: return))
         }
     }
 
@@ -931,7 +931,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         audioLevelAnalyzer = null
         audioLevelSessionId = 0
         latestWaveform = null
-        AndroidAudioLevels.clear()
+        LazerAudioLevels.clear()
     }
 
     private fun outputSampleRateHz(): Int =

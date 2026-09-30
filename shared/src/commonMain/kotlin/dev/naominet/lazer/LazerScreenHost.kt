@@ -44,7 +44,6 @@ interface LazerScreenHost {
 
     val deviceFingerprint: String
 
-    fun vibrate(durationMillis: Long)
 
     /**
      * Runs the platform's back gesture for the layer that currently owns back. [onProgress] reports
@@ -60,7 +59,6 @@ interface LazerScreenHost {
 
     fun shareText(text: String, title: String)
 
-    fun openSystemSoundSettings()
 
     fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit)
 
@@ -73,16 +71,12 @@ interface LazerScreenHost {
 
     fun scanCode(theme: LazerScanTheme, onResult: (text: String?) -> Unit)
 
-    /** Hides the system bars while the big artwork is on screen. */
-    fun setImmersive(immersive: Boolean)
 
     /** Matches the system bars to the theme, so icons stay readable on paper or on dark paper. */
     fun setStatusBarAppearance(isDark: Boolean)
 
     fun decodeImageBytes(bytes: ByteArray): ImageBitmap?
 
-    /** Renders the current cover behind the launcher's own wallpaper, where the platform allows it. */
-    fun setAlbumFlowBackground(enabled: Boolean, artwork: ImageBitmap?)
 }
 
 /**

@@ -23,8 +23,6 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 
-/** CDN sizing is shared by the palette thumbnail and the full player artwork. */
-internal val AndroidArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
 
 
 
