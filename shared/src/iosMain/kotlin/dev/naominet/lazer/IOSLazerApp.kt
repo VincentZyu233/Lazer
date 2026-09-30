@@ -49,7 +49,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -63,6 +64,7 @@ import kotlinx.coroutines.delay
 private const val IOS_COMPOSE_READY_MARKER = "LAZER_IOS_COMPOSE_READY"
 private const val IOS_COMPOSE_STAGE_PREFIX = "LAZER_IOS_COMPOSE_STAGE:"
 private var didReportIOSComposeReady = false
+private val reportedIOSComposeBounds = mutableSetOf<String>()
 
 private fun reportIOSComposeStage(stage: String) {
     println("$IOS_COMPOSE_STAGE_PREFIX$stage")
@@ -113,13 +115,14 @@ internal fun IOSLazerApp() {
             Modifier
                 .fillMaxSize()
                 .background(colors.background)
-                .onSizeChanged { reportIOSComposeStage("size:${it.width}x${it.height}") }
+                .reportIOSComposeBounds("root")
                 .drawFirstIOSFrame(),
         ) {
             reportIOSComposeStage("content")
             Box(
                 Modifier
                     .fillMaxSize()
+                    .reportIOSComposeBounds("content")
                     .captureLiquidGlass(composeGlass),
             ) {
                 if (!controller.isReady) {
@@ -167,10 +170,17 @@ internal fun IOSLazerApp() {
  * ran: a Compose root that never gets a frame from the display link leaves a live but blank shell.
  */
 private fun Modifier.drawFirstIOSFrame(): Modifier = drawWithContent {
-    content.draw(this)
+    drawContent()
     if (!didReportIOSComposeReady) {
         didReportIOSComposeReady = true
         println(IOS_COMPOSE_READY_MARKER)
+    }
+}
+
+/** Where the Compose root and its content actually landed, reported once each for the launch test. */
+private fun Modifier.reportIOSComposeBounds(tag: String): Modifier = onGloballyPositioned {
+    if (reportedIOSComposeBounds.add(tag)) {
+        reportIOSComposeStage("bounds:$tag:${it.boundsInWindow()}")
     }
 }
 
