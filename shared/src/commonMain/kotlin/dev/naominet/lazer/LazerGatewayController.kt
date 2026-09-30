@@ -138,10 +138,10 @@ private const val COMMENT_PAGE_SIZE = 20
 
 class LazerGatewayController(private val device: LazerDevice) {
     private val cache: LazerLibraryCache = device.cache
-    private val player: LazerPlayer = device.player
-    private val host: LazerPlatformHost = device.host
+    val player: LazerPlayer = device.player
+    val host: LazerPlatformHost = device.host
 
-    private val settings: LazerSettingsStore = device.settings
+    val settings: LazerSettingsStore = device.settings
     private val gatewaySessionStore: GatewaySessionStore = device.sessionStore
     private val gateway = NeteaseMusicGateway(
         sessionStore = gatewaySessionStore,

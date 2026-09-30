@@ -1,24 +1,5 @@
 package dev.naominet.lazer
 
-import android.Manifest
-import android.app.Activity
-import android.content.ClipData
-import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.BitmapFactory
-import android.os.Build
-import android.provider.Settings
-import android.util.Base64
-import android.view.RoundedCorner
-import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import androidx.activity.BackEventCompat
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.PredictiveBackHandler
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -134,8 +115,6 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
@@ -186,12 +165,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -220,9 +196,7 @@ import androidx.compose.ui.unit.lerp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
-import androidx.core.view.WindowCompat
 import coil3.compose.AsyncImage
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
 import com.kashif_e.backdrop.backdrops.layerBackdrop
@@ -235,8 +209,6 @@ import com.kashif_e.backdrop.effects.lens
 import com.kashif_e.backdrop.effects.vibrancy
 import com.kashif_e.backdrop.highlight.Highlight
 import com.kashif_e.backdrop.shadow.InnerShadow
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.material.icons.outlined.Headphones
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
@@ -796,9 +768,9 @@ private fun ExperimentalBadge() {
 }
 
 @Composable
-fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
+fun LazerApp(initialListenTogetherInvitation: String? = null) {
     val context = LocalContext.current
-    val controller = remember(context.applicationContext) { AndroidGatewayController(context.applicationContext) }
+    val controller = remember(context.applicationContext) { LazerGatewayController(context.applicationContext) }
     var pendingQrAuthorizationUrl by remember { mutableStateOf<String?>(null) }
     var rootMessage by remember { mutableStateOf<String?>(null) }
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -818,9 +790,9 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
     }
     // Library/navigation only need transport changes; position ticks belong to the visible player.
     val playback by remember {
-        AndroidPlaybackConnection.snapshot.map { it.copy(positionMillis = 0L, bufferedFraction = 0f) }
+        controller.player.snapshot.map { it.copy(positionMillis = 0L, bufferedFraction = 0f) }
             .distinctUntilChanged()
-    }.collectAsState(initial = AndroidPlaybackConnection.snapshot.value)
+    }.collectAsState(initial = controller.player.snapshot.value)
     var playerVisible by remember { mutableStateOf(false) }
     var artistChoices by remember { mutableStateOf<List<Artist>>(emptyList()) }
     var coverSaveRequest by remember { mutableStateOf<AndroidCoverSaveRequest?>(null) }
@@ -1011,10 +983,10 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
             }
         }
         val wallpaper = controller.backgroundImage.takeIf {
-            controller.backgroundMode == AndroidBackgroundMode.IMAGE
+            controller.backgroundMode == LazerBackgroundMode.IMAGE
         }
-        val usesNowPlayingPalette = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_DYNAMIC ||
-            controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_STATIC
+        val usesNowPlayingPalette = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_DYNAMIC ||
+            controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_STATIC
         val hasVisualBackground = wallpaper != null || usesNowPlayingPalette
         // The slider controls the opacity of app surfaces above visual backgrounds. The image or
         // artwork palette itself stays opaque, so navigation transitions never expose another page.
@@ -1081,9 +1053,9 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                         modifier = Modifier.fillMaxSize(),
                         cornerRadius = 0.dp,
                         veil = Color.Transparent,
-                        animated = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_DYNAMIC &&
+                        animated = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_DYNAMIC &&
                             !playerVisible,
-                        solid = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_STATIC,
+                        solid = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_STATIC,
                     )
                 }
                 Box(
@@ -1210,7 +1182,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                 if (!liquidGlass.isEnabled && !landscape) {
                     playback.track?.let { track ->
                         MiniPlayer(track, playback.isPlaying, playback.isPreparing, { playerVisible = true }) {
-                            AndroidPlaybackConnection.toggle(context)
+                            controller.player.toggle()
                         }
                     }
                     BottomDock(
@@ -1284,7 +1256,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                             onOpen = { playerVisible = true },
                             glass = liquidGlass,
                             compact = landscape,
-                            onToggle = { AndroidPlaybackConnection.toggle(context) },
+                            onToggle = { controller.player.toggle() },
                         )
                     }
                     if (!landscape) LiquidGlassBottomDock(
@@ -1323,7 +1295,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                 label = "now-playing-page",
             ) {
                 NowPlayingPage(
-                    snapshot = AndroidPlaybackConnection.snapshot.collectAsState().value,
+                    snapshot = controller.player.snapshot.collectAsState().value,
                     lyricLines = controller.lyrics,
                     lyricsLoading = controller.lyricsLoading,
                     lyricsMessage = controller.lyricsMessage,
@@ -1335,14 +1307,14 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                     liquidGlassBlurIntensity = controller.liquidGlassBlurIntensity,
                     lyricFontSizeSp = controller.lyricFontSizeSp,
                     showFullLyrics = controller.showFullLyrics,
-                    animateAlbumBackground = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_DYNAMIC,
-                    solidAlbumBackground = controller.backgroundMode == AndroidBackgroundMode.NOW_PLAYING_STATIC,
+                    animateAlbumBackground = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_DYNAMIC,
+                    solidAlbumBackground = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_STATIC,
                     isLiked = playback.track?.let { controller.isSongLiked(it.id) } == true,
                     onToggleLiked = { playback.track?.let(controller::toggleSongLiked) },
                     onDismiss = { playerVisible = false },
-                    onToggle = { AndroidPlaybackConnection.toggle(context) },
-                    onPrevious = { AndroidPlaybackConnection.previous(context) },
-                    onNext = { AndroidPlaybackConnection.next(context) },
+                    onToggle = { controller.player.toggle() },
+                    onPrevious = { controller.player.previous() },
+                    onNext = { controller.player.next() },
                     onSeek = controller::seekTo,
                     onOpenQueue = controller::openQueueSheet,
                     onOpenComments = controller::openSongComments,
@@ -1413,7 +1385,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
                 },
             )
             if ((context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-                AndroidDebugWatermark(Modifier.fillMaxSize())
+                LazerDebugWatermark(Modifier.fillMaxSize())
             }
         }
     }
@@ -1421,7 +1393,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
 }
 
 @Composable
-private fun AndroidDebugWatermark(modifier: Modifier = Modifier) {
+private fun LazerDebugWatermark(modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val watermarkText = remember {
         val model = Build.MODEL.orEmpty().ifBlank { "Unknown device" }
@@ -1467,7 +1439,7 @@ private fun AndroidDebugWatermark(modifier: Modifier = Modifier) {
 
 @Composable
 private fun AndroidRootContent(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     currentTrackId: Long?,
     onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
     onListenTogether: () -> Unit,
@@ -1503,16 +1475,16 @@ private fun AndroidRootContent(
             label = "android-root",
         ) { destination ->
             when (destination) {
-                AndroidRootDestination.HOME -> HomePage(controller, currentTrackId) { track ->
+                LazerRootDestination.HOME -> HomePage(controller, currentTrackId) { track ->
                     onPlay(controller.homeTracks, track)
                 }
-                AndroidRootDestination.SEARCH -> SearchPage(controller, currentTrackId) { track ->
+                LazerRootDestination.SEARCH -> SearchPage(controller, currentTrackId) { track ->
                     onPlay(controller.searchResults, track)
                 }
-                AndroidRootDestination.LIBRARY -> LibraryPage(controller, currentTrackId) { track ->
+                LazerRootDestination.LIBRARY -> LibraryPage(controller, currentTrackId) { track ->
                     onPlay(controller.homeTracks, track)
                 }
-                AndroidRootDestination.ME -> MePage(controller)
+                LazerRootDestination.ME -> MePage(controller)
             }
         }
     }
@@ -1520,7 +1492,7 @@ private fun AndroidRootContent(
 
 @Composable
 private fun LandscapeNavigationRail(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     onScan: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1539,7 +1511,7 @@ private fun LandscapeNavigationRail(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                AndroidRootDestination.entries.forEach { destination ->
+                LazerRootDestination.entries.forEach { destination ->
                     val selectedDestination = !controller.isSettingsVisible &&
                         controller.activeArtist == null && controller.activePlaylist == null &&
                         controller.destination == destination
@@ -1578,7 +1550,7 @@ private fun LandscapeNavigationRail(
 }
 
 @Composable
-private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
+private fun HomePage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
@@ -1599,7 +1571,7 @@ private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onP
 }
 
 @Composable
-private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
+private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val searchGlass = rememberLazerLiquidGlass(
         enabled = controller.liquidGlassEnabled,
@@ -1677,7 +1649,7 @@ private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, o
 }
 
 @Composable
-private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
+private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
@@ -1710,7 +1682,7 @@ private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, 
 }
 
 @Composable
-private fun MePage(controller: AndroidGatewayController) {
+private fun MePage(controller: LazerGatewayController) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
@@ -1749,7 +1721,7 @@ private fun MePage(controller: AndroidGatewayController) {
                 else -> items(controller.userPlaylists.take(3), key = LazerPlaylist::id) { PlaylistListRow(it, controller::openPlaylist) }
             }
             item {
-                ThemeTextButton(onClick = { controller.selectDestination(AndroidRootDestination.LIBRARY) }) {
+                ThemeTextButton(onClick = { controller.selectDestination(LazerRootDestination.LIBRARY) }) {
                     Text(tr("me.view_library"))
                 }
             }
@@ -1758,7 +1730,7 @@ private fun MePage(controller: AndroidGatewayController) {
 }
 
 @Composable
-private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifier = Modifier) {
+private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val systemMonetAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
     val context = LocalContext.current
@@ -1949,19 +1921,19 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                             )
                         }
                         SettingsDropdown(
-                            options = AndroidBackgroundMode.entries,
+                            options = LazerBackgroundMode.entries,
                             selected = controller.backgroundMode,
                             label = ::backgroundModeLabel,
                             onSelected = { mode ->
                                 controller.updateBackgroundMode(mode)
-                                if (mode == AndroidBackgroundMode.IMAGE && controller.backgroundImage == null) {
+                                if (mode == LazerBackgroundMode.IMAGE && controller.backgroundImage == null) {
                                     backgroundPicker.launch("image/*")
                                 }
                             },
                         )
                     }
 
-                    if (controller.backgroundMode == AndroidBackgroundMode.IMAGE) {
+                    if (controller.backgroundMode == LazerBackgroundMode.IMAGE) {
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
@@ -1987,10 +1959,10 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                     }
 
                     val hasSelectedVisualBackground = when (controller.backgroundMode) {
-                        AndroidBackgroundMode.SOLID -> false
-                        AndroidBackgroundMode.IMAGE -> controller.backgroundImage != null
-                        AndroidBackgroundMode.NOW_PLAYING_DYNAMIC,
-                        AndroidBackgroundMode.NOW_PLAYING_STATIC -> true
+                        LazerBackgroundMode.SOLID -> false
+                        LazerBackgroundMode.IMAGE -> controller.backgroundImage != null
+                        LazerBackgroundMode.NOW_PLAYING_DYNAMIC,
+                        LazerBackgroundMode.NOW_PLAYING_STATIC -> true
                     }
                     if (hasSelectedVisualBackground) {
                         Spacer(Modifier.height(10.dp))
@@ -2009,7 +1981,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
                         }
                     }
 
-                    if (controller.backgroundMode == AndroidBackgroundMode.IMAGE && controller.backgroundImage != null) {
+                    if (controller.backgroundMode == LazerBackgroundMode.IMAGE && controller.backgroundImage != null) {
                         Spacer(Modifier.height(6.dp))
                         Row(
                             modifier = Modifier
@@ -2656,18 +2628,18 @@ private fun paletteLabel(palette: LazerPalette): String = when (palette) {
     is LazerPalette.Custom -> tr("settings.palette.custom")
 }
 
-private fun backgroundModeLabel(mode: AndroidBackgroundMode): String = when (mode) {
-    AndroidBackgroundMode.SOLID -> tr("settings.background.mode.solid")
-    AndroidBackgroundMode.IMAGE -> tr("settings.background.mode.image")
-    AndroidBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.mode.now_playing_dynamic")
-    AndroidBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.mode.now_playing_static")
+private fun backgroundModeLabel(mode: LazerBackgroundMode): String = when (mode) {
+    LazerBackgroundMode.SOLID -> tr("settings.background.mode.solid")
+    LazerBackgroundMode.IMAGE -> tr("settings.background.mode.image")
+    LazerBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.mode.now_playing_dynamic")
+    LazerBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.mode.now_playing_static")
 }
 
-private fun backgroundModeHint(mode: AndroidBackgroundMode): String = when (mode) {
-    AndroidBackgroundMode.SOLID -> tr("settings.background.hint.solid")
-    AndroidBackgroundMode.IMAGE -> tr("settings.background.hint.image")
-    AndroidBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.hint.now_playing_dynamic")
-    AndroidBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.hint.now_playing_static")
+private fun backgroundModeHint(mode: LazerBackgroundMode): String = when (mode) {
+    LazerBackgroundMode.SOLID -> tr("settings.background.hint.solid")
+    LazerBackgroundMode.IMAGE -> tr("settings.background.hint.image")
+    LazerBackgroundMode.NOW_PLAYING_DYNAMIC -> tr("settings.background.hint.now_playing_dynamic")
+    LazerBackgroundMode.NOW_PLAYING_STATIC -> tr("settings.background.hint.now_playing_static")
 }
 
 @Composable
@@ -2813,7 +2785,7 @@ private fun AudioQualitySheet(
                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             )
             Spacer(Modifier.height(8.dp))
-            ANDROID_AUDIO_QUALITY_OPTIONS.forEach { quality ->
+            lazerAudioQualityOptions.forEach { quality ->
                 val isSelected = quality == selected
                 Row(
                     modifier = Modifier
@@ -2920,13 +2892,13 @@ private fun PlayerSheetHeader(
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun PlayQueueSheet(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val room = controller.listenTogether
-    val queue by AndroidPlaybackConnection.queue.collectAsState()
-    val snapshot by AndroidPlaybackConnection.snapshot.collectAsState()
+    val queue by controller.player.queue.collectAsState()
+    val snapshot by controller.player.snapshot.collectAsState()
     val inRoom = room != null
     val tracks = if (inRoom) controller.listenTogetherRoomQueue else queue.tracks
     val currentIndex = if (inRoom) {
@@ -3199,7 +3171,7 @@ private fun QueueRowBody(
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SongCommentSheet(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -4051,7 +4023,7 @@ private fun synthesizedLevel(index: Int, seconds: Float): Float {
 
 @Composable
 private fun MobileHeader(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     showControls: Boolean,
     onListenTogether: () -> Unit,
     onScan: () -> Unit,
@@ -4411,8 +4383,8 @@ private fun MiniPlayer(
 
 @Composable
 private fun BottomDock(
-    selected: AndroidRootDestination,
-    onSelect: (AndroidRootDestination) -> Unit,
+    selected: LazerRootDestination,
+    onSelect: (LazerRootDestination) -> Unit,
 ) {
     if (LocalLazerThemeEngine.current == LazerThemeEngine.MIUIX) {
         MiuixNavigationBar(
@@ -4423,7 +4395,7 @@ private fun BottomDock(
             defaultWindowInsetsPadding = true,
             mode = MiuixNavigationBarDisplayMode.IconAndText,
         ) {
-            AndroidRootDestination.entries.forEach { destination ->
+            LazerRootDestination.entries.forEach { destination ->
                 MiuixNavigationBarItem(
                     selected = selected == destination,
                     onClick = tapFeedback { onSelect(destination) },
@@ -4444,7 +4416,7 @@ private fun BottomDock(
         contentColor = colors.onSurface,
         tonalElevation = 0.dp,
     ) {
-        AndroidRootDestination.entries.forEach { destination ->
+        LazerRootDestination.entries.forEach { destination ->
             NavigationBarItem(
                 selected = selected == destination,
                 onClick = tapFeedback { onSelect(destination) },
@@ -4480,26 +4452,26 @@ private fun statusBarTopInset(): Dp =
 
 @Composable
 private fun LiquidGlassBottomDock(
-    selected: AndroidRootDestination,
-    onSelect: (AndroidRootDestination) -> Unit,
+    selected: LazerRootDestination,
+    onSelect: (LazerRootDestination) -> Unit,
     glass: LazerLiquidGlass,
 ) {
     val colors = MaterialTheme.colorScheme
     val pageBackdrop = glass.backdrop ?: return
     val isDark = colors.background.luminance() < 0.5f
-    val searchDestination = AndroidRootDestination.SEARCH
-    val destinations = AndroidRootDestination.entries.filterNot { it == searchDestination }
+    val searchDestination = LazerRootDestination.SEARCH
+    val destinations = LazerRootDestination.entries.filterNot { it == searchDestination }
     val barShape = RoundedCornerShape(30.dp)
     val selectorShape = RoundedCornerShape(22.dp)
     val density = androidx.compose.ui.platform.LocalDensity.current
     // While a long press is active the droplet follows the finger; otherwise `pressCenter` is null
     // and the droplet rests under the selected tab.
     var pressCenter by remember { mutableStateOf<Offset?>(null) }
-    var pressedDestination by remember { mutableStateOf<AndroidRootDestination?>(null) }
+    var pressedDestination by remember { mutableStateOf<LazerRootDestination?>(null) }
     // Set briefly on a tap while the droplet slides to the tapped tab. During the slide every icon
     // except the target drops behind the droplet, so only the target stays on top.
-    var switchingTo by remember { mutableStateOf<AndroidRootDestination?>(null) }
-    var keyboardFocusedDestination by remember { mutableStateOf<AndroidRootDestination?>(null) }
+    var switchingTo by remember { mutableStateOf<LazerRootDestination?>(null) }
+    var keyboardFocusedDestination by remember { mutableStateOf<LazerRootDestination?>(null) }
     var lastMainDestination by remember {
         mutableStateOf(selected.takeUnless { it == searchDestination } ?: destinations.first())
     }
@@ -4564,7 +4536,7 @@ private fun LiquidGlassBottomDock(
                 switchingTo = null
             }
         }
-        val renderIcons: @Composable (visible: (AndroidRootDestination) -> Boolean) -> Unit = { visible ->
+        val renderIcons: @Composable (visible: (LazerRootDestination) -> Boolean) -> Unit = { visible ->
             Row(Modifier.fillMaxSize().clearAndSetSemantics { }) {
                 destinations.forEach { destination ->
                     // Always keep the slot so both layers stay aligned; only the content toggles.
@@ -4608,12 +4580,12 @@ private fun LiquidGlassBottomDock(
                 }
             }
         }
-        val priorityOne: (AndroidRootDestination) -> Boolean = when {
+        val priorityOne: (LazerRootDestination) -> Boolean = when {
             pressCenter != null -> { destination -> destination != activeDestination }
             switchingTo != null -> { destination -> destination != switchingTo }
             else -> { _ -> false }
         }
-        val priorityZero: (AndroidRootDestination) -> Boolean = { destination -> !priorityOne(destination) }
+        val priorityZero: (LazerRootDestination) -> Boolean = { destination -> !priorityOne(destination) }
 
         Box(
             Modifier
@@ -4830,7 +4802,7 @@ private fun AndroidArtistNames(
 @Composable
 private fun NowPlayingPage(
     snapshot: LazerPlaybackSnapshot,
-    lyricLines: List<AndroidTimedLyricLine>,
+    lyricLines: List<TimedLyricLine>,
     lyricsLoading: Boolean,
     lyricsMessage: String?,
     lyricFollowDelayMillis: Long,
@@ -5604,7 +5576,7 @@ private fun Context.hasRecordAudioPermission(): Boolean =
 @Composable
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 private fun LoginSheet(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     glass: LazerLiquidGlass = LazerLiquidGlass.Disabled,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -5633,7 +5605,7 @@ private fun LoginSheet(
             Text(tr("login.continue"), style = MaterialTheme.typography.headlineSmall)
             Text(tr("login.sub.mobile"), style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                AndroidLoginMethod.entries.forEach { method ->
+                LazerLoginMethod.entries.forEach { method ->
                     ThemeTextButton(
                         onClick = { controller.selectLoginMethod(method) },
                         modifier = Modifier.weight(1f),
@@ -5648,10 +5620,10 @@ private fun LoginSheet(
                 }
             }
             when (controller.loginMethod) {
-                AndroidLoginMethod.CAPTCHA -> CaptchaLogin(controller)
-                AndroidLoginMethod.PASSWORD -> PasswordLogin(controller)
-                AndroidLoginMethod.QR_CODE -> QrLogin(controller)
-                AndroidLoginMethod.COOKIE -> CookieLogin(controller)
+                LazerLoginMethod.CAPTCHA -> CaptchaLogin(controller)
+                LazerLoginMethod.PASSWORD -> PasswordLogin(controller)
+                LazerLoginMethod.QR_CODE -> QrLogin(controller)
+                LazerLoginMethod.COOKIE -> CookieLogin(controller)
             }
             controller.loginMessage?.let {
                 Text(
@@ -5666,7 +5638,7 @@ private fun LoginSheet(
 }
 
 @Composable
-private fun CaptchaLogin(controller: AndroidGatewayController) {
+private fun CaptchaLogin(controller: LazerGatewayController) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PhoneField(controller.loginPhone, controller::updateLoginPhone)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -5688,7 +5660,7 @@ private fun CaptchaLogin(controller: AndroidGatewayController) {
 }
 
 @Composable
-private fun PasswordLogin(controller: AndroidGatewayController) {
+private fun PasswordLogin(controller: LazerGatewayController) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PhoneField(controller.loginPhone, controller::updateLoginPhone)
         OutlinedTextField(
@@ -5705,7 +5677,7 @@ private fun PasswordLogin(controller: AndroidGatewayController) {
 }
 
 @Composable
-private fun CookieLogin(controller: AndroidGatewayController) {
+private fun CookieLogin(controller: LazerGatewayController) {
     val colors = MaterialTheme.colorScheme
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(tr("login.cookie.title"), style = MaterialTheme.typography.titleMedium)
@@ -5742,28 +5714,28 @@ private fun PhoneField(value: String, onChange: (String) -> Unit) {
 }
 
 @Composable
-private fun QrLogin(controller: AndroidGatewayController) {
+private fun QrLogin(controller: LazerGatewayController) {
     val image = remember(controller.qrImageData) { decodeQrImage(controller.qrImageData) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (image != null) {
             androidx.compose.foundation.Image(image, tr("login.artwork.qr"), Modifier.size(208.dp).clip(RoundedCornerShape(18.dp)))
         } else {
             Box(Modifier.size(208.dp).clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                Text(if (controller.qrState == AndroidQrLoginState.CREATING) tr("login.qr.creating") else tr("login.qr.unavailable"), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                Text(if (controller.qrState == LazerQrLoginState.CREATING) tr("login.qr.creating") else tr("login.qr.unavailable"), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
         }
         Text(
             when (controller.qrState) {
-                AndroidQrLoginState.WAITING_FOR_SCAN -> tr("login.qr.scan.mobile")
-                AndroidQrLoginState.WAITING_FOR_CONFIRMATION -> tr("login.qr.confirm.mobile")
-                AndroidQrLoginState.EXPIRED -> tr("login.qr.expired")
-                AndroidQrLoginState.ERROR -> tr("login.qr.error.mobile")
+                LazerQrLoginState.WAITING_FOR_SCAN -> tr("login.qr.scan.mobile")
+                LazerQrLoginState.WAITING_FOR_CONFIRMATION -> tr("login.qr.confirm.mobile")
+                LazerQrLoginState.EXPIRED -> tr("login.qr.expired")
+                LazerQrLoginState.ERROR -> tr("login.qr.error.mobile")
                 else -> ""
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (controller.qrState == AndroidQrLoginState.EXPIRED || controller.qrState == AndroidQrLoginState.ERROR) {
+        if (controller.qrState == LazerQrLoginState.EXPIRED || controller.qrState == LazerQrLoginState.ERROR) {
             ThemeTextButton(controller::startQrLogin) { Text(tr("login.qr.regenerate")) }
         }
     }
@@ -5813,13 +5785,13 @@ private fun MessageBanner(
     }
 }
 
-private fun AndroidRootDestination.icon() = when (this) {
-    AndroidRootDestination.HOME -> Icons.Outlined.Home
-    AndroidRootDestination.SEARCH -> Icons.Outlined.Search
-    AndroidRootDestination.LIBRARY -> Icons.Outlined.LibraryMusic
-    AndroidRootDestination.ME -> Icons.Outlined.Person
+private fun LazerRootDestination.icon() = when (this) {
+    LazerRootDestination.HOME -> Icons.Outlined.Home
+    LazerRootDestination.SEARCH -> Icons.Outlined.Search
+    LazerRootDestination.LIBRARY -> Icons.Outlined.LibraryMusic
+    LazerRootDestination.ME -> Icons.Outlined.Person
 }
 
 @Preview(showBackground = true, widthDp = 393, heightDp = 852)
 @Composable
-private fun AndroidLazerPreview() = AndroidLazerApp()
+private fun AndroidLazerPreview() = LazerApp()
