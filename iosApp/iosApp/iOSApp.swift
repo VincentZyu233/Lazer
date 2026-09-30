@@ -60,8 +60,8 @@ final class LazerHostViewController: UIViewController {
         hosted.didMove(toParent: self)
     }
 
-    override var childForStatusBarStyle: UIViewController? { hosted }
-
+    /// UIKit asks the host, not the Compose child: the child answers with `.default`, which follows
+    /// the system's light or dark mode rather than the theme the shared screens are drawing.
     override var preferredStatusBarStyle: UIStatusBarStyle {
         LazerHostViewController.prefersDarkStatusBar ? .lightContent : .darkContent
     }
