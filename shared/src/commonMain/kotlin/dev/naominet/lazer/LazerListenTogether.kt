@@ -57,7 +57,7 @@ private val ListenTogetherRoomKind.labelKey: String
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ListenTogetherSheet(
-    controller: AndroidGatewayController,
+    controller: LazerGatewayController,
     onShare: (String) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -99,7 +99,7 @@ internal fun ListenTogetherSheet(
                     Text(
                         when {
                             room == null -> tr("listen_together.subtitle")
-                            room.connection == AndroidListenTogetherConnection.RECONNECTING ->
+                            room.connection == LazerListenTogetherConnection.RECONNECTING ->
                                 tr("listen_together.reconnecting")
                             room.participants.size > 1 -> tr("listen_together.connected")
                             else -> tr("listen_together.waiting")
@@ -147,7 +147,7 @@ internal fun ListenTogetherSheet(
 }
 
 @Composable
-private fun SignedOutListenTogether(controller: AndroidGatewayController) {
+private fun SignedOutListenTogether(controller: LazerGatewayController) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Text(
             tr("listen_together.login_required"),
@@ -238,7 +238,7 @@ private fun ListenTogetherLobby(
 
 @Composable
 private fun ActiveListenTogetherRoom(
-    room: AndroidListenTogetherState,
+    room: LazerListenTogetherState,
     busy: Boolean,
     shareUrl: String?,
     onShare: (String) -> Unit,

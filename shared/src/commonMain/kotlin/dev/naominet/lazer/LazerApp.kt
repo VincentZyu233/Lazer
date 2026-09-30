@@ -200,6 +200,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
+import androidx.compose.ui.graphics.ImageBitmap
 import com.kashif_e.backdrop.backdrops.LayerBackdrop
 import com.kashif_e.backdrop.backdrops.layerBackdrop
 import com.kashif_e.backdrop.backdrops.rememberCombinedBackdrop
@@ -762,6 +763,7 @@ fun LazerApp(
     CompositionLocalProvider(
         LocalLazerScreenHost provides screen,
         LocalLazerAuthWebView provides authWebView,
+        LocalLazerPlatformHost provides controller.host,
     ) {
         LazerAppContent(controller, initialListenTogetherInvitation)
     }
@@ -884,7 +886,7 @@ private fun LazerAppContent(
         else -> AndroidMainPage(AndroidMainPageKind.ROOT)
     }
     val windowSize = LocalWindowInfo.current.containerSize
-    val nowPlayingPaletteSeed = rememberAndroidArtworkSeed(
+    val nowPlayingPaletteSeed = rememberLazerArtworkSeed(
         playback.track.takeIf { controller.palette == LazerPalette.NowPlaying },
     )
     val paletteColorScheme = remember(
@@ -1022,7 +1024,7 @@ private fun LazerAppContent(
                     )
                 }
                 if (usesNowPlayingPalette) {
-                    AndroidAlbumFlowBackground(
+                    LazerAlbumFlowBackground(
                         track = playback.track,
                         modifier = Modifier.fillMaxSize(),
                         cornerRadius = 0.dp,
@@ -3671,7 +3673,7 @@ private fun LiquidGlassPlaylistDetail(
         // Everything the back button samples: the flow background plus the list that scrolls under
         // it.
         Box(Modifier.fillMaxSize().captureLiquidGlass(backGlass)) {
-            AndroidPlaylistFlowBackground(
+            LazerPlaylistFlowBackground(
                 playlist = playlist,
                 modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
                 cornerRadius = 0.dp,
@@ -3911,7 +3913,7 @@ private const val NOW_PLAYING_BAR_DESCENT_MILLIS = 420
  */
 @Composable
 private fun NowPlayingBars(color: Color, isPlaying: Boolean) {
-    val liveLevels = if (isPlaying) AndroidAudioLevels.levels.collectAsState().value else null
+    val liveLevels = if (isPlaying) LazerAudioLevels.levels.collectAsState().value else null
     val spectrum = liveLevels?.takeIf { it.size == AUDIO_LEVEL_BAND_COUNT }
     var phaseSeconds by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(isPlaying, spectrum != null) {
@@ -4819,7 +4821,7 @@ private fun NowPlayingPage(
     Surface(modifier.fillMaxSize(), color = colors.background) {
         if (isLandscapeLayout()) {
             Box(Modifier.fillMaxSize()) {
-                AndroidAlbumFlowBackground(
+                LazerAlbumFlowBackground(
                     track = track,
                     modifier = Modifier
                         .fillMaxSize()
@@ -4949,7 +4951,7 @@ private fun NowPlayingPage(
                         }
                     }
                     Spacer(Modifier.width(8.dp))
-                    AndroidLyricsViewport(
+                    LazerLyricsViewport(
                         track = track,
                         lines = lyricLines,
                         isLoading = lyricsLoading,
@@ -4994,7 +4996,7 @@ private fun NowPlayingPage(
             }
             val coverDensity = LocalDensity.current
             Box(Modifier.fillMaxSize().onGloballyPositioned { coverCoordinates = it }) {
-                AndroidAlbumFlowBackground(
+                LazerAlbumFlowBackground(
                     track = track,
                     modifier = Modifier.fillMaxSize().captureLiquidGlass(glass),
                     cornerRadius = 0.dp,
@@ -5073,7 +5075,7 @@ private fun NowPlayingPage(
                         )
                         val lyricsVisible by remember { derivedStateOf { coverProgress.value < 0.999f } }
                         if (lyricsVisible) {
-                            AndroidLyricsViewport(
+                            LazerLyricsViewport(
                                 track = track,
                                 lines = lyricLines,
                                 isLoading = lyricsLoading,
@@ -5641,7 +5643,7 @@ private fun PhoneField(value: String, onChange: (String) -> Unit) {
 
 @Composable
 private fun QrLogin(controller: LazerGatewayController) {
-    val image = remember(controller.qrImageData) { decodeQrImage(controller.qrImageData) }
+    val image = remember(controller.qrImageData) { decodeQrImage(controller.host, controller.qrImageData) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (image != null) {
             androidx.compose.foundation.Image(image, tr("login.artwork.qr"), Modifier.size(208.dp).clip(RoundedCornerShape(18.dp)))
@@ -5667,10 +5669,11 @@ private fun QrLogin(controller: LazerGatewayController) {
     }
 }
 
-private fun decodeQrImage(data: String?): androidx.compose.ui.graphics.ImageBitmap? = runCatching {
-    val encoded = data?.substringAfter("base64,", data).orEmpty()
-    val bytes = Base64.decode(encoded, Base64.DEFAULT)
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+@OptIn(ExperimentalStdlibApi::class)
+private fun decodeQrImage(host: LazerPlatformHost, data: String?): ImageBitmap? = runCatching {
+    val encoded = data?.substringAfter("base64,", data)?.filterNot(Char::isWhitespace)
+        ?: return null
+    host.decodeImageBytes(kotlin.io.encoding.Base64.decode(encoded))
 }.getOrNull()
 
 @Composable
@@ -5717,7 +5720,3 @@ private fun LazerRootDestination.icon() = when (this) {
     LazerRootDestination.LIBRARY -> Icons.Outlined.LibraryMusic
     LazerRootDestination.ME -> Icons.Outlined.Person
 }
-
-@Preview(showBackground = true, widthDp = 393, heightDp = 852)
-@Composable
-private fun AndroidLazerPreview() = LazerApp()

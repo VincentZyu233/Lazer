@@ -108,6 +108,9 @@ interface LazerPlatformHost {
     /** Fetches a cover at full size so the listener can keep it outside the app. */
     fun downloadFile(url: String): ByteArray?
 
+    /** Turns encoded image bytes into something the screens can draw. */
+    fun decodeImageBytes(bytes: ByteArray): ImageBitmap?
+
     /** Drops the platform's own downloaded media cache. Returns how many files went away. */
     fun clearPlatformCache(): Int
 

@@ -1,6 +1,8 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 package dev.naominet.lazer
+import androidx.compose.ui.text.AnnotatedString
 
-import android.content.ClipData
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -100,7 +102,7 @@ private val LyricSelectionStatusWidth = 108.dp
  * rather than inside the sheet because the pill refracts the lyric layer, so it cannot be part of
  * the layer it samples.
  */
-private class AndroidLyricSelection {
+private class LazerLyricSelection {
     var state by mutableStateOf(LyricSelectionState())
     var copied by mutableStateOf(false)
 
@@ -112,9 +114,9 @@ private class AndroidLyricSelection {
 }
 
 @Composable
-internal fun AndroidLyricsViewport(
+internal fun LazerLyricsViewport(
     track: LazerTrack?,
-    lines: List<AndroidTimedLyricLine>,
+    lines: List<TimedLyricLine>,
     isLoading: Boolean,
     message: String?,
     positionMillis: Long,
@@ -129,10 +131,10 @@ internal fun AndroidLyricsViewport(
     modifier: Modifier = Modifier,
 ) {
     val timeline = remember(lines, track?.durationMillis) {
-        androidLyricsWithInterludes(lines, track?.durationMillis ?: 0L)
+        timedLyricsWithInterludes(lines, track?.durationMillis ?: 0L)
     }
-    val targetInterlude = activeAndroidInterlude(timeline, positionMillis)
-    var renderedInterlude by remember(track?.id, timeline) { mutableStateOf<AndroidTimedLyricLine?>(null) }
+    val targetInterlude = activeTimedInterlude(timeline, positionMillis)
+    var renderedInterlude by remember(track?.id, timeline) { mutableStateOf<TimedLyricLine?>(null) }
     val interludePresence = remember(track?.id, timeline) { Animatable(0f) }
     LaunchedEffect(targetInterlude) {
         if (targetInterlude == renderedInterlude) return@LaunchedEffect
@@ -146,13 +148,13 @@ internal fun AndroidLyricsViewport(
         }
     }
     val displayLines = remember(timeline, renderedInterlude) {
-        androidLyricDisplayLines(timeline, renderedInterlude)
+        displayTimedLyricLines(timeline, renderedInterlude)
     }
     val colors = MaterialTheme.colorScheme
     val clipboard = LocalClipboard.current
     val answerTap = rememberTapAnswer()
     val selectionScope = rememberCoroutineScope()
-    val selection = remember(track?.id) { AndroidLyricSelection() }
+    val selection = remember(track?.id) { LazerLyricSelection() }
     val selectionKeys = remember(displayLines) { lyricLineKeys(displayLines) }
     // A second, separate backdrop: the pill sits outside the sheet's own layer, and a layer cannot
     // sample itself without feeding its own previous frame back through the glass.
@@ -170,7 +172,7 @@ internal fun AndroidLyricsViewport(
         val text = buildLyricClipboardText(displayLines, selection.state.selectedKeys)
         if (text.isBlank()) return
         selectionScope.launch {
-            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(tr("lyrics.select.copy"), text)))
+            clipboard.setClipEntry(ClipEntry(AnnotatedString(text)))
             selection.copied = true
             answerTap()
             delay(1_400L)
@@ -244,7 +246,7 @@ internal fun AndroidLyricsViewport(
 @Composable
 private fun AnimatedLyricsViewport(
     trackId: Long,
-    lines: List<AndroidTimedLyricLine>,
+    lines: List<TimedLyricLine>,
     interludePresence: Float,
     positionMillis: Long,
     followDelayMillis: Long,
@@ -253,7 +255,7 @@ private fun AnimatedLyricsViewport(
     lyricGlowEnabled: Boolean,
     lyricFontSizeSp: Int,
     showFullLyrics: Boolean,
-    selection: AndroidLyricSelection,
+    selection: LazerLyricSelection,
     onSeek: (Long) -> Unit,
     modifier: Modifier,
 ) {
@@ -263,7 +265,7 @@ private fun AnimatedLyricsViewport(
     val isDark = colors.background.luminance() < 0.5f
     // This is a value parameter, not snapshot state. Recompute from each playback update rather
     // than remembering a derived-state lambda that captures the first position for these lines.
-    val activeIndexValue = activeAndroidLyricIndex(lines, positionMillis)
+    val activeIndexValue = findCurrentLyricIndex(lines, positionMillis)
     val currentActiveIndex by rememberUpdatedState(activeIndexValue)
     val currentAnimationSpeed by rememberUpdatedState(animationSpeed)
     val currentLines by rememberUpdatedState(lines)
@@ -274,10 +276,10 @@ private fun AnimatedLyricsViewport(
     val translationLineHeightSp = (translationFontSp.value * 1.38f).sp
     val lyricMaxLines = if (showFullLyrics) Int.MAX_VALUE else 2
     val measuredRowHeightsPx = remember(trackId, lyricFontSizeSp, showFullLyrics) {
-        mutableStateMapOf<AndroidTimedLyricLine, Int>()
+        mutableStateMapOf<TimedLyricLine, Int>()
     }
     val measuredMainHeightsPx = remember(trackId, lyricFontSizeSp, showFullLyrics) {
-        mutableStateMapOf<AndroidTimedLyricLine, Int>()
+        mutableStateMapOf<TimedLyricLine, Int>()
     }
     val estimatedMainHeightPx = with(density) { mainLineHeightSp.toPx() }
     val estimatedTranslationHeightPx = with(density) { translationLineHeightSp.toPx() }
@@ -322,7 +324,7 @@ private fun AnimatedLyricsViewport(
     val lyricLineMotion = remember { LyricLineMotionField() }
     val clickGlowScope = rememberCoroutineScope()
     val clickGlowTokens = remember(trackId, lyricGlowEnabled) {
-        mutableStateMapOf<AndroidTimedLyricLine, Any>()
+        mutableStateMapOf<TimedLyricLine, Any>()
     }
     var isExtendingSelection by remember(trackId) { mutableStateOf(false) }
     val selectionKeys = remember(lines) { lyricLineKeys(lines) }
@@ -359,7 +361,7 @@ private fun AnimatedLyricsViewport(
         followPlayback = true
         isDragging = false
         flingVelocity = 0f
-        val initialIndex = activeAndroidLyricIndex(lines, positionMillis).coerceAtLeast(0)
+        val initialIndex = findCurrentLyricIndex(lines, positionMillis).coerceAtLeast(0)
         lyricScroll = lineCentersPx.getOrElse(initialIndex) { 0f }
         lyricLineMotion.reset(lines.size, lyricScroll)
         lastFrameNanos = 0L

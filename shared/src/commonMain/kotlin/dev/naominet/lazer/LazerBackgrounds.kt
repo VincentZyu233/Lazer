@@ -1,7 +1,5 @@
 package dev.naominet.lazer
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -9,25 +7,38 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
-import java.net.URL
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-private val ArtworkSeedCache = android.util.LruCache<String, Color>(24)
+/** Keeps the last few seeds so scrolling back over a list does not re-download artwork. */
+private class LazerArtworkSeedCache(private val capacity: Int) {
+    private val entries = LinkedHashMap<String, Color>()
+
+    fun get(key: String): Color? = entries.remove(key)?.also { entries[key] = it }
+
+    fun put(key: String, value: Color) {
+        entries[key] = value
+        while (entries.size > capacity) entries.remove(entries.keys.first())
+    }
+}
+
+private val ArtworkSeedCache = LazerArtworkSeedCache(capacity = 24)
 private val ArtworkSeedMutex = Mutex()
 private val DefaultArtworkSeed = Color(0xFF5F91AC)
 
 @Composable
-internal fun AndroidAlbumFlowBackground(
+internal fun LazerAlbumFlowBackground(
     track: LazerTrack?,
     modifier: Modifier = Modifier,
     cornerRadius: Dp,
@@ -36,9 +47,9 @@ internal fun AndroidAlbumFlowBackground(
     solid: Boolean = false,
 ) {
     if (solid) {
-        AndroidArtworkSolidBackground(track, modifier, cornerRadius, veil)
+        LazerArtworkSolidBackground(track, modifier, cornerRadius, veil)
     } else {
-        AndroidArtworkFlowBackground(
+        LazerArtworkFlowBackground(
             artworkKey = track?.id,
             coverUrl = track?.coverUrl,
             modifier = modifier,
@@ -50,13 +61,13 @@ internal fun AndroidAlbumFlowBackground(
 }
 
 @Composable
-internal fun AndroidPlaylistFlowBackground(
+internal fun LazerPlaylistFlowBackground(
     playlist: LazerPlaylist,
     modifier: Modifier = Modifier,
     cornerRadius: Dp,
     veil: Color,
 ) {
-    AndroidArtworkFlowBackground(
+    LazerArtworkFlowBackground(
         artworkKey = playlist.id,
         coverUrl = playlist.coverUrl,
         modifier = modifier,
@@ -68,22 +79,27 @@ internal fun AndroidPlaylistFlowBackground(
 
 /** Keeps the previous artwork seed until the next cover has been decoded. */
 @Composable
-internal fun rememberAndroidArtworkSeed(track: LazerTrack?): Color? {
+internal fun rememberLazerArtworkSeed(track: LazerTrack?): Color? {
+    val host = LocalLazerPlatformHost.current
     var seed by remember { mutableStateOf<Color?>(null) }
     LaunchedEffect(track?.id, track?.coverUrl) {
-        seed = if (track == null) null else extractAndroidArtworkSeed(track.coverUrl) ?: DefaultArtworkSeed
+        seed = if (track == null || host == null) {
+            null
+        } else {
+            extractLazerArtworkSeed(host, track.coverUrl) ?: DefaultArtworkSeed
+        }
     }
     return seed
 }
 
 @Composable
-private fun AndroidArtworkSolidBackground(
+private fun LazerArtworkSolidBackground(
     track: LazerTrack?,
     modifier: Modifier,
     cornerRadius: Dp,
     veil: Color,
 ) {
-    val seed = rememberAndroidArtworkSeed(track) ?: DefaultArtworkSeed
+    val seed = rememberLazerArtworkSeed(track) ?: DefaultArtworkSeed
     LazerAlbumFlowBackground(
         colors = flowColorsFromSeed(seed),
         modifier = modifier,
@@ -95,7 +111,7 @@ private fun AndroidArtworkSolidBackground(
 }
 
 @Composable
-private fun AndroidArtworkFlowBackground(
+private fun LazerArtworkFlowBackground(
     artworkKey: Long?,
     coverUrl: String?,
     modifier: Modifier,
@@ -103,9 +119,10 @@ private fun AndroidArtworkFlowBackground(
     veil: Color,
     animated: Boolean,
 ) {
+    val host = LocalLazerPlatformHost.current
     var colors by remember { mutableStateOf(flowColorsFromSeed(DefaultArtworkSeed)) }
-    LaunchedEffect(artworkKey, coverUrl) {
-        colors = extractAndroidFlowPalette(coverUrl)
+    LaunchedEffect(artworkKey, coverUrl, host) {
+        if (host != null) colors = extractLazerFlowPalette(host, coverUrl)
     }
     LazerAlbumFlowBackground(
         colors = colors,
@@ -116,39 +133,30 @@ private fun AndroidArtworkFlowBackground(
     )
 }
 
-private suspend fun extractAndroidFlowPalette(coverUrl: String?): List<Color> =
-    extractAndroidArtworkSeed(coverUrl)?.let(::flowColorsFromSeed)
+private suspend fun extractLazerFlowPalette(host: LazerPlatformHost, coverUrl: String?): List<Color> =
+    extractLazerArtworkSeed(host, coverUrl)?.let(::flowColorsFromSeed)
         ?: flowColorsFromSeed(DefaultArtworkSeed)
 
-private suspend fun extractAndroidArtworkSeed(coverUrl: String?): Color? = withContext(Dispatchers.IO) {
-    if (coverUrl.isNullOrBlank()) return@withContext null
-    val artworkUrl = coverUrl.toAndroidPaletteArtworkUrl()
-    ArtworkSeedCache.get(artworkUrl)?.let { return@withContext it }
-    ArtworkSeedMutex.withLock {
-        ArtworkSeedCache.get(artworkUrl)?.let { return@withLock it }
-        runCatching {
-            val connection = URL(artworkUrl).openConnection() as HttpURLConnection
-            connection.connectTimeout = 8_000
-            connection.readTimeout = 8_000
-            connection.setRequestProperty("User-Agent", "Lazer/1.2")
-            try {
-                val bitmap = connection.inputStream.use(BitmapFactory::decodeStream)
-                    ?: return@runCatching null
-                try {
-                    seedFromBitmap(bitmap).also { ArtworkSeedCache.put(artworkUrl, it) }
-                } finally {
-                    bitmap.recycle()
-                }
-            } finally {
-                connection.disconnect()
-            }
-        }.getOrNull()
+private suspend fun extractLazerArtworkSeed(host: LazerPlatformHost, coverUrl: String?): Color? =
+    withContext(Dispatchers.Default) {
+        if (coverUrl.isNullOrBlank()) return@withContext null
+        val artworkUrl = coverUrl.toLazerPaletteArtworkUrl()
+        ArtworkSeedCache.get(artworkUrl)?.let { return@withContext it }
+        ArtworkSeedMutex.withLock {
+            ArtworkSeedCache.get(artworkUrl)?.let { return@withLock it }
+            runCatching {
+                val bytes = host.downloadFile(artworkUrl) ?: return@runCatching null
+                val artwork = host.decodeImageBytes(bytes) ?: return@runCatching null
+                seedFromArtwork(artwork).also { ArtworkSeedCache.put(artworkUrl, it) }
+            }.getOrNull()
+        }
     }
-}
 
-private fun seedFromBitmap(bitmap: Bitmap): Color {
-    val width = bitmap.width
-    val height = bitmap.height
+@OptIn(ExperimentalComposeUiApi::class)
+private fun seedFromArtwork(artwork: ImageBitmap): Color {
+    val pixelMap = artwork.toPixelMap()
+    val width = pixelMap.width
+    val height = pixelMap.height
     if (width <= 0 || height <= 0) return DefaultArtworkSeed
     val stepX = max(1, width / 48)
     val stepY = max(1, height / 48)
@@ -164,11 +172,11 @@ private fun seedFromBitmap(bitmap: Bitmap): Color {
     while (y < height) {
         var x = 0
         while (x < width) {
-            val pixel = bitmap.getPixel(x, y)
-            if ((pixel ushr 24) and 0xFF >= 128) {
-                val red = (pixel shr 16) and 0xFF
-                val green = (pixel shr 8) and 0xFF
-                val blue = pixel and 0xFF
+            val pixel = pixelMap[x, y]
+            if (pixel.alpha >= 0.5f) {
+                val red = (pixel.red * 255f).roundToInt()
+                val green = (pixel.green * 255f).roundToInt()
+                val blue = (pixel.blue * 255f).roundToInt()
                 averageRed += red
                 averageGreen += green
                 averageBlue += blue
@@ -229,11 +237,11 @@ private fun rgbToHsl(red: Float, green: Float, blue: Float): FloatArray {
     return floatArrayOf(hue, saturation, lightness)
 }
 
-private fun String.toAndroidPaletteArtworkUrl(): String {
+private fun String.toLazerPaletteArtworkUrl(): String {
     val secure = trim().replaceFirst("http://", "https://")
         .let { if (it.startsWith("//")) "https:$it" else it }
-    if (AndroidArtworkSizeParameter.containsMatchIn(secure)) {
-        return secure.replace(AndroidArtworkSizeParameter) { match -> match.groupValues[1] + "96y96" }
+    if (lazerArtworkSizeParameter.containsMatchIn(secure)) {
+        return secure.replace(lazerArtworkSizeParameter) { match -> match.groupValues[1] + "96y96" }
     }
     return secure + if ('?' in secure) "&param=96y96" else "?param=96y96"
 }

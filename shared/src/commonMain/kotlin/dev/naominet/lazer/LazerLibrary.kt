@@ -51,6 +51,9 @@ fun normalizedArtworkUrl(raw: String?): String? {
 
 private val ArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IGNORE_CASE)
 
+/** The same CDN sizing parameter, shared by the artwork helpers and the background palette. */
+internal val lazerArtworkSizeParameter = ArtworkSizeParameter
+
 /**
  * The CDN resizes on request, so asking for the size actually displayed keeps the palette thumbnail
  * and the full player artwork on one cached image instead of two.

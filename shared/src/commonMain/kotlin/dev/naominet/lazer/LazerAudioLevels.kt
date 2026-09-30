@@ -35,7 +35,7 @@ private const val ReleaseRate = 0.18f
  * captured (feature off, microphone permission missing, or playback stopped). Only the row showing
  * the current track collects this, so the rest of the UI is not recomposed at capture rate.
  */
-internal object AndroidAudioLevels {
+internal object LazerAudioLevels {
     private val mutableLevels = MutableStateFlow<List<Float>?>(null)
 
     val levels: StateFlow<List<Float>?> = mutableLevels.asStateFlow()

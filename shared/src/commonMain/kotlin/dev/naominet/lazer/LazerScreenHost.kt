@@ -108,3 +108,7 @@ val LocalLazerScreenHost = androidx.compose.runtime.staticCompositionLocalOf<Laz
 val LocalLazerAuthWebView = androidx.compose.runtime.staticCompositionLocalOf<LazerAuthWebView> {
     error("LazerApp must provide an auth web view")
 }
+
+/** Storage and download access for the decorative layers, which sit below the screens. */
+val LocalLazerPlatformHost =
+    androidx.compose.runtime.staticCompositionLocalOf<LazerPlatformHost?> { null }
