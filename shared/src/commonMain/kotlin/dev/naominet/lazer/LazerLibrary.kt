@@ -31,5 +31,6 @@ data class LazerPlaylist(
 
 fun formatPlaybackTime(millis: Long): String {
     val seconds = (millis.coerceAtLeast(0L) / 1_000L).toInt()
-    return "%d:%02d".format(seconds / 60, seconds % 60)
+    val remainder = seconds % 60
+    return if (remainder < 10) "${seconds / 60}:0$remainder" else "${seconds / 60}:$remainder"
 }

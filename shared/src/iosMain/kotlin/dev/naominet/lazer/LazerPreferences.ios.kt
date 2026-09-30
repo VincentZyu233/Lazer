@@ -18,7 +18,7 @@ private class NsUserDefaultsPreferences(
         if (defaults.objectForKey(key) == null) default else defaults.integerForKey(key).toInt()
 
     override fun getLong(key: String, default: Long): Long =
-        if (defaults.objectForKey(key) == null) default else defaults.longLongForKey(key)
+        if (defaults.objectForKey(key) == null) default else defaults.integerForKey(key)
 
     override fun getFloat(key: String, default: Float): Float =
         if (defaults.objectForKey(key) == null) default else defaults.doubleForKey(key).toFloat()
@@ -37,7 +37,7 @@ private class NsUserDefaultsPreferences(
     }
 
     override fun putLong(key: String, value: Long) {
-        defaults.setLongLong(value, key)
+        defaults.setInteger(value, key)
     }
 
     override fun putFloat(key: String, value: Float) {
