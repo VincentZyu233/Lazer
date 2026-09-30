@@ -5,6 +5,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ColorScheme
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.useContents
 import platform.AVFAudio.AVCaptureDevice
 import platform.AVFAudio.AVCaptureAuthorizationStatusAuthorized
 import platform.AVFAudio.AVCaptureAuthorizationStatusDenied
@@ -60,7 +61,7 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
         get() {
             val window = foregroundWindow() ?: return 0f
             val scale = window.screen.nativeScale.toFloat()
-            return window.safeAreaInsets.bottom.toFloat() * scale
+            return window.safeAreaInsets.useContents { bottom.toFloat() } * scale
         }
 
     override val systemHapticsEnabled: Boolean get() = true

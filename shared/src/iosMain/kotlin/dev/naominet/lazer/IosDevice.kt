@@ -8,8 +8,10 @@ import dev.naominet.lazer.gateway.GatewaySessionStore
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.UserProfile
+import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.SetSerializer
@@ -29,7 +31,6 @@ import platform.Foundation.NSUserDomainMask
 import platform.Foundation.dataTaskWithRequest
 import platform.Foundation.dataWithBytes
 import platform.Foundation.dataWithContentsOfFile
-import platform.Foundation.removeItemAtPath
 import platform.posix.memcpy
 
 private val deviceJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -81,11 +82,11 @@ internal class IosPlatformHost : LazerPlatformHost {
         manager.removeItemAtPath(target, null)
     }
 
-    override suspend fun downloadFile(url: String): ByteArray? = suspendCancellableCoroutine { continuation ->
+    override suspend fun downloadFile(url: String): ByteArray? = suspendCoroutine { continuation ->
         val address = NSURL.URLWithString(url)
         if (address == null) {
             continuation.resume(null)
-            return@suspendCancellableCoroutine
+            return@suspendCoroutine
         }
         val task = NSURLSession.sharedSession.dataTaskWithRequest(
             NSURLRequest.requestWithURL(address),

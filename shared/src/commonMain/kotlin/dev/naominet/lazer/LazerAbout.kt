@@ -1,7 +1,5 @@
 @file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 package dev.naominet.lazer
-import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.text.AnnotatedString
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
@@ -189,9 +187,7 @@ private fun CommitStamp() {
             .clickable(onClickLabel = tr("about.commit.copy")) {
                 clipboardScope.launch {
                     clipboard.setClipEntry(
-                        ClipEntry(
-                            AnnotatedString("${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}"),
-                        ),
+                        lazerTextClipEntry("${LazerBuildInfo.commitHash}\n${LazerBuildInfo.commitTime}"),
                     )
                     copied = true
                 }

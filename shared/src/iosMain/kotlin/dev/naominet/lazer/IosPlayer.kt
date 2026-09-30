@@ -17,12 +17,10 @@ import platform.AVFAudio.AVAudioSessionCategoryPlayback
 import platform.AVFAudio.setActive
 import platform.AVFoundation.AVPlayer
 import platform.AVFoundation.AVPlayerItem
-import platform.AVFoundation.AVPlayerItemStatusReadyToPlay
 
 import platform.AVFoundation.AVPlayerTimeControlStatusPaused
 
 import platform.Foundation.NSURL
-import platform.AVFoundation.CMTimeMakeWithSeconds
 import platform.Foundation.NSNotification
 import platform.Foundation.NSNotificationCenter
 import platform.Foundation.NSOperationQueue
@@ -111,7 +109,7 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
     }
 
     override fun seekTo(positionMillis: Long) {
-        player?.seekToTime(CMTimeMakeWithSeconds(positionMillis.toDouble() / 1000.0, 1000))
+        player?.seekToSeconds(positionMillis.toDouble() / 1000.0)
         publish(playing = snapshot.value.isPlaying)
     }
 
@@ -142,11 +140,11 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
         releasePlayer()
         ensureAudioSession()
         val address = NSURL.URLWithString(url) ?: return
-        val item = AVPlayerItem(URL = address)
+        val item = AVPlayerItem(address)
         val next = AVPlayer.playerWithPlayerItem(item)
         player = next
         watchForEndOfItem(item)
-        if (positionMillis > 0L) next.seekToTime(CMTimeMakeWithSeconds(positionMillis / 1000.0, 1000))
+        if (positionMillis > 0L) next.seekToSeconds(positionMillis / 1000.0)
         if (startPlaying) {
             next.play()
             startTicker()
@@ -203,13 +201,11 @@ internal class IosPlayer(private val gateway: NeteaseMusicGateway) : LazerPlayer
         )
     }
 
-    private fun currentMillis(): Long =
-        (player?.currentTime()?.seconds ?: 0.0).toLong() * 1_000L
+    private fun currentMillis(): Long = player?.currentTime()?.useContents { seconds }
+        ?.let { (it * 1000).toLong() } ?: 0L
 
-    private fun durationMillis(): Long? {
-        val seconds = player?.currentItem?.duration?.seconds ?: return null
-        return if (seconds.isFinite() && seconds > 0) (seconds * 1000).toLong() else null
-    }
+    private fun durationMillis(): Long? = player?.currentItem?.duration?.useContents { seconds }
+        ?.takeIf { it.isFinite() && it > 0 }?.let { (it * 1000).toLong() }
 
     private fun releasePlayer() {
         endObserver?.let { NSNotificationCenter.defaultCenter.removeObserver(it) }
