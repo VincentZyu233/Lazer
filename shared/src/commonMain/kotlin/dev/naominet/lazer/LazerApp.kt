@@ -863,6 +863,9 @@ private fun LazerAppContent(
             "settings" -> controller.openSettings()
             "about" -> controller.openAbout()
             "login" -> controller.openLogin()
+            // The glass style samples what is behind each surface, which is the one visual the
+            // platforms are most likely to answer differently.
+            "glass" -> controller.updateStyle(LazerStyle.LIQUID_GLASS)
             "playlist" -> awaitLazerSmokeList(controller::featuredPlaylists).firstOrNull()
                 ?.let(controller::openPlaylist)
             "player", "comments" -> {
