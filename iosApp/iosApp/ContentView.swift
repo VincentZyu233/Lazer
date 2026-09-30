@@ -389,8 +389,8 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
         column.axis = .vertical
         column.spacing = 4
         // The card keeps its width and lets the copy wrap, exactly as the Android panel does.
-        title.contentCompressionResistancePriority = .init(700)
-        subtitle.contentCompressionResistancePriority = .init(700)
+        title.setContentCompressionResistancePriority(UILayoutPriority(700), for: .horizontal)
+        subtitle.setContentCompressionResistancePriority(UILayoutPriority(700), for: .horizontal)
 
         let close = UIButton(type: .custom)
         close.setImage(LazerScanGlyph.close(side: 20), for: .normal)
@@ -553,7 +553,7 @@ private enum LazerScanGlyph {
         shape.addLine(to: CGPoint(x: 19, y: 15))
         shape.addLine(to: CGPoint(x: 19, y: 17))
         shape.addLine(to: CGPoint(x: 17, y: 17))
-        shape.closePath()
+        shape.close()
         path.append(shape)
         return render(side) { context in
             context.cgContext.saveGState()
