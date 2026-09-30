@@ -1764,7 +1764,7 @@ private fun SettingsPage(controller: AndroidGatewayController, modifier: Modifie
     val context = LocalContext.current
     val backgroundPicker = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.GetContent(),
-    ) { uri -> uri?.let(controller::setBackgroundImage) }
+    ) { uri -> uri?.let { controller.setBackgroundImage(it.toString()) } }
     // The platform asks for the microphone even though the capture only reads back our own session,
     // so the switch stays off until the user grants it.
     var microphoneGranted by remember { mutableStateOf(context.hasRecordAudioPermission()) }

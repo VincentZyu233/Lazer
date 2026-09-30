@@ -21,6 +21,7 @@ import dev.naominet.lazer.gateway.model.Song
 import dev.naominet.lazer.gateway.model.SongComment
 import dev.naominet.lazer.gateway.model.UserProfile
 import dev.naominet.lazer.gateway.model.incrementListenTogetherVersion
+import io.ktor.util.date.getTimeMillis
 import dev.naominet.lazer.gateway.model.isListenTogetherClosed
 import dev.naominet.lazer.gateway.model.listenTogetherCreatedRoomId
 import dev.naominet.lazer.gateway.model.listenTogetherPlaybackState
@@ -91,7 +92,7 @@ private data class LazerCachedBootstrap(
 private const val MESSAGE_BANNER_DURATION_MILLIS = 15_000L
 internal const val ANDROID_LIBRARY_TIP_COUNT = 10
 
-internal fun nextLazerLibraryTipIndex(current: Int): Int =
+fun nextLazerLibraryTipIndex(current: Int): Int =
     (current + 1).mod(ANDROID_LIBRARY_TIP_COUNT)
 
 /**
@@ -704,7 +705,7 @@ class LazerGatewayController(private val device: LazerDevice) {
                         remoteTrackId = remote?.targetSongId?.takeIf { it > 0L } ?: room.remoteTrackId,
                     )
 
-                    val now = System.currentTimeMillis()
+                    val now = getTimeMillis()
                     val snapshot = player.snapshot.value
                     val heartbeatTrack = snapshot.track
                     if (heartbeatTrack != null && now - lastHeartbeatMillis >= LISTEN_TOGETHER_HEARTBEAT_MILLIS) {
