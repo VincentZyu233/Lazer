@@ -1,14 +1,15 @@
-import SwiftUI
-import Shared
 import AVFoundation
 import PhotosUI
+import Shared
 import UIKit
 import WebKit
 
 /// The sheets UIKit only lets a native caller put on screen. Kotlin decides what happens around them.
-final class LazerShell: NSObject, IosShellBridge {
+final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
+    private let audio = LazerAudio()
     private var pendingScan: ((String?) -> Void)?
     private var pendingImage: ((String?) -> Void)?
+    private var pickerHandler: LazerPickerHandler?
 
     func scanCode(onResult: @escaping (String?) -> Void) {
         pendingScan = onResult
@@ -26,28 +27,31 @@ final class LazerShell: NSObject, IosShellBridge {
 
     func pickImage(onPicked: @escaping (String?) -> Void) {
         pendingImage = onPicked
-        let configuration = PHPickerConfiguration()
+        var configuration = PHPickerConfiguration()
         configuration.filter = .images
         configuration.selectionLimit = 1
         let picker = PHPickerViewController(configuration: configuration)
-        picker.delegate = LazerPickerHandler { [weak self] path in
+        let handler = LazerPickerHandler { [weak self] path in
             self?.pendingImage?(path)
             self?.pendingImage = nil
         }
+        pickerHandler = handler
+        picker.delegate = handler
         present(picker)
     }
 
     func share(text: String, title: String) {
-        let panel = UIActivityViewController(activityItems: [text], applicationActivities: nil)
-        panel.completionWithItemsHandler = { _, _, _, _ in }
-        present(panel)
+        present(UIActivityViewController(activityItems: [text], applicationActivities: nil))
     }
 
     func presentSavedFile(path: String) {
-        let url = URL(fileURLWithPath: path)
-        present(UIActivityViewController(activityItems: [url], applicationActivities: nil))
+        present(UIActivityViewController(
+            activityItems: [URL(fileURLWithPath: path)],
+            applicationActivities: nil
+        ))
     }
 
+    /// The sign-in browser. It carries the session and refuses to leave the login hosts.
     func makeAuthWebView(url: String, sessionCookie: String) -> UIView {
         let configuration = WKWebViewConfiguration()
         let store = configuration.websiteDataStore.httpCookieStore
@@ -55,28 +59,37 @@ final class LazerShell: NSObject, IosShellBridge {
             store.setCookie(cookie)
         }
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.allowsBackForwardNavigationGestures = false
+        webView.navigationDelegate = self
         if let address = URL(string: url) {
             webView.load(URLRequest(url: address))
         }
         return webView
     }
 
-    /// Only the fields the Gateway issued travel into the browser, and only to the login hosts.
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        let host = navigationAction.request.url?.host ?? ""
+        decisionHandler(host == "music.163.com" || host.hasSuffix(".music.163.com") ? .allow : .cancel)
+    }
+
     private static func sessionCookies(_ sessionCookie: String) -> [HTTPCookie] {
         let allowed = ["MUSIC_U", "MUSIC_A", "NMTID", "deviceId", "__csrf"]
         return sessionCookie.split(separator: ";").compactMap { field in
             let pair = field.split(separator: "=", maxSplits: 1).map(String.init)
-            guard pair.count == 2, allowed.contains(pair[0].trimmingCharacters(in: .whitespaces)) else { return nil }
-            var properties: [HTTPCookiePropertyKey: Any] = [
-                .name: pair[0].trimmingCharacters(in: .whitespaces),
+            guard pair.count == 2 else { return nil }
+            let name = pair[0].trimmingCharacters(in: .whitespaces)
+            guard allowed.contains(name) else { return nil }
+            return HTTPCookie(properties: [
+                .name: name,
                 .value: pair[1].trimmingCharacters(in: .whitespaces),
                 .domain: ".music.163.com",
                 .path: "/",
                 .secure: "TRUE",
-            ]
-            properties[.expires] = Date().addingTimeInterval(60 * 60 * 24 * 365)
-            return HTTPCookie(properties: properties)
+                .expires: Date().addingTimeInterval(60 * 60 * 24 * 365),
+            ])
         }
     }
 
@@ -85,24 +98,19 @@ final class LazerShell: NSObject, IosShellBridge {
     }
 
     func downloadToDestination(url: String, destination: String, onDone: @escaping (String?) -> Void) {
-        download(url, to: destination) { _, written in onDone(written ? destination : nil) }
+        download(url, to: URL(fileURLWithPath: destination)) { path, _ in onDone(path) }
     }
 
-    private func download(_ url: String, to destination: String?, _ done: @escaping (String?, Bool) -> Void) {
+    private func download(_ url: String, to destination: URL?, _ done: @escaping (String?, Bool) -> Void) {
         guard let address = URL(string: url) else { done(nil, false); return }
         let target = destination
             ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         URLSession.shared.dataTask(with: address) { data, _, _ in
-            guard let data else {
+            guard let data, (try? data.write(to: target)) != nil else {
                 DispatchQueue.main.async { done(nil, false) }
                 return
             }
-            do {
-                try data.write(to: URL(fileURLWithPath: target))
-                DispatchQueue.main.async { done(target, true) }
-            } catch {
-                DispatchQueue.main.async { done(nil, false) }
-            }
+            DispatchQueue.main.async { done(target.path, true) }
         }.resume()
     }
 
@@ -114,13 +122,13 @@ final class LazerShell: NSObject, IosShellBridge {
 
     func playerPause() { audio.pause() }
 
-    func playerSeekTo(positionMillis: Int64) { audio.seek(toSeconds: Double(positionMillis) / 1000) }
+    func playerSeekTo(positionMillis: Int64) { audio.seek(toMillis: positionMillis) }
 
     func playerRelease() { audio.release() }
 
-    func playerPositionMillis() -> Int64 { Int64(audio.positionSeconds * 1000) }
+    func playerPositionMillis() -> Int64 { audio.positionMillis }
 
-    func playerDurationMillis() -> Int64 { Int64(audio.durationSeconds * 1000) }
+    func playerDurationMillis() -> Int64 { audio.durationMillis }
 
     func playerIsPlaying() -> Bool { audio.isPlaying }
 
@@ -136,11 +144,13 @@ final class LazerShell: NSObject, IosShellBridge {
         }
     }
 
-    func isMicrophoneGranted() -> Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+    func isMicrophoneGranted() -> Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
 
     func setDarkStatusBar(dark: Bool) {
-        let manager = foregroundWindow()?.windowScene?.statusBarManager
-        manager?.statusBarStyle = dark ? .lightContent : .darkContent
+        LazerHostViewController.prefersDarkStatusBar = dark
+        foregroundWindow()?.rootViewController?.setNeedsStatusBarAppearanceUpdate()
     }
 
     private func foregroundWindow() -> UIWindow? {
@@ -151,19 +161,70 @@ final class LazerShell: NSObject, IosShellBridge {
 
     private func present(_ controller: UIViewController) {
         guard let host = foregroundWindow()?.rootViewController else { return }
-        if controller.modalPresentationStyle == .automatic {
-            controller.modalPresentationStyle = .pageSheet
-        }
         host.present(controller, animated: true)
     }
 }
 
-/// A QR scanner that stays on this screen only as long as the listener is looking for a code.
+/// Owns AVPlayer for the shared queue. Kotlin decides what plays next; this only makes it audible.
+private final class LazerAudio: NSObject {
+    var onEnded: (() -> Void)?
+
+    private var player: AVPlayer?
+    private var observedItem: AVPlayerItem?
+
+    var positionMillis: Int64 { Int64((player?.currentTime().seconds ?? 0) * 1000) }
+
+    var durationMillis: Int64 {
+        guard let seconds = player?.currentItem?.duration.seconds, seconds.isFinite else { return 0 }
+        return Int64(max(0, seconds) * 1000)
+    }
+
+    var isPlaying: Bool { player?.timeControlStatus == .playing }
+
+    func load(url: String, startPlaying: Bool, positionMillis: Double) {
+        guard let address = URL(string: url) else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let item = AVPlayerItem(url: address)
+        let next = AVPlayer(playerItem: item)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(itemDidFinish), name: .AVPlayerItemDidPlayToEndTime, object: item
+        )
+        observedItem = item
+        player = next
+        if positionMillis > 0 {
+            next.seek(to: CMTime(seconds: positionMillis / 1000, preferredTimescale: 600))
+        }
+        if startPlaying { next.play() }
+    }
+
+    func play() { player?.play() }
+
+    func pause() { player?.pause() }
+
+    func seek(toMillis millis: Int64) {
+        player?.seek(to: CMTime(seconds: Double(millis) / 1000, preferredTimescale: 600))
+    }
+
+    func release() {
+        player?.pause()
+        if let item = observedItem {
+            NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
+        }
+        observedItem = nil
+        player = nil
+    }
+
+    @objc private func itemDidFinish() { onEnded?() }
+}
+
+/// A QR scanner that stays on screen only while the listener is looking for a code.
 private final class LazerScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onFound: ((String?) -> Void)?
     var onCancelled: (() -> Void)?
 
     private let session = AVCaptureSession()
+    private let preview = AVCaptureVideoPreviewLayer()
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -181,10 +242,8 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
             output.setMetadataObjectsDelegate(self, queue: .main)
             output.metadataObjectTypes = [.qr]
         }
-        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.session = session
         preview.videoGravity = .resizeAspectFill
-        preview.frame = view.bounds
-        preview.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         view.layer.addSublayer(preview)
 
         let cancel = UIButton(type: .system)
@@ -196,6 +255,11 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
             cancel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             cancel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
         ])
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        preview.frame = view.bounds
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -215,9 +279,11 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
         }
     }
 
-    func metadataOutput(_ output: AVCaptureMetadataOutput,
-                        didOutput metadataObjects: [AVMetadataObject],
-                        from connection: AVCaptureConnection) {
+    func metadataOutput(
+        _ output: AVCaptureMetadataOutput,
+        didOutput metadataObjects: [AVMetadataObject],
+        from connection: AVCaptureConnection
+    ) {
         guard let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
               let code = object.stringValue else { return }
         dismiss(animated: true) { [weak self] in
@@ -227,7 +293,7 @@ private final class LazerScannerViewController: UIViewController, AVCaptureMetad
     }
 }
 
-/// PHPicker needs an object to keep the result callback alive while the system loads the image.
+/// PHPicker needs an object that outlives the call while the system loads the image.
 private final class LazerPickerHandler: NSObject, PHPickerViewControllerDelegate {
     private let onDone: (String?) -> Void
 
@@ -241,69 +307,19 @@ private final class LazerPickerHandler: NSObject, PHPickerViewControllerDelegate
             onDone(nil)
             return
         }
-        provider.loadObject(ofClass: UIImage.self) { image, _ in
+        provider.loadObject(ofClass: UIImage.self) { [weak self] image, _ in
+            guard let self else { return }
             guard let uiImage = image as? UIImage, let data = uiImage.jpegData(compressionQuality: 0.92) else {
                 DispatchQueue.main.async { self.onDone(nil) }
                 return
             }
             let target = FileManager.default.temporaryDirectory
-                .appendingPathComponent("lazer-background-\(UUID().uuidString).jpg")
-            do {
-                try data.write(to: target)
+                .appendingPathComponent("lazer-background-" + UUID().uuidString + ".jpg")
+            if (try? data.write(to: target)) != nil {
                 DispatchQueue.main.async { self.onDone(target.path) }
-            } catch {
+            } else {
                 DispatchQueue.main.async { self.onDone(nil) }
             }
         }
     }
-}
-
-/// Owns AVPlayer for the shared queue. Kotlin decides what plays next; this only makes it audible.
-private final class LazerAudio: NSObject {
-    var onEnded: (() -> Void)?
-
-    private var player: AVPlayer?
-
-    var positionSeconds: Double {
-        player?.currentTime().seconds ?? 0
-    }
-
-    var durationSeconds: Double {
-        guard let seconds = player?.currentItem?.duration.seconds, seconds.isFinite else { return 0 }
-        return max(0, seconds)
-    }
-
-    var isPlaying: Bool {
-        player?.timeControlStatus == .playing
-    }
-
-    func load(url: String, startPlaying: Bool, positionMillis: Double) {
-        guard let address = URL(string: url) else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
-        try? AVAudioSession.sharedInstance().setActive(true)
-        let item = AVPlayerItem(url: address)
-        let next = AVPlayer(playerItem: item)
-        player = next
-        if positionMillis > 0 { next.seek(to: CMTime(seconds: positionMillis, preferredTimescale: 600)) }
-        if startPlaying { next.play() }
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(itemDidFinish), name: .AVPlayerItemDidPlayToEndTime, object: item
-        )
-    }
-
-    func play() { player?.play() }
-
-    func pause() { player?.pause() }
-
-    func seek(toSeconds seconds: Double) {
-        player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
-    }
-
-    func release() {
-        player?.pause()
-        player?.replaceCurrentItem(with: nil)
-        player = nil
-    }
-
-    @objc private func itemDidFinish() { onEnded?() }
 }
