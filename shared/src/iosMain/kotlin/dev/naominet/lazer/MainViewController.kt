@@ -8,10 +8,12 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.window.ComposeUIViewController
 import kotlinx.cinterop.ExperimentalForeignApi
 import platform.Foundation.NSProcessInfo
+import platform.Foundation.NSUserDefaults
 import platform.UIKit.UIViewController
 
 private const val IOS_COMPOSE_READY_MARKER = "LAZER_IOS_COMPOSE_READY"
-private const val IOS_ROUTE_ARGUMENT = "LAZER_IOS_ROUTE="
+private const val IOS_ROUTE_KEY = "LAZER_IOS_ROUTE"
+private const val IOS_ROUTE_APPLIED_MARKER = "LAZER_IOS_ROUTE_APPLIED"
 private var didReportIOSComposeFrame = false
 
 /**
@@ -20,12 +22,19 @@ private var didReportIOSComposeFrame = false
  * them from there, through the same navigation calls a tap makes.
  */
 @OptIn(ExperimentalForeignApi::class)
-private fun iosSmokeRoute(): String? = NSProcessInfo.processInfo.arguments
-    .asSequence()
-    .map { it.toString() }
-    .firstOrNull { it.startsWith(IOS_ROUTE_ARGUMENT) }
-    ?.removePrefix(IOS_ROUTE_ARGUMENT)
-    ?.takeIf(String::isNotBlank)
+private fun iosSmokeRoute(): String? {
+    val fromArguments = NSProcessInfo.processInfo.arguments
+        .asSequence()
+        .map { it.toString() }
+        .firstOrNull { it.startsWith("$IOS_ROUTE_KEY=") }
+        ?.removePrefix("$IOS_ROUTE_KEY=")
+    // A launcher may hand trailing arguments over as a plain argument or as a default, and a route
+    // that quietly failed to arrive would look like a screen that only ever shows the home page.
+    val route = (fromArguments ?: NSUserDefaults.standardUserDefaults.stringForKey(IOS_ROUTE_KEY))
+        ?.takeIf(String::isNotBlank)
+    if (route != null) println("$IOS_ROUTE_APPLIED_MARKER $route")
+    return route
+}
 
 /**
  * The UIKit host for the shared Compose interface - the same screens Android draws.

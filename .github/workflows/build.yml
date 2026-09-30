@@ -322,6 +322,12 @@ jobs:
             route_pid=$!
             sleep 16
             xcrun simctl io "$simulator_udid" screenshot "ios-simulator-$route.png"
+            if ! grep -q "LAZER_IOS_ROUTE_APPLIED $route" "ios-simulator-$route-console.log"; then
+              echo "Console output for the $route screen:"
+              cat "ios-simulator-$route-console.log"
+              echo "::error::The iOS $route launch never applied its route, so its screenshot proves nothing."
+              exit 1
+            fi
             if ! kill -0 "$route_pid" 2>/dev/null; then
               echo "Console output for the $route screen:"
               cat "ios-simulator-$route-console.log"
