@@ -56,6 +56,11 @@ fun rememberLazerLiquidGlass(
     backgroundColor: Color,
     blurIntensity: Float = DEFAULT_LIQUID_GLASS_BLUR_INTENSITY,
 ): LazerLiquidGlass {
+    // Do not instantiate the experimental backdrop graphics layer for a flat surface. Apart from
+    // avoiding unnecessary GPU work, this keeps platforms that are only using Material/Miuix from
+    // entering backdrop's Skia path during their first composition.
+    if (!enabled) return LazerLiquidGlass.Disabled
+
     val currentBackgroundColor = rememberUpdatedState(backgroundColor)
     // Keep this callback—and therefore the LayerBackdrop instance—stable across theme changes.
     // Replacing a positioned backdrop would briefly leave the new instance without coordinates,
@@ -70,7 +75,7 @@ fun rememberLazerLiquidGlass(
     val normalizedBlurIntensity = normalizeLiquidGlassBlurIntensity(blurIntensity)
     return remember(enabled, normalizedBlurIntensity, backdrop) {
         LazerLiquidGlass(
-            backdrop = if (enabled) backdrop else null,
+            backdrop = backdrop,
             blurIntensity = normalizedBlurIntensity,
         )
     }

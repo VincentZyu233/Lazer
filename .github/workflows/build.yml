@@ -292,6 +292,14 @@ jobs:
             exit 1
           fi
           xcrun simctl io "$simulator_udid" screenshot ios-simulator.png
+          if ! grep -q 'LAZER_IOS_COMPOSE_READY' ios-simulator-console.log; then
+            echo 'App console output:'
+            cat ios-simulator-console.log
+            xcrun simctl terminate "$simulator_udid" "$bundle_id" || true
+            wait "$console_pid" || true
+            echo '::error::Lazer stayed alive but did not commit its first Compose frame.'
+            exit 1
+          fi
           xcrun simctl terminate "$simulator_udid" "$bundle_id"
           wait "$console_pid" || true
       - name: Upload iOS Simulator diagnostics

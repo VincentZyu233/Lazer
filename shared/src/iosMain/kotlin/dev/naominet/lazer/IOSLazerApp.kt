@@ -41,6 +41,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +58,9 @@ import androidx.compose.ui.unit.dp
 import dev.naominet.lazer.gateway.model.Playlist
 import dev.naominet.lazer.gateway.model.Song
 import kotlinx.coroutines.delay
+
+private const val IOS_COMPOSE_READY_MARKER = "LAZER_IOS_COMPOSE_READY"
+private var didReportIOSComposeReady = false
 
 @Composable
 internal fun IOSLazerApp() {
@@ -132,6 +136,15 @@ internal fun IOSLazerApp() {
                         .widthIn(max = 560.dp),
                 )
             }
+        }
+    }
+
+    // Side effects run only after a successful composition commit. The CI launch test uses this
+    // marker to distinguish a genuinely rendered first frame from a still-running blank shell.
+    SideEffect {
+        if (!didReportIOSComposeReady) {
+            didReportIOSComposeReady = true
+            println(IOS_COMPOSE_READY_MARKER)
         }
     }
 }
