@@ -1200,7 +1200,6 @@ class LazerGatewayController(private val device: LazerDevice) {
             message = if (saved) tr("cover.save.success", title) else tr("cover.save.fail")
             onSaved(target.takeIf { saved })
         }
-        }
     }
 
     fun updateSearchQuery(value: String) {
