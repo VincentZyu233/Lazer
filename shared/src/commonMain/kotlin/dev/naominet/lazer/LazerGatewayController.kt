@@ -1066,14 +1066,14 @@ class LazerGatewayController(private val device: LazerDevice) {
         if (exclusiveAudio == enabled) return
         exclusiveAudio = enabled
         settings.exclusiveAudio = enabled
-        player.updateExclusiveAudio()
+        player.updateExclusiveAudio(enabled)
     }
 
     fun updateAudioReactiveLevels(enabled: Boolean) {
         if (audioReactiveLevels == enabled) return
         audioReactiveLevels = enabled
         settings.audioReactiveLevels = enabled
-        player.updateAudioLevels()
+        player.updateAudioLevels(enabled)
     }
 
     fun updateHapticsEnabled(enabled: Boolean) {
@@ -1095,7 +1095,7 @@ class LazerGatewayController(private val device: LazerDevice) {
         if (playbackInterface == value) return
         playbackInterface = value
         settings.playbackInterface = value
-        player.updatePlaybackInterface()
+        player.updatePlaybackInterface(value == LazerPlaybackInterface.SYSTEM_MEDIA)
     }
 
     fun isSongLiked(songId: Long): Boolean = songId in likedSongIds

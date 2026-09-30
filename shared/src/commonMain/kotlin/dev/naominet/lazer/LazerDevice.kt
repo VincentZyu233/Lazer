@@ -80,11 +80,14 @@ interface LazerPlayer {
 
     fun seekTo(positionMillis: Long)
 
-    fun updateExclusiveAudio()
+    /** Whether the system may interrupt other audio while this is playing. */
+    fun updateExclusiveAudio(exclusive: Boolean)
 
-    fun updatePlaybackInterface()
+    /** Whether the platform's own transport surfaces should own playback. */
+    fun updatePlaybackInterface(systemMedia: Boolean)
 
-    fun updateAudioLevels()
+    /** Whether the platform should keep feeding the app the captured spectrum. */
+    fun updateAudioLevels(enabled: Boolean)
 
     fun stopAndClearSession()
 }

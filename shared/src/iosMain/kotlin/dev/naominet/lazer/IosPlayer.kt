@@ -20,14 +20,18 @@ import kotlinx.coroutines.withContext
 internal class IosPlayer(
     private val gateway: NeteaseMusicGateway,
     private val bridge: IosShellBridge,
-) : LazerPlayer {
+) : LazerPlayer, IosPlayerCommands {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var ticker: Job? = null
 
     override val snapshot: StateFlow<LazerPlaybackSnapshot> = LazerPlaybackStateStore.snapshot
     override val queue: StateFlow<LazerPlaybackQueueSnapshot> = LazerPlaybackQueue.snapshot
 
+    private var exclusive = false
+    private var systemMedia = true
+
     init {
+        bridge.playerAttachCommands(this)
         bridge.playerSetEndedHandler {
             scope.launch {
                 if (LazerPlaybackQueue.mode == LazerPlayMode.SingleLoop) {
@@ -109,12 +113,18 @@ internal class IosPlayer(
         publish()
     }
 
-    /** Nothing on iOS takes another app's audio, exposes a system transport or captures levels. */
-    override fun updateExclusiveAudio() = Unit
+    override fun updateExclusiveAudio(exclusive: Boolean) {
+        this.exclusive = exclusive
+        bridge.playerSetAudioMode(exclusive, systemMedia)
+    }
 
-    override fun updatePlaybackInterface() = Unit
+    override fun updatePlaybackInterface(systemMedia: Boolean) {
+        this.systemMedia = systemMedia
+        bridge.playerSetAudioMode(exclusive, systemMedia)
+    }
 
-    override fun updateAudioLevels() = Unit
+    /** iOS offers no tap on the playing audio's spectrum, so the level bars stay still. */
+    override fun updateAudioLevels(enabled: Boolean) = Unit
 
     override fun stopAndClearSession() {
         bridge.playerPause()
@@ -154,13 +164,32 @@ internal class IosPlayer(
     private fun publish() {
         val state = snapshot.value
         val track = state.track ?: return
+        val position = bridge.playerPositionMillis()
+        val duration = bridge.playerDurationMillis().takeIf { it > 0L } ?: track.durationMillis
+        val playing = bridge.playerIsPlaying()
         LazerPlaybackStateStore.update(
             state.copy(
-                isPlaying = bridge.playerIsPlaying(),
+                isPlaying = playing,
                 isPreparing = false,
-                positionMillis = bridge.playerPositionMillis(),
-                durationMillis = bridge.playerDurationMillis().takeIf { it > 0L } ?: track.durationMillis,
+                positionMillis = position,
+                durationMillis = duration,
             ),
         )
+        if (!systemMedia) return
+        bridge.playerUpdateNowPlaying(
+            title = track.title,
+            artist = track.artist,
+            album = track.album,
+            coverUrl = track.coverUrl,
+            positionMillis = position,
+            durationMillis = duration,
+            isPlaying = playing,
+        )
     }
+
+    /* The system asked for these through the lock screen, a headset or Control Centre. The rest of
+       the commands share a name and a meaning with the on-screen controls, so those serve both. */
+    override fun play() = resume()
+
+    override fun seekToMillis(millis: Long) = seekTo(millis)
 }

@@ -1,4 +1,5 @@
 import AVFoundation
+import MediaPlayer
 import PhotosUI
 import Shared
 import UIKit
@@ -134,6 +135,27 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 
     func playerSetEndedHandler(handler: @escaping () -> Void) { audio.onEnded = handler }
 
+    func playerAttachCommands(commands: IosPlayerCommands) { audio.attach(commands: commands) }
+
+    func playerUpdateNowPlaying(
+        title: String,
+        artist: String,
+        album: String,
+        coverUrl: String?,
+        positionMillis: Int64,
+        durationMillis: Int64,
+        isPlaying: Bool
+    ) {
+        audio.publishNowPlaying(
+            title: title, artist: artist, album: album, coverUrl: coverUrl,
+            positionMillis: positionMillis, durationMillis: durationMillis, isPlaying: isPlaying
+        )
+    }
+
+    func playerSetAudioMode(exclusive: Bool, systemMedia: Bool) {
+        audio.applyMode(exclusive: exclusive, systemMedia: systemMedia)
+    }
+
     func requestMicrophoneAccess(onDone: @escaping () -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized, .denied, .restricted: onDone()
@@ -208,6 +230,7 @@ private final class LazerAudio: NSObject {
 
     func release() {
         player?.pause()
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         if let item = observedItem {
             NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
         }
@@ -216,7 +239,88 @@ private final class LazerAudio: NSObject {
     }
 
     @objc private func itemDidFinish() { onEnded?() }
+
+    /* System media controls. They attach once for the life of the player; the mode switch decides
+       whether the system hears about playback at all. */
+    private var commands: IosPlayerCommands?
+    private var wantsSystemMedia = true
+
+    func attach(commands: IosPlayerCommands) {
+        guard self.commands == nil else { return }
+        self.commands = commands
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget(self, action: #selector(handlePlay))
+        center.pauseCommand.addTarget(self, action: #selector(handlePause))
+        center.nextTrackCommand.addTarget(self, action: #selector(handleNext))
+        center.previousTrackCommand.addTarget(self, action: #selector(handlePrevious))
+        center.changePlaybackPositionCommand.addTarget(self, action: #selector(handleSeek(_:)))
+    }
+
+    @objc private func handlePlay() -> MPRemoteCommandHandlerStatus {
+        commands?.play()
+        return .success
+    }
+
+    @objc private func handlePause() -> MPRemoteCommandHandlerStatus {
+        commands?.pause()
+        return .success
+    }
+
+    @objc private func handleNext() -> MPRemoteCommandHandlerStatus {
+        commands?.next()
+        return .success
+    }
+
+    @objc private func handlePrevious() -> MPRemoteCommandHandlerStatus {
+        commands?.previous()
+        return .success
+    }
+
+    @objc private func handleSeek(_ event: MPChangePlaybackPositionCommandEvent) -> MPRemoteCommandHandlerStatus {
+        commands?.seekToMillis(millis: Int64(event.positionTime * 1000))
+        return .success
+    }
+
+    func publishNowPlaying(
+        title: String, artist: String, album: String, coverUrl: String?,
+        positionMillis: Int64, durationMillis: Int64, isPlaying: Bool
+    ) {
+        guard wantsSystemMedia else { return }
+        var info: [String: Any] = [
+            "MPMediaItemPropertyTitle": title,
+            "MPMediaItemPropertyArtist": artist,
+            "MPMediaItemPropertyAlbumTitle": album,
+            "MPMediaItemPropertyPlaybackDuration": Double(durationMillis) / 1000,
+            "MPNowPlayingInfoPropertyElapsedPlaybackTime": Double(positionMillis) / 1000,
+            "MPNowPlayingInfoPropertyPlaybackRate": isPlaying ? 1.0 : 0.0,
+            "MPNowPlayingInfoPropertyDefaultPlaybackRate": 1.0,
+        ]
+        let center = MPNowPlayingInfoCenter.default()
+        center.nowPlayingInfo = info
+        center.playbackState = isPlaying ? .playing : .paused
+        guard let coverUrl, let address = URL(string: coverUrl) else { return }
+        URLSession.shared.dataTask(with: address) { data, _, _ in
+            guard let data, let image = UIImage(data: data) else { return }
+            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            info["MPMediaItemPropertyArtwork"] = artwork
+            DispatchQueue.main.async { center.nowPlayingInfo = info }
+        }.resume()
+    }
+
+    func applyMode(exclusive: Bool, systemMedia: Bool) {
+        wantsSystemMedia = systemMedia
+        try? AVAudioSession.sharedInstance().setCategory(.playback, options: exclusive ? [] : .duckOthers)
+        let center = MPRemoteCommandCenter.shared()
+        [center.playCommand, center.pauseCommand, center.nextTrackCommand,
+         center.previousTrackCommand, center.changePlaybackPositionCommand].forEach {
+            $0.isEnabled = systemMedia
+        }
+        if !systemMedia {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+    }
 }
+
 
 /// A QR scanner that stays on screen only while the listener is looking for a code.
 private final class LazerScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {

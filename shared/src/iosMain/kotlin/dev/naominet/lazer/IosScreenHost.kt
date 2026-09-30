@@ -67,12 +67,48 @@ interface IosShellBridge {
 
     fun playerSetEndedHandler(handler: () -> Unit)
 
+    /**
+     * Hands Swift the object to call when a lock-screen or headset control is used. An object with
+     * methods crosses the bridge cleanly where a callback taking a number does not.
+     */
+    fun playerAttachCommands(commands: IosPlayerCommands)
+
+    /** Publishes the track to the system, which is what puts art and title on the lock screen. */
+    fun playerUpdateNowPlaying(
+        title: String,
+        artist: String,
+        album: String,
+        coverUrl: String?,
+        positionMillis: Long,
+        durationMillis: Long,
+        isPlaying: Boolean,
+    )
+
+    /**
+     * Mirrors the two playback switches the shared settings screen offers: whether the system may
+     * interrupt other audio, and whether it owns the transport at all.
+     */
+    fun playerSetAudioMode(exclusive: Boolean, systemMedia: Boolean)
+
     /** Asks for the microphone; Kotlin reads the answer back through [isMicrophoneGranted]. */
     fun requestMicrophoneAccess(onDone: () -> Unit)
 
     fun isMicrophoneGranted(): Boolean
 
     fun setDarkStatusBar(dark: Boolean)
+}
+
+/** The playback actions the system is allowed to ask the shared player for. */
+interface IosPlayerCommands {
+    fun play()
+
+    fun pause()
+
+    fun next()
+
+    fun previous()
+
+    fun seekToMillis(millis: Long)
 }
 
 /** iOS's answers to the screen-level asks of the shared interface. */
