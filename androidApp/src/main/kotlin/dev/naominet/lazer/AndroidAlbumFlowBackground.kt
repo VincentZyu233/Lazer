@@ -28,7 +28,7 @@ private val DefaultArtworkSeed = Color(0xFF5F91AC)
 
 @Composable
 internal fun AndroidAlbumFlowBackground(
-    track: AndroidTrack?,
+    track: LazerTrack?,
     modifier: Modifier = Modifier,
     cornerRadius: Dp,
     veil: Color,
@@ -51,7 +51,7 @@ internal fun AndroidAlbumFlowBackground(
 
 @Composable
 internal fun AndroidPlaylistFlowBackground(
-    playlist: AndroidPlaylist,
+    playlist: LazerPlaylist,
     modifier: Modifier = Modifier,
     cornerRadius: Dp,
     veil: Color,
@@ -68,7 +68,7 @@ internal fun AndroidPlaylistFlowBackground(
 
 /** Keeps the previous artwork seed until the next cover has been decoded. */
 @Composable
-internal fun rememberAndroidArtworkSeed(track: AndroidTrack?): Color? {
+internal fun rememberAndroidArtworkSeed(track: LazerTrack?): Color? {
     var seed by remember { mutableStateOf<Color?>(null) }
     LaunchedEffect(track?.id, track?.coverUrl) {
         seed = if (track == null) null else extractAndroidArtworkSeed(track.coverUrl) ?: DefaultArtworkSeed
@@ -78,7 +78,7 @@ internal fun rememberAndroidArtworkSeed(track: AndroidTrack?): Color? {
 
 @Composable
 private fun AndroidArtworkSolidBackground(
-    track: AndroidTrack?,
+    track: LazerTrack?,
     modifier: Modifier,
     cornerRadius: Dp,
     veil: Color,

@@ -293,9 +293,9 @@ private enum class AndroidMainPageKind(val depth: Int) {
 
 private data class AndroidMainPage(
     val kind: AndroidMainPageKind,
-    val playlist: AndroidPlaylist? = null,
+    val playlist: LazerPlaylist? = null,
     val artist: Artist? = null,
-    val tracks: List<AndroidTrack> = emptyList(),
+    val tracks: List<LazerTrack> = emptyList(),
     val isLoading: Boolean = false,
 ) {
     val contentKey: Any
@@ -986,7 +986,7 @@ fun AndroidLazerApp(initialListenTogetherInvitation: String? = null) {
         val view = LocalView.current
         // Picking a song is a playback decision, not a navigation one: the mini player already shows
         // what is playing, and the reader opens the full page from there when they want it.
-        val playFromQueue: (List<AndroidTrack>, AndroidTrack) -> Unit = { queue, track ->
+        val playFromQueue: (List<LazerTrack>, LazerTrack) -> Unit = { queue, track ->
             controller.play(queue, track)
         }
         val shareListenTogether: (String) -> Unit = { url ->
@@ -1469,7 +1469,7 @@ private fun AndroidDebugWatermark(modifier: Modifier = Modifier) {
 private fun AndroidRootContent(
     controller: AndroidGatewayController,
     currentTrackId: Long?,
-    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
     onListenTogether: () -> Unit,
     onScan: () -> Unit,
     showHeaderControls: Boolean,
@@ -1578,7 +1578,7 @@ private fun LandscapeNavigationRail(
 }
 
 @Composable
-private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
+private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
@@ -1593,13 +1593,13 @@ private fun HomePage(controller: AndroidGatewayController, currentId: Long?, onP
         when {
             controller.isLoading && controller.homeTracks.isEmpty() -> item { QuietState(tr("home.preparing")) }
             controller.homeTracks.isEmpty() -> item { QuietState(tr("home.empty")) }
-            else -> items(controller.homeTracks, key = AndroidTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
+            else -> items(controller.homeTracks, key = LazerTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
         }
     }
 }
 
 @Composable
-private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
+private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     val colors = MaterialTheme.colorScheme
     val searchGlass = rememberLazerLiquidGlass(
         enabled = controller.liquidGlassEnabled,
@@ -1635,7 +1635,7 @@ private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, o
                 controller.searchQuery.isBlank() -> item { QuietState(tr("search.empty")) }
                 controller.isSearching -> item { QuietState(tr("search.searching")) }
                 controller.searchResults.isEmpty() -> item { QuietState(tr("search.no_results")) }
-                else -> items(controller.searchResults, key = AndroidTrack::id) {
+                else -> items(controller.searchResults, key = LazerTrack::id) {
                     TrackRow(it, it.id == currentId) { onPlay(it) }
                 }
             }
@@ -1677,7 +1677,7 @@ private fun SearchPage(controller: AndroidGatewayController, currentId: Long?, o
 }
 
 @Composable
-private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (AndroidTrack) -> Unit) {
+private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalAndroidContentBottomInset.current),
@@ -1700,11 +1700,11 @@ private fun LibraryPage(controller: AndroidGatewayController, currentId: Long?, 
             !controller.isSignedIn -> item { SignInInvitation(controller::openLogin) }
             controller.userPlaylists.isEmpty() && controller.isLoading -> item { QuietState(tr("library.syncing")) }
             controller.userPlaylists.isEmpty() -> item { QuietState(tr("library.empty")) }
-            else -> items(controller.userPlaylists, key = AndroidPlaylist::id) { PlaylistListRow(it, controller::openPlaylist) }
+            else -> items(controller.userPlaylists, key = LazerPlaylist::id) { PlaylistListRow(it, controller::openPlaylist) }
         }
         if (controller.homeTracks.isNotEmpty()) {
             item { SectionTitle(tr("library.continue")) }
-            items(controller.homeTracks.take(5), key = AndroidTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
+            items(controller.homeTracks.take(5), key = LazerTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
         }
     }
 }
@@ -1746,7 +1746,7 @@ private fun MePage(controller: AndroidGatewayController) {
             when {
                 controller.userPlaylists.isEmpty() && controller.isLoading -> item { QuietState(tr("library.syncing")) }
                 controller.userPlaylists.isEmpty() -> item { QuietState(tr("library.empty")) }
-                else -> items(controller.userPlaylists.take(3), key = AndroidPlaylist::id) { PlaylistListRow(it, controller::openPlaylist) }
+                else -> items(controller.userPlaylists.take(3), key = LazerPlaylist::id) { PlaylistListRow(it, controller::openPlaylist) }
             }
             item {
                 ThemeTextButton(onClick = { controller.selectDestination(AndroidRootDestination.LIBRARY) }) {
@@ -2849,11 +2849,11 @@ private fun AudioQualitySheet(
     }
 }
 
-private val AndroidPlayMode.labelKey: String
+private val LazerPlayMode.labelKey: String
     get() = when (this) {
-        AndroidPlayMode.ListLoop -> "player.mode.list_loop"
-        AndroidPlayMode.SingleLoop -> "player.mode.single_loop"
-        AndroidPlayMode.Shuffle -> "player.shuffle"
+        LazerPlayMode.ListLoop -> "player.mode.list_loop"
+        LazerPlayMode.SingleLoop -> "player.mode.single_loop"
+        LazerPlayMode.Shuffle -> "player.shuffle"
     }
 
 /** Rows are a fixed height so a drag distance maps onto exactly one slot per row. Sized for
@@ -2967,7 +2967,7 @@ private fun PlayQueueSheet(
                         color = colors.onSurfaceVariant,
                     )
                     Spacer(Modifier.width(12.dp))
-                    AndroidPlayMode.entries.forEach { mode ->
+                    LazerPlayMode.entries.forEach { mode ->
                         FilterChip(
                             selected = queue.mode == mode,
                             onClick = tapFeedback { controller.setPlayMode(mode) },
@@ -2999,7 +2999,7 @@ private fun PlayQueueSheet(
 
 @Composable
 private fun StaticQueueList(
-    tracks: List<AndroidTrack>,
+    tracks: List<LazerTrack>,
     currentIndex: Int,
     isPlaying: Boolean,
 ) {
@@ -3023,7 +3023,7 @@ private fun StaticQueueList(
  */
 @Composable
 private fun ReorderableQueueList(
-    tracks: List<AndroidTrack>,
+    tracks: List<LazerTrack>,
     currentIndex: Int,
     isPlaying: Boolean,
     onPlayAt: (Int) -> Unit,
@@ -3127,7 +3127,7 @@ private fun ReorderableQueueList(
 @Composable
 private fun QueueRowBody(
     index: Int,
-    track: AndroidTrack,
+    track: LazerTrack,
     current: Boolean,
     isPlaying: Boolean,
     modifier: Modifier = Modifier,
@@ -3517,11 +3517,11 @@ private fun relativeCommentTime(
 @Composable
 private fun ArtistPage(
     artist: Artist,
-    tracks: List<AndroidTrack>,
+    tracks: List<LazerTrack>,
     isLoading: Boolean,
     currentId: Long?,
     onBack: () -> Unit,
-    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     LazyColumn(
@@ -3576,7 +3576,7 @@ private fun ArtistPage(
         when {
             isLoading && tracks.isEmpty() -> item { QuietState(tr("artist.loading")) }
             tracks.isEmpty() -> item { QuietState(tr("artist.empty")) }
-            else -> items(tracks, key = AndroidTrack::id) { track ->
+            else -> items(tracks, key = LazerTrack::id) { track ->
                 TrackRow(track, track.id == currentId) { onPlay(tracks, track) }
             }
         }
@@ -3585,8 +3585,8 @@ private fun ArtistPage(
 
 @Composable
 private fun PlaylistDetail(
-    playlist: AndroidPlaylist,
-    tracks: List<AndroidTrack>,
+    playlist: LazerPlaylist,
+    tracks: List<LazerTrack>,
     isLoading: Boolean,
     currentId: Long?,
     isPlaying: Boolean,
@@ -3594,7 +3594,7 @@ private fun PlaylistDetail(
     liquidGlassBlurIntensity: Float,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
-    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val pageGlass = rememberLazerLiquidGlass(
@@ -3629,13 +3629,13 @@ private fun PlaylistDetail(
 
 @Composable
 private fun StandardPlaylistDetail(
-    playlist: AndroidPlaylist,
-    tracks: List<AndroidTrack>,
+    playlist: LazerPlaylist,
+    tracks: List<LazerTrack>,
     isLoading: Boolean,
     currentId: Long?,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
-    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
     val listState = rememberLazyListState()
@@ -3668,7 +3668,7 @@ private fun StandardPlaylistDetail(
             }
             if (isLoading && tracks.isEmpty()) item { QuietState(tr("playlist.opening")) }
             if (!isLoading && tracks.isEmpty()) item { QuietState(tr("playlist.empty")) }
-            items(tracks, key = AndroidTrack::id) { track ->
+            items(tracks, key = LazerTrack::id) { track ->
                 TrackRow(track, track.id == currentId) { onPlay(tracks, track) }
             }
         }
@@ -3692,15 +3692,15 @@ private fun StandardPlaylistDetail(
 
 @Composable
 private fun LiquidGlassPlaylistDetail(
-    playlist: AndroidPlaylist,
-    tracks: List<AndroidTrack>,
+    playlist: LazerPlaylist,
+    tracks: List<LazerTrack>,
     isLoading: Boolean,
     currentId: Long?,
     isPlaying: Boolean,
     glass: LazerLiquidGlass,
     modifier: Modifier = Modifier,
     onBack: () -> Unit,
-    onPlay: (List<AndroidTrack>, AndroidTrack) -> Unit,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -3888,7 +3888,7 @@ private fun LiquidGlassPlaylistDetail(
 @Composable
 private fun LiquidGlassPlaylistTrackRow(
     index: Int,
-    track: AndroidTrack,
+    track: LazerTrack,
     current: Boolean,
     isPlaying: Boolean,
     primaryText: Color,
@@ -4098,7 +4098,7 @@ private fun SectionTitle(title: String, subtitle: String? = null) {
 }
 
 @Composable
-private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlaylist) -> Unit) {
+private fun PlaylistStrip(playlists: List<LazerPlaylist>, onOpen: (LazerPlaylist) -> Unit) {
     if (playlists.isEmpty()) {
         QuietState(tr("strip.empty"))
     } else {
@@ -4110,7 +4110,7 @@ private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlay
         // never sees; the radius is put well past the tile so the mask arrives at its full width.
         val tileRipple = ripple(bounded = true, radius = 260.dp)
         LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            items(playlists, key = AndroidPlaylist::id) { playlist ->
+            items(playlists, key = LazerPlaylist::id) { playlist ->
                 Column(
                     Modifier
                         .width(158.dp)
@@ -4143,7 +4143,7 @@ private fun PlaylistStrip(playlists: List<AndroidPlaylist>, onOpen: (AndroidPlay
 }
 
 @Composable
-private fun PlaylistListRow(playlist: AndroidPlaylist, onOpen: (AndroidPlaylist) -> Unit) {
+private fun PlaylistListRow(playlist: LazerPlaylist, onOpen: (LazerPlaylist) -> Unit) {
     val tapped = tapFeedback { onOpen(playlist) }
     // The stock bounded ripple dies at the row's half diagonal; the oversized radius lets a tap
     // anywhere light the full row width, matching the playlist strip tiles.
@@ -4168,7 +4168,7 @@ private fun PlaylistListRow(playlist: AndroidPlaylist, onOpen: (AndroidPlaylist)
 }
 
 @Composable
-private fun TrackRow(track: AndroidTrack, current: Boolean, onClick: () -> Unit) {
+private fun TrackRow(track: LazerTrack, current: Boolean, onClick: () -> Unit) {
     val tapped = tapFeedback(onClick)
     val colors = MaterialTheme.colorScheme
     Row(
@@ -4327,7 +4327,7 @@ private fun SignInInvitation(onSignIn: () -> Unit) {
 
 @Composable
 private fun MiniPlayer(
-    track: AndroidTrack,
+    track: LazerTrack,
     isPlaying: Boolean,
     isPreparing: Boolean,
     onOpen: () -> Unit,
@@ -4829,7 +4829,7 @@ private fun AndroidArtistNames(
 
 @Composable
 private fun NowPlayingPage(
-    snapshot: AndroidPlaybackSnapshot,
+    snapshot: LazerPlaybackSnapshot,
     lyricLines: List<AndroidTimedLyricLine>,
     lyricsLoading: Boolean,
     lyricsMessage: String?,

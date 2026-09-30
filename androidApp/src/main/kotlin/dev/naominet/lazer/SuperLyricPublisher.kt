@@ -56,7 +56,7 @@ internal object SuperLyricPublisher {
      * Publishes the line active at [positionMillis] for [track] if it changed. Called from the
      * playback service's progress loop.
      */
-    fun onPosition(track: AndroidTrack?, positionMillis: Long) {
+    fun onPosition(track: LazerTrack?, positionMillis: Long) {
         if (track == null || !ensureRegistered()) return
         val index = activeAndroidLyricIndex(lines, positionMillis)
         val line = lines.getOrNull(index)

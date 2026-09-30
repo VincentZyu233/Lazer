@@ -43,174 +43,23 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.roundToInt
 
-data class AndroidPlaybackSnapshot(
-    val track: AndroidTrack? = null,
-    val isPreparing: Boolean = false,
-    val isPlaying: Boolean = false,
-    val positionMillis: Long = 0L,
-    val durationMillis: Long = 0L,
-    val bufferedFraction: Float = 0f,
-    val message: String? = null,
-)
-
-/** How the queue advances. Single loop only re-plays a track that finished on its own. */
-enum class AndroidPlayMode {
-    ListLoop,
-    SingleLoop,
-    Shuffle,
-    ;
-
-    companion object {
-        fun parse(value: String?): AndroidPlayMode = entries.firstOrNull { it.name == value } ?: ListLoop
-    }
-}
-
-data class AndroidPlaybackQueueSnapshot(
-    val tracks: List<AndroidTrack> = emptyList(),
-    val index: Int = -1,
-    val mode: AndroidPlayMode = AndroidPlayMode.ListLoop,
-)
-
-private object AndroidPlaybackStateStore {
-    private val mutableSnapshot = MutableStateFlow(AndroidPlaybackSnapshot())
-    val snapshot: StateFlow<AndroidPlaybackSnapshot> = mutableSnapshot.asStateFlow()
-
-    fun update(value: AndroidPlaybackSnapshot) {
-        mutableSnapshot.value = value
-    }
-}
-
-/**
- * Holds the current queue in the same app process. The foreground service owns playback; this is
- * only the hand-off from a list tap to that service and lets system next/previous work while it is
- * alive. The active item itself is always mirrored in [AndroidPlaybackStateStore].
- */
-internal object AndroidPlaybackQueue {
-    private val mutableSnapshot = MutableStateFlow(AndroidPlaybackQueueSnapshot())
-    val snapshot: StateFlow<AndroidPlaybackQueueSnapshot> = mutableSnapshot.asStateFlow()
-
-    val tracks: List<AndroidTrack> get() = mutableSnapshot.value.tracks
-    val index: Int get() = mutableSnapshot.value.index
-    val mode: AndroidPlayMode get() = mutableSnapshot.value.mode
-
-    /** Loads the stored mode before the first track can advance. */
-    fun restoreMode(value: AndroidPlayMode) {
-        mutableSnapshot.update { it.copy(mode = value) }
-    }
-
-    fun setMode(value: AndroidPlayMode) {
-        mutableSnapshot.update { it.copy(mode = value) }
-    }
-
-    fun replace(queue: List<AndroidTrack>, track: AndroidTrack) {
-        val distinct = queue.distinctBy(AndroidTrack::id)
-        val next = if (distinct.any { it.id == track.id }) {
-            distinct
-        } else {
-            listOf(track) + distinct
-        }
-        mutableSnapshot.update {
-            it.copy(tracks = next, index = next.indexOfFirst { item -> item.id == track.id })
-        }
-    }
-
-    fun current(): AndroidTrack? = tracks.getOrNull(index)
-
-    fun next(): AndroidTrack? = advance(1)
-
-    fun previous(): AndroidTrack? = advance(-1)
-
-    /** Points the queue at [position] and returns what should now be audible. */
-    fun jumpTo(position: Int): AndroidTrack? {
-        val state = mutableSnapshot.value
-        val track = state.tracks.getOrNull(position) ?: return null
-        mutableSnapshot.update { it.copy(index = position) }
-        return track
-    }
-
-    /** Reorders without touching playback, keeping the index pointed at the same track. */
-    fun move(from: Int, to: Int) {
-        val state = mutableSnapshot.value
-        if (from == to || from !in state.tracks.indices || to !in state.tracks.indices) return
-        val reordered = state.tracks.toMutableList().apply { add(to, removeAt(from)) }
-        val shifted = when {
-            state.index == from -> to
-            from < state.index && to >= state.index -> state.index - 1
-            from > state.index && to <= state.index -> state.index + 1
-            else -> state.index
-        }
-        mutableSnapshot.update { it.copy(tracks = reordered, index = shifted) }
-    }
-
-    /** Dropping the audible track is the caller's problem, so the edit reports what to play next. */
-    fun removeAt(position: Int): AndroidQueueEdit {
-        val state = mutableSnapshot.value
-        if (position !in state.tracks.indices) return AndroidQueueEdit.Kept
-        val remaining = state.tracks.toMutableList().apply { removeAt(position) }
-        if (position != state.index) {
-            val shifted = if (position < state.index) state.index - 1 else state.index
-            mutableSnapshot.update { it.copy(tracks = remaining, index = shifted) }
-            return AndroidQueueEdit.Kept
-        }
-        if (remaining.isEmpty()) {
-            mutableSnapshot.update { it.copy(tracks = remaining, index = -1) }
-            return AndroidQueueEdit.Emptied
-        }
-        val successorIndex = position.coerceAtMost(remaining.lastIndex)
-        mutableSnapshot.update { it.copy(tracks = remaining, index = successorIndex) }
-        return AndroidQueueEdit.Switched
-    }
-
-    fun adjacent(): List<AndroidTrack> {
-        if (tracks.size < 2 || index !in tracks.indices) return emptyList()
-        return listOf(
-            tracks[(index + 1) % tracks.size],
-            tracks[(index - 1 + tracks.size) % tracks.size],
-        ).distinctBy(AndroidTrack::id)
-    }
-
-    private fun advance(step: Int): AndroidTrack? {
-        val state = mutableSnapshot.value
-        if (state.tracks.isEmpty()) return null
-        val target = when {
-            state.tracks.size == 1 -> state.index.coerceAtLeast(0)
-            state.mode == AndroidPlayMode.Shuffle -> randomOtherIndex(state)
-            else -> (state.index + step + state.tracks.size) % state.tracks.size
-        }
-        mutableSnapshot.update { it.copy(index = target) }
-        return state.tracks.getOrNull(target)
-    }
-
-    private fun randomOtherIndex(state: AndroidPlaybackQueueSnapshot): Int {
-        val candidates = state.tracks.indices.filter { it != state.index }
-        return candidates.randomOrNull() ?: state.index.coerceAtLeast(0)
-    }
-}
-
-/** What an edit to the queue means for the track that is currently audible. */
-internal enum class AndroidQueueEdit {
-    Kept,
-    Switched,
-    Emptied,
-}
-
 /** Entry point used by Compose controls. System-media mode calls back into the same service. */
 object AndroidPlaybackConnection {
-    val snapshot: StateFlow<AndroidPlaybackSnapshot> = AndroidPlaybackStateStore.snapshot
+    val snapshot: StateFlow<LazerPlaybackSnapshot> = LazerPlaybackStateStore.snapshot
 
-    fun currentQueue(): List<AndroidTrack> = AndroidPlaybackQueue.tracks.toList()
+    fun currentQueue(): List<LazerTrack> = LazerPlaybackQueue.tracks.toList()
 
     /** The queue and its advance rule, observable so the player card redraws after an edit. */
-    val queue: StateFlow<AndroidPlaybackQueueSnapshot> = AndroidPlaybackQueue.snapshot
+    val queue: StateFlow<LazerPlaybackQueueSnapshot> = LazerPlaybackQueue.snapshot
 
-    fun setPlayMode(context: Context, mode: AndroidPlayMode) {
-        AndroidPlaybackQueue.setMode(mode)
+    fun setPlayMode(context: Context, mode: LazerPlayMode) {
+        LazerPlaybackQueue.setMode(mode)
         AndroidSettingsStore(context).playMode = mode
     }
 
     /** Makes the item at [position] audible, reusing the hand-off that a list tap already takes. */
     fun playAt(context: Context, position: Int) {
-        if (AndroidPlaybackQueue.jumpTo(position) == null) return
+        if (LazerPlaybackQueue.jumpTo(position) == null) return
         dispatch(
             context,
             Intent(context, AndroidPlaybackService::class.java)
@@ -220,28 +69,28 @@ object AndroidPlaybackConnection {
     }
 
     fun removeAt(context: Context, position: Int) {
-        when (AndroidPlaybackQueue.removeAt(position)) {
-            AndroidQueueEdit.Kept -> Unit
+        when (LazerPlaybackQueue.removeAt(position)) {
+            LazerQueueEdit.Kept -> Unit
             // The queue has already settled on its successor; asking for the removed index again
             // would fall off the end when the last track is the one that was audible.
-            AndroidQueueEdit.Switched -> playAt(context, AndroidPlaybackQueue.index)
-            AndroidQueueEdit.Emptied -> dispatch(context, AndroidPlaybackService.ACTION_STOP)
+            LazerQueueEdit.Switched -> playAt(context, LazerPlaybackQueue.index)
+            LazerQueueEdit.Emptied -> dispatch(context, AndroidPlaybackService.ACTION_STOP)
         }
     }
 
     /** Reordering needs no round trip: the service reads the same in-process queue. */
-    fun moveTrack(from: Int, to: Int) = AndroidPlaybackQueue.move(from, to)
+    fun moveTrack(from: Int, to: Int) = LazerPlaybackQueue.move(from, to)
 
     fun play(
         context: Context,
-        queue: List<AndroidTrack>,
-        track: AndroidTrack,
+        queue: List<LazerTrack>,
+        track: LazerTrack,
         startPlaying: Boolean = true,
         positionMillis: Long = 0L,
     ) {
-        AndroidPlaybackQueue.replace(queue.ifEmpty { listOf(track) }, track)
-        AndroidPlaybackStateStore.update(
-            AndroidPlaybackSnapshot(
+        LazerPlaybackQueue.replace(queue.ifEmpty { listOf(track) }, track)
+        LazerPlaybackStateStore.update(
+            LazerPlaybackSnapshot(
                 track = track,
                 isPreparing = true,
                 positionMillis = positionMillis.coerceAtLeast(0L),
@@ -379,7 +228,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     override fun onCreate() {
         super.onCreate()
         gatewaySettings = AndroidSettingsStore(applicationContext)
-        AndroidPlaybackQueue.restoreMode(gatewaySettings.playMode)
+        LazerPlaybackQueue.restoreMode(gatewaySettings.playMode)
         gatewaySessionStore = AndroidGatewaySessionStore(applicationContext)
         gateway = NeteaseMusicGateway(sessionStore = gatewaySessionStore)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
@@ -391,7 +240,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_PLAY_TRACK -> {
-                AndroidPlaybackQueue.current()?.let { track ->
+                LazerPlaybackQueue.current()?.let { track ->
                     resolveAndPlay(
                         track = track,
                         autoplay = intent.getBooleanExtra(EXTRA_AUTOPLAY, true),
@@ -434,7 +283,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun resolveAndPlay(
-        track: AndroidTrack,
+        track: LazerTrack,
         autoplay: Boolean = true,
         startPositionMillis: Long = 0L,
     ) {
@@ -444,8 +293,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         abandonAudioFocus()
         requestArtwork(track)
         ensureForeground(track, preparing = true)
-        AndroidPlaybackStateStore.update(
-            AndroidPlaybackSnapshot(
+        LazerPlaybackStateStore.update(
+            LazerPlaybackSnapshot(
                 track = track,
                 isPreparing = true,
                 positionMillis = startPositionMillis.coerceAtLeast(0L),
@@ -475,7 +324,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun preparePlayer(
-        track: AndroidTrack,
+        track: LazerTrack,
         url: String,
         generation: Long,
         autoplay: Boolean,
@@ -509,8 +358,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             }
             setOnCompletionListener { playOnCompletion() }
             setOnBufferingUpdateListener { _, percent ->
-                val snapshot = AndroidPlaybackStateStore.snapshot.value
-                AndroidPlaybackStateStore.update(
+                val snapshot = LazerPlaybackStateStore.snapshot.value
+                LazerPlaybackStateStore.update(
                     snapshot.copy(bufferedFraction = (percent / 100f).coerceIn(0f, 1f)),
                 )
             }
@@ -570,7 +419,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     /** Resolve nearby URLs while the current player is buffering, so next/previous skips avoid a round trip. */
     private fun prefetchAdjacentStreamUrls() {
         val preferredQuality = gatewaySettings.audioQuality
-        AndroidPlaybackQueue.adjacent().forEach { track ->
+        LazerPlaybackQueue.adjacent().forEach { track ->
             val cacheKey = AndroidStreamCacheKey(track.id, preferredQuality)
             val usableCachedUrl = streamUrls[cacheKey]?.expiresAtMillis ?: 0L
             if (usableCachedUrl > System.currentTimeMillis() || !streamUrlPrefetches.add(cacheKey)) return@forEach
@@ -587,7 +436,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private fun resumeCurrent(requestFocus: Boolean = true) {
         val currentPlayer = player
         if (currentPlayer == null) {
-            AndroidPlaybackQueue.current()?.let { resolveAndPlay(it) }
+            LazerPlaybackQueue.current()?.let { resolveAndPlay(it) }
             return
         }
         if (requestFocus && !requestAudioFocus()) {
@@ -596,7 +445,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         }
         runCatching { currentPlayer.start() }.onSuccess {
             publishCurrentState(isPreparing = false, isPlaying = true)
-            AndroidPlaybackStateStore.snapshot.value.track?.let { ensureForeground(it, preparing = false) }
+            LazerPlaybackStateStore.snapshot.value.track?.let { ensureForeground(it, preparing = false) }
             handler.removeCallbacks(progressReporter)
             handler.post(progressReporter)
         }
@@ -606,7 +455,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         player?.let { currentPlayer ->
             runCatching { if (currentPlayer.isPlaying) currentPlayer.pause() }
             publishCurrentState(isPreparing = false, isPlaying = false)
-            AndroidPlaybackStateStore.snapshot.value.track?.let { ensureForeground(it, preparing = false) }
+            LazerPlaybackStateStore.snapshot.value.track?.let { ensureForeground(it, preparing = false) }
         }
         SuperLyricPublisher.stop()
         if (gatewaySettings.exclusiveAudio && abandonExclusiveFocus) abandonAudioFocus()
@@ -621,7 +470,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun playNext() {
-        AndroidPlaybackQueue.next()?.let { resolveAndPlay(it) }
+        LazerPlaybackQueue.next()?.let { resolveAndPlay(it) }
     }
 
     /**
@@ -629,7 +478,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
      * loop never traps a listener who is asking to move on.
      */
     private fun playOnCompletion() {
-        if (AndroidPlaybackQueue.mode == AndroidPlayMode.SingleLoop) replayCurrent() else playNext()
+        if (LazerPlaybackQueue.mode == LazerPlayMode.SingleLoop) replayCurrent() else playNext()
     }
 
     /** Restarting the prepared player skips a second stream lookup for the same track. */
@@ -651,7 +500,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun playPrevious() {
-        AndroidPlaybackQueue.previous()?.let { resolveAndPlay(it) }
+        LazerPlaybackQueue.previous()?.let { resolveAndPlay(it) }
     }
 
     private fun stopPlayback(clearSession: Boolean = false) {
@@ -666,7 +515,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         abandonAudioFocus()
         SuperLyricPublisher.stop()
         if (clearSession) gateway.clearSession()
-        AndroidPlaybackStateStore.update(AndroidPlaybackSnapshot())
+        LazerPlaybackStateStore.update(LazerPlaybackSnapshot())
         mediaSession?.setPlaybackState(
             PlaybackState.Builder().setState(PlaybackState.STATE_STOPPED, 0L, 0f).build(),
         )
@@ -679,14 +528,14 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun publishCurrentState(isPreparing: Boolean, isPlaying: Boolean) {
-        val track = AndroidPlaybackStateStore.snapshot.value.track ?: return
+        val track = LazerPlaybackStateStore.snapshot.value.track ?: return
         val currentPlayer = player
         val duration = runCatching { currentPlayer?.duration?.toLong() }.getOrNull()
             ?.takeIf { it > 0L }
             ?: track.durationMillis
         val position = runCatching { currentPlayer?.currentPosition?.toLong() }.getOrNull() ?: 0L
-        AndroidPlaybackStateStore.update(
-            AndroidPlaybackStateStore.snapshot.value.copy(
+        LazerPlaybackStateStore.update(
+            LazerPlaybackStateStore.snapshot.value.copy(
                 track = track,
                 isPreparing = isPreparing,
                 isPlaying = isPlaying,
@@ -704,8 +553,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         releasePreparationWakeLock()
         releasePlayer()
         abandonAudioFocus()
-        val previous = AndroidPlaybackStateStore.snapshot.value
-        AndroidPlaybackStateStore.update(previous.copy(isPreparing = false, isPlaying = false, message = message))
+        val previous = LazerPlaybackStateStore.snapshot.value
+        LazerPlaybackStateStore.update(previous.copy(isPreparing = false, isPlaying = false, message = message))
         previous.track?.let {
             updateSession(it, isPlaying = false, positionMillis = previous.positionMillis)
             ensureForeground(it, preparing = false)
@@ -713,7 +562,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun updateSession(
-        track: AndroidTrack,
+        track: LazerTrack,
         isPlaying: Boolean,
         positionMillis: Long,
         isPreparing: Boolean = false,
@@ -729,7 +578,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
      * Rebuilding it on every progress tick parcelled the album bitmap across binder about 31 times
      * a second, which is the kind of work that heats a phone without ever dropping a frame.
      */
-    private fun publishSessionMetadata(session: MediaSession, track: AndroidTrack) {
+    private fun publishSessionMetadata(session: MediaSession, track: LazerTrack) {
         val hasArtwork = artworkBitmap != null && artworkTrackId == track.id
         val key = "${track.id}|${if (hasArtwork) "art" else "plain"}"
         if (key == sessionMetadataKey) return
@@ -788,7 +637,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         )
     }
 
-    private fun requestArtwork(track: AndroidTrack) {
+    private fun requestArtwork(track: LazerTrack) {
         if (artworkTrackId == track.id && artworkBitmap != null) return
         val url = notificationArtworkUrl(track.coverUrl) ?: return
         val generation = ++artworkGeneration
@@ -799,7 +648,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 .onFailure { error -> Log.w(TAG, "Artwork failed for ${track.id}", error) }
                 .getOrNull()
             withContext(Dispatchers.Main.immediate) {
-                val snapshot = AndroidPlaybackStateStore.snapshot.value
+                val snapshot = LazerPlaybackStateStore.snapshot.value
                 if (generation != artworkGeneration || snapshot.track?.id != track.id || bitmap == null) {
                     return@withContext
                 }
@@ -832,7 +681,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         }
     }
 
-    private fun ensureForeground(track: AndroidTrack, preparing: Boolean) {
+    private fun ensureForeground(track: LazerTrack, preparing: Boolean) {
         val notification = notification(track, preparing)
         if (!foregroundStarted) {
             startForeground(NOTIFICATION_ID, notification)
@@ -855,8 +704,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(channel)
     }
 
-    private fun notification(track: AndroidTrack, preparing: Boolean): Notification {
-        val isPlaying = AndroidPlaybackStateStore.snapshot.value.isPlaying
+    private fun notification(track: LazerTrack, preparing: Boolean): Notification {
+        val isPlaying = LazerPlaybackStateStore.snapshot.value.isPlaying
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -952,7 +801,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     }
 
     private fun refreshPlaybackInterface() {
-        val snapshot = AndroidPlaybackStateStore.snapshot.value
+        val snapshot = LazerPlaybackStateStore.snapshot.value
         if (!gatewaySettings.playbackInterface.usesSystemMediaControls()) {
             abandonAudioFocus()
             wasPlayingBeforeFocusLoss = false
@@ -971,12 +820,12 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 runCatching { player?.pause() }
                 publishCurrentState(isPreparing = false, isPlaying = false)
                 SuperLyricPublisher.stop()
-                AndroidPlaybackStateStore.update(
-                    AndroidPlaybackStateStore.snapshot.value.copy(message = audioFocusFailureMessage()),
+                LazerPlaybackStateStore.update(
+                    LazerPlaybackStateStore.snapshot.value.copy(message = audioFocusFailureMessage()),
                 )
             }
         }
-        AndroidPlaybackStateStore.snapshot.value.let { current ->
+        LazerPlaybackStateStore.snapshot.value.let { current ->
             current.track?.let { ensureForeground(it, preparing = current.isPreparing) }
         }
     }

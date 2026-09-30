@@ -168,8 +168,8 @@ internal class AndroidSettingsStore(context: Context) {
         set(value) = preferences.edit().putString(KEY_AUDIO_QUALITY, value.name).apply()
 
     /** How the queue advances. Survives a restart because the service reads it on creation. */
-    var playMode: AndroidPlayMode
-        get() = AndroidPlayMode.parse(preferences.getString(KEY_PLAY_MODE, null))
+    var playMode: LazerPlayMode
+        get() = LazerPlayMode.parse(preferences.getString(KEY_PLAY_MODE, null))
         set(value) = preferences.edit().putString(KEY_PLAY_MODE, value.name).apply()
 
     var exclusiveAudio: Boolean

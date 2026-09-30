@@ -113,7 +113,7 @@ private class AndroidLyricSelection {
 
 @Composable
 internal fun AndroidLyricsViewport(
-    track: AndroidTrack?,
+    track: LazerTrack?,
     lines: List<AndroidTimedLyricLine>,
     isLoading: Boolean,
     message: String?,

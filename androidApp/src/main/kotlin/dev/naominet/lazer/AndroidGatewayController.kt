@@ -75,16 +75,16 @@ enum class AndroidQrLoginState {
 }
 
 private data class AndroidCachedSignedInContent(
-    val userPlaylists: List<AndroidPlaylist>,
+    val userPlaylists: List<LazerPlaylist>,
     val likedSongIds: Set<Long>,
 )
 
 private data class AndroidCachedBootstrap(
     val hasSavedSession: Boolean,
-    val featuredPlaylists: List<AndroidPlaylist>,
-    val homeTracks: List<AndroidTrack>,
+    val featuredPlaylists: List<LazerPlaylist>,
+    val homeTracks: List<LazerTrack>,
     val profile: UserProfile?,
-    val userPlaylists: List<AndroidPlaylist>,
+    val userPlaylists: List<LazerPlaylist>,
     val likedSongIds: Set<Long>,
 )
 
@@ -213,21 +213,21 @@ class AndroidGatewayController(context: Context) {
         get() = playbackInterface == AndroidPlaybackInterface.INDEPENDENT
     var currentUser by mutableStateOf<UserProfile?>(null)
         private set
-    var featuredPlaylists by mutableStateOf<List<AndroidPlaylist>>(emptyList())
+    var featuredPlaylists by mutableStateOf<List<LazerPlaylist>>(emptyList())
         private set
-    var homeTracks by mutableStateOf<List<AndroidTrack>>(emptyList())
+    var homeTracks by mutableStateOf<List<LazerTrack>>(emptyList())
         private set
-    var userPlaylists by mutableStateOf<List<AndroidPlaylist>>(emptyList())
+    var userPlaylists by mutableStateOf<List<LazerPlaylist>>(emptyList())
         private set
     var likedSongIds by mutableStateOf<Set<Long>>(emptySet())
         private set
-    var activePlaylist by mutableStateOf<AndroidPlaylist?>(null)
+    var activePlaylist by mutableStateOf<LazerPlaylist?>(null)
         private set
-    var activePlaylistTracks by mutableStateOf<List<AndroidTrack>>(emptyList())
+    var activePlaylistTracks by mutableStateOf<List<LazerTrack>>(emptyList())
         private set
     var activeArtist by mutableStateOf<Artist?>(null)
         private set
-    var activeArtistTracks by mutableStateOf<List<AndroidTrack>>(emptyList())
+    var activeArtistTracks by mutableStateOf<List<LazerTrack>>(emptyList())
         private set
     var isArtistLoading by mutableStateOf(false)
         private set
@@ -255,7 +255,7 @@ class AndroidGatewayController(context: Context) {
 
     var searchQuery by mutableStateOf("")
         private set
-    var searchResults by mutableStateOf<List<AndroidTrack>>(emptyList())
+    var searchResults by mutableStateOf<List<LazerTrack>>(emptyList())
         private set
     var isSearching by mutableStateOf(false)
         private set
@@ -309,7 +309,7 @@ class AndroidGatewayController(context: Context) {
     private var listenTogetherSequence = 1L
     private var listenTogetherPlaylistState: ListenTogetherPlaybackState? = null
     private var listenTogetherVersions: List<ListenTogetherPlaylistVersion> = emptyList()
-    private var listenTogetherQueue: List<AndroidTrack> = emptyList()
+    private var listenTogetherQueue: List<LazerTrack> = emptyList()
     private var lastListenTogetherRoomQueueIds: List<Long> = emptyList()
     private var lastReportedQueueIds: List<Long> = emptyList()
     private var lastAppliedRemoteSequence = -1L
@@ -348,7 +348,7 @@ class AndroidGatewayController(context: Context) {
      * The room's shared order. A room decides what everyone hears, so while one is open the queue
      * card reads this list instead of the local one and offers no edits.
      */
-    var listenTogetherRoomQueue by mutableStateOf<List<AndroidTrack>>(emptyList())
+    var listenTogetherRoomQueue by mutableStateOf<List<LazerTrack>>(emptyList())
         private set
 
     fun openQueueSheet() {
@@ -359,7 +359,7 @@ class AndroidGatewayController(context: Context) {
         isQueueSheetVisible = false
     }
 
-    fun setPlayMode(mode: AndroidPlayMode) = AndroidPlaybackConnection.setPlayMode(appContext, mode)
+    fun setPlayMode(mode: LazerPlayMode) = AndroidPlaybackConnection.setPlayMode(appContext, mode)
 
     fun playQueueAt(position: Int) = AndroidPlaybackConnection.playAt(appContext, position)
 
@@ -560,7 +560,7 @@ class AndroidGatewayController(context: Context) {
         }
     }
 
-    private fun currentPlaybackTrack(): AndroidTrack? = AndroidPlaybackConnection.snapshot.value.track
+    private fun currentPlaybackTrack(): LazerTrack? = AndroidPlaybackConnection.snapshot.value.track
 
     /** Songs after the current one, which is what a multi-person room seeds its queue with. */
     private fun upcomingTrackIds(): List<Long> {
@@ -568,7 +568,7 @@ class AndroidGatewayController(context: Context) {
         val queue = listenTogetherQueue.ifEmpty { return emptyList() }
         val index = queue.indexOfFirst { it.id == currentId }
         if (index < 0) return emptyList()
-        return queue.drop(index + 1).map(AndroidTrack::id).distinct()
+        return queue.drop(index + 1).map(LazerTrack::id).distinct()
     }
 
     fun joinListenTogetherRoom(roomId: String, inviterId: Long) {
@@ -633,8 +633,8 @@ class AndroidGatewayController(context: Context) {
     }
 
     /** Starts local playback and remembers its queue so room participants receive the same order. */
-    fun play(queue: List<AndroidTrack>, track: AndroidTrack) {
-        listenTogetherQueue = queue.ifEmpty { listOf(track) }.distinctBy(AndroidTrack::id)
+    fun play(queue: List<LazerTrack>, track: LazerTrack) {
+        listenTogetherQueue = queue.ifEmpty { listOf(track) }.distinctBy(LazerTrack::id)
         AndroidPlaybackConnection.play(appContext, listenTogetherQueue, track)
     }
 
@@ -799,13 +799,13 @@ class AndroidGatewayController(context: Context) {
 
     private suspend fun reportPlaybackCommand(
         commandType: String,
-        snapshot: AndroidPlaybackSnapshot,
+        snapshot: LazerPlaybackSnapshot,
         forceQueue: Boolean = false,
     ) {
         val room = listenTogether ?: return
         val track = snapshot.track ?: return
         val queue = listenTogetherQueue.ifEmpty { listOf(track) }
-        val queueIds = queue.map(AndroidTrack::id).distinct()
+        val queueIds = queue.map(LazerTrack::id).distinct()
         if (forceQueue || queueIds != lastReportedQueueIds) {
             val userId = currentUser?.userId ?: return
             val remoteState = listenTogetherPlaylistState
@@ -880,14 +880,14 @@ class AndroidGatewayController(context: Context) {
         }
     }
 
-    private suspend fun loadListenTogetherTracks(ids: List<Long>): List<AndroidTrack> {
+    private suspend fun loadListenTogetherTracks(ids: List<Long>): List<LazerTrack> {
         val known = (listenTogetherQueue + homeTracks + activePlaylistTracks + activeArtistTracks)
-            .associateBy(AndroidTrack::id)
+            .associateBy(LazerTrack::id)
             .toMutableMap()
         ids.filterNot(known::containsKey).chunked(200).forEach { missing ->
-            gateway.songDetails(missing).songs.map(::toAndroidTrack).forEach { known[it.id] = it }
+            gateway.songDetails(missing).songs.map(::toLazerTrack).forEach { known[it.id] = it }
         }
-        return ids.mapNotNull(known::get).distinctBy(AndroidTrack::id)
+        return ids.mapNotNull(known::get).distinctBy(LazerTrack::id)
     }
 
     init {
@@ -1099,7 +1099,7 @@ class AndroidGatewayController(context: Context) {
 
     fun isSongLiked(songId: Long): Boolean = songId in likedSongIds
 
-    fun toggleSongLiked(track: AndroidTrack) {
+    fun toggleSongLiked(track: LazerTrack) {
         val user = currentUser
         if (user == null) {
             openLogin()
@@ -1119,7 +1119,7 @@ class AndroidGatewayController(context: Context) {
         }
     }
 
-    fun openPlaylist(playlist: AndroidPlaylist) {
+    fun openPlaylist(playlist: LazerPlaylist) {
         val requestGeneration = ++playlistRequestGeneration
         playlistJob?.cancel()
         activePlaylist = playlist
@@ -1166,7 +1166,7 @@ class AndroidGatewayController(context: Context) {
                 val detail = runCatching { gateway.artistDetail(artist.id).data?.artist }.getOrNull()
                 if (activeArtist?.id != artist.id) return@launch
                 if (detail != null) activeArtist = detail
-                val tracks = gateway.artistTopSongs(artist.id).songs.map(::toAndroidTrack)
+                val tracks = gateway.artistTopSongs(artist.id).songs.map(::toLazerTrack)
                 if (activeArtist?.id == artist.id) activeArtistTracks = tracks
             } catch (error: CancellationException) {
                 throw error
@@ -1230,7 +1230,7 @@ class AndroidGatewayController(context: Context) {
                     }
                     .orEmpty()
                 searchResults = searchSongs.map { song ->
-                    toAndroidTrack(detailedSongs[song.id] ?: song)
+                    toLazerTrack(detailedSongs[song.id] ?: song)
                 }
             } catch (_: Throwable) {
                 searchResults = emptyList()
@@ -1588,7 +1588,7 @@ class AndroidGatewayController(context: Context) {
     private suspend fun loadPublicContent(forceRefresh: Boolean = false) {
         val freshPlaylists = withContext(Dispatchers.IO) {
             gateway.topPlaylists(limit = 12, forceRefresh = forceRefresh)
-                .playlists.map(::toAndroidPlaylist)
+                .playlists.map(::toLazerPlaylist)
         }
         if (freshPlaylists.isNotEmpty()) {
             featuredPlaylists = freshPlaylists
@@ -1597,7 +1597,7 @@ class AndroidGatewayController(context: Context) {
         val source = featuredPlaylists.firstOrNull() ?: return
         val freshTracks = withContext(Dispatchers.IO) {
             gateway.playlistTracks(source.id, limit = 50, forceRefresh = forceRefresh)
-                .songs.map(::toAndroidTrack)
+                .songs.map(::toLazerTrack)
         }
         if (freshTracks.isNotEmpty()) {
             homeTracks = freshTracks
@@ -1628,12 +1628,12 @@ class AndroidGatewayController(context: Context) {
             }
             val recommendedPlaylistsRequest = async(Dispatchers.IO) {
                 gatewayOrNull {
-                    gateway.dailyRecommendedPlaylists(forceRefresh).recommend.map(::toAndroidPlaylist)
+                    gateway.dailyRecommendedPlaylists(forceRefresh).recommend.map(::toLazerPlaylist)
                 }.orEmpty()
             }
             val recommendedTracksRequest = async(Dispatchers.IO) {
                 gatewayOrNull {
-                    gateway.dailyRecommendedSongs(forceRefresh).data?.dailySongs.orEmpty().map(::toAndroidTrack)
+                    gateway.dailyRecommendedSongs(forceRefresh).data?.dailySongs.orEmpty().map(::toLazerTrack)
                 }.orEmpty()
             }
 
@@ -1666,8 +1666,8 @@ class AndroidGatewayController(context: Context) {
     private suspend fun loadAllUserPlaylists(
         userId: Long,
         forceRefresh: Boolean = false,
-    ): List<AndroidPlaylist> {
-        val all = mutableListOf<AndroidPlaylist>()
+    ): List<LazerPlaylist> {
+        val all = mutableListOf<LazerPlaylist>()
         var offset = 0
         do {
             val page = gateway.userPlaylists(
@@ -1676,18 +1676,18 @@ class AndroidGatewayController(context: Context) {
                 offset = offset,
                 forceRefresh = forceRefresh,
             )
-            all += page.playlist.map(::toAndroidPlaylist)
+            all += page.playlist.map(::toLazerPlaylist)
             offset += page.playlist.size
             if (!page.more || page.playlist.isEmpty()) break
         } while (true)
-        return all.distinctBy(AndroidPlaylist::id)
+        return all.distinctBy(LazerPlaylist::id)
     }
 
     private suspend fun loadAllPlaylistTracks(
-        playlist: AndroidPlaylist,
+        playlist: LazerPlaylist,
         requestGeneration: Long,
-    ): List<AndroidTrack> {
-        val refreshed = mutableListOf<AndroidTrack>()
+    ): List<LazerTrack> {
+        val refreshed = mutableListOf<LazerTrack>()
         var offset = 0
         do {
             val page = withContext(Dispatchers.IO) {
@@ -1699,12 +1699,12 @@ class AndroidGatewayController(context: Context) {
                     // shown first, so a refresh must use a request-specific URL rather than risk
                     // accepting an old response after the user opened another playlist.
                     forceRefresh = true,
-                ).songs.map(::toAndroidTrack)
+                ).songs.map(::toLazerTrack)
             }
             if (!isCurrentPlaylistRequest(playlist.id, requestGeneration)) return emptyList()
             if (page.isEmpty()) break
             refreshed += page
-            val currentPage = refreshed.distinctBy(AndroidTrack::id)
+            val currentPage = refreshed.distinctBy(LazerTrack::id)
             // A request owns the visible list for its full lifetime. Do not combine it with a
             // previous cache snapshot: that is how a cancelled playlist request could leave B's
             // rows visible under A's header while the next page was arriving.
@@ -1712,7 +1712,7 @@ class AndroidGatewayController(context: Context) {
             offset += page.size
             if (page.size < PLAYLIST_PAGE_SIZE) break
         } while (true)
-        val complete = refreshed.distinctBy(AndroidTrack::id)
+        val complete = refreshed.distinctBy(LazerTrack::id)
         if (isCurrentPlaylistRequest(playlist.id, requestGeneration) && complete.isNotEmpty()) {
             cache.saveTracks(playlist.id, complete)
         }
@@ -1793,7 +1793,7 @@ class AndroidGatewayController(context: Context) {
     }
 }
 
-private fun toAndroidTrack(song: Song): AndroidTrack = AndroidTrack(
+private fun toLazerTrack(song: Song): LazerTrack = LazerTrack(
     id = song.id,
     title = song.name.ifBlank { tr("track.unknown_song") },
     translatedTitle = song.translations.map(String::trim).filter { it.isNotBlank() && it != song.name }.distinct().joinToString(" / ").takeIf(String::isNotBlank),
@@ -1804,7 +1804,7 @@ private fun toAndroidTrack(song: Song): AndroidTrack = AndroidTrack(
     artists = song.artists.filter { it.id > 0L && it.name.isNotBlank() },
 )
 
-private fun toAndroidPlaylist(playlist: Playlist): AndroidPlaylist = AndroidPlaylist(
+private fun toLazerPlaylist(playlist: Playlist): LazerPlaylist = LazerPlaylist(
     id = playlist.id,
     title = playlist.name.ifBlank { tr("playlist.unnamed") },
     subtitle = playlist.creator?.nickname?.takeIf(String::isNotBlank)

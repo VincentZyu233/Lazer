@@ -60,33 +60,6 @@ internal fun enlargedArtworkUrl(raw: String?, sizePx: Int = 1024): String? {
 
 
 /**
- * A small Android-only representation of the data the player needs to render and queue a song.
- * Keeping it independent from the transport model avoids passing cookies or raw API responses into
- * the UI and lets the playback service restore its queue without an Activity.
- */
-data class AndroidTrack(
-    val id: Long,
-    val title: String,
-    val artist: String,
-    val album: String,
-    val durationMillis: Long,
-    val coverUrl: String? = null,
-    val artists: List<Artist> = emptyList(),
-    val translatedTitle: String? = null,
-) {
-    val durationLabel: String get() = formatPlaybackTime(durationMillis)
-}
-
-data class AndroidPlaylist(
-    val id: Long,
-    val title: String,
-    val subtitle: String,
-    val coverUrl: String? = null,
-    val trackCount: Int = 0,
-    val isLikedCollection: Boolean = false,
-)
-
-/**
  * The app restores metadata and complete track lists before asking Gateway for a refresh. Coil
  * owns the matching image disk cache, so the same cover URL is also available offline first.
  */
@@ -102,20 +75,20 @@ class AndroidPlaylistCache(context: Context) {
 
     // Parsed cache values stay in process after their first read. This keeps opening a playlist,
     // restoring the library, and replacing a playback queue from doing JSON work on the UI thread.
-    private var featuredPlaylistsMemory: List<AndroidPlaylist>? = null
+    private var featuredPlaylistsMemory: List<LazerPlaylist>? = null
     private var currentUserMemory: UserProfile? = null
     private var hasReadCurrentUser = false
-    private val userPlaylistsMemory = mutableMapOf<Long, List<AndroidPlaylist>>()
+    private val userPlaylistsMemory = mutableMapOf<Long, List<LazerPlaylist>>()
     private val likedSongIdsMemory = mutableMapOf<Long, Set<Long>>()
-    private val tracksMemory = mutableMapOf<Long, List<AndroidTrack>>()
+    private val tracksMemory = mutableMapOf<Long, List<LazerTrack>>()
 
-    fun loadFeaturedPlaylists(): List<AndroidPlaylist> = synchronized(lock) {
+    fun loadFeaturedPlaylists(): List<LazerPlaylist> = synchronized(lock) {
         featuredPlaylistsMemory
     } ?: decodePlaylists(preferences.getString(KEY_FEATURED, null)).also { playlists ->
         synchronized(lock) { featuredPlaylistsMemory = playlists }
     }
 
-    fun saveFeaturedPlaylists(playlists: List<AndroidPlaylist>) {
+    fun saveFeaturedPlaylists(playlists: List<LazerPlaylist>) {
         val snapshot = playlists.toList()
         synchronized(lock) { featuredPlaylistsMemory = snapshot }
         writeAsync(KEY_FEATURED) { encodePlaylists(snapshot) }
@@ -153,13 +126,13 @@ class AndroidPlaylistCache(context: Context) {
         removeAsync(KEY_CURRENT_USER)
     }
 
-    fun loadUserPlaylists(userId: Long): List<AndroidPlaylist> = synchronized(lock) {
+    fun loadUserPlaylists(userId: Long): List<LazerPlaylist> = synchronized(lock) {
         userPlaylistsMemory[userId]
     } ?: decodePlaylists(preferences.getString(userPlaylistsKey(userId), null)).also { playlists ->
         synchronized(lock) { userPlaylistsMemory[userId] = playlists }
     }
 
-    fun saveUserPlaylists(userId: Long, playlists: List<AndroidPlaylist>) {
+    fun saveUserPlaylists(userId: Long, playlists: List<LazerPlaylist>) {
         val snapshot = playlists.toList()
         synchronized(lock) { userPlaylistsMemory[userId] = snapshot }
         writeAsync(userPlaylistsKey(userId)) { encodePlaylists(snapshot) }
@@ -178,18 +151,18 @@ class AndroidPlaylistCache(context: Context) {
         writeAsync(likedSongIdsKey(userId)) { encodeSongIds(snapshot) }
     }
 
-    fun loadTracks(playlistId: Long): List<AndroidTrack> = synchronized(lock) {
+    fun loadTracks(playlistId: Long): List<LazerTrack> = synchronized(lock) {
         tracksMemory[playlistId]
     } ?: decodeTracks(preferences.getString(tracksKey(playlistId), null)).also { tracks ->
         synchronized(lock) { tracksMemory[playlistId] = tracks }
     }
 
     /** Returns only already-decoded data; safe to call from a click handler without disk or JSON work. */
-    fun peekTracks(playlistId: Long): List<AndroidTrack>? = synchronized(lock) {
+    fun peekTracks(playlistId: Long): List<LazerTrack>? = synchronized(lock) {
         tracksMemory[playlistId]
     }
 
-    fun saveTracks(playlistId: Long, tracks: List<AndroidTrack>) {
+    fun saveTracks(playlistId: Long, tracks: List<LazerTrack>) {
         val snapshot = tracks.toList()
         synchronized(lock) { tracksMemory[playlistId] = snapshot }
         writeAsync(tracksKey(playlistId)) { encodeTracks(snapshot) }
@@ -289,7 +262,7 @@ class AndroidPlaylistCache(context: Context) {
         }
     }.getOrDefault(emptySet())
 
-    private fun encodePlaylists(playlists: List<AndroidPlaylist>): String = JSONArray().apply {
+    private fun encodePlaylists(playlists: List<LazerPlaylist>): String = JSONArray().apply {
         playlists.forEach { playlist ->
             put(
                 JSONObject().apply {
@@ -304,11 +277,11 @@ class AndroidPlaylistCache(context: Context) {
         }
     }.toString()
 
-    private fun decodePlaylists(serialized: String?): List<AndroidPlaylist> = runCatching {
+    private fun decodePlaylists(serialized: String?): List<LazerPlaylist> = runCatching {
         val array = JSONArray(serialized ?: return emptyList())
         List(array.length()) { index ->
             array.getJSONObject(index).let { item ->
-                AndroidPlaylist(
+                LazerPlaylist(
                     id = item.optLong("id"),
                     title = item.optString("title"),
                     subtitle = item.optString("subtitle"),
@@ -320,7 +293,7 @@ class AndroidPlaylistCache(context: Context) {
         }.filter { it.id > 0 && it.title.isNotBlank() }
     }.getOrDefault(emptyList())
 
-    private fun encodeTracks(tracks: List<AndroidTrack>): String = JSONArray().apply {
+    private fun encodeTracks(tracks: List<LazerTrack>): String = JSONArray().apply {
         tracks.forEach { track ->
             put(
                 JSONObject().apply {
@@ -344,12 +317,12 @@ class AndroidPlaylistCache(context: Context) {
         }
     }.toString()
 
-    private fun decodeTracks(serialized: String?): List<AndroidTrack> = runCatching {
+    private fun decodeTracks(serialized: String?): List<LazerTrack> = runCatching {
         val array = JSONArray(serialized ?: return emptyList())
         List(array.length()) { index ->
             array.getJSONObject(index).let { item ->
                 val artistArray = item.optJSONArray("artists") ?: JSONArray()
-                AndroidTrack(
+                LazerTrack(
                     id = item.optLong("id"),
                     title = item.optString("title"),
                     translatedTitle = item.optString("translatedTitle").takeIf { it.isNotBlank() && it != "null" },
@@ -461,9 +434,4 @@ class AndroidGatewaySessionStore(context: Context) : GatewaySessionStore {
         const val ANDROID_KEY_STORE = "AndroidKeyStore"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
-}
-
-fun formatPlaybackTime(millis: Long): String {
-    val seconds = (millis.coerceAtLeast(0L) / 1_000L).toInt()
-    return "%d:%02d".format(seconds / 60, seconds % 60)
 }
