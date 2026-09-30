@@ -81,9 +81,12 @@ kotlin {
             implementation(libs.compose.uiTooling)
             implementation(libs.ktor.client.okhttp)
         }
-        // iosMain only exists when iOS targets are registered (macOS hosts).
-        findByName("iosMain")?.dependencies {
-            implementation(libs.ktor.client.darwin)
+        // The default hierarchy builds iosMain after this block has run, so a lookup here finds
+        // nothing and the engine silently never reaches iOS. A live filter adds it once it exists.
+        matching { it.name == "iosMain" }.configureEach {
+            dependencies {
+                implementation(libs.ktor.client.darwin)
+            }
         }
         jvmMain.dependencies {
             implementation(libs.ktor.client.cio)
