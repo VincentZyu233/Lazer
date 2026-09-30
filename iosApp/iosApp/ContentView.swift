@@ -84,8 +84,8 @@ final class LazerShell: NSObject, IosShellBridge {
         download(url, to: nil) { path, _ in onDone(path) }
     }
 
-    func downloadToDestination(url: String, destination: String, onDone: @escaping (Bool) -> Void) {
-        download(url, to: destination) { _, written in onDone(written) }
+    func downloadToDestination(url: String, destination: String, onDone: @escaping (String?) -> Void) {
+        download(url, to: destination) { _, written in onDone(written ? destination : nil) }
     }
 
     private func download(_ url: String, to destination: String?, _ done: @escaping (String?, Bool) -> Void) {
@@ -126,13 +126,12 @@ final class LazerShell: NSObject, IosShellBridge {
 
     func playerSetEndedHandler(handler: @escaping () -> Void) { audio.onEnded = handler }
 
-    func requestMicrophoneAccess(onResult: @escaping (Bool) -> Void) {
+    func requestMicrophoneAccess(onDone: @escaping () -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: onResult(true)
-        case .denied, .restricted: onResult(false)
+        case .authorized, .denied, .restricted: onDone()
         default:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                DispatchQueue.main.async { onResult(granted) }
+            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                DispatchQueue.main.async { onDone() }
             }
         }
     }

@@ -41,8 +41,8 @@ interface IosShellBridge {
     /** Downloads into a file UIKit can write without a byte buffer crossing the bridge. */
     fun downloadToFile(url: String, onDone: (path: String?) -> Unit)
 
-    /** Downloads straight into [destination], so no byte buffer has to cross the bridge. */
-    fun downloadToDestination(url: String, destination: String, onDone: (written: Boolean) -> Unit)
+    /** Downloads straight into [destination]; the path comes back, or null when nothing was written. */
+    fun downloadToDestination(url: String, destination: String, onDone: (writtenPath: String?) -> Unit)
 
     /**
      * The audio side. Swift owns AVPlayer because Kotlin's view of its API is a translation, and a
@@ -67,7 +67,8 @@ interface IosShellBridge {
 
     fun playerSetEndedHandler(handler: () -> Unit)
 
-    fun requestMicrophoneAccess(onResult: (granted: Boolean) -> Unit)
+    /** Asks for the microphone; Kotlin reads the answer back through [isMicrophoneGranted]. */
+    fun requestMicrophoneAccess(onDone: () -> Unit)
 
     fun isMicrophoneGranted(): Boolean
 
@@ -112,7 +113,7 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
     override fun shareText(text: String, title: String) = bridge.share(text, title)
 
     override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) =
-        bridge.requestMicrophoneAccess(onResult)
+        bridge.requestMicrophoneAccess { onResult(bridge.isMicrophoneGranted()) }
 
     override val microphoneGranted: Boolean get() = bridge.isMicrophoneGranted()
 

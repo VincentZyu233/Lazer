@@ -82,7 +82,7 @@ internal class IosPlatformHost(private val bridge: IosShellBridge) : LazerPlatfo
     /** Swift downloads and writes in one job, so no byte buffer has to cross the bridge. */
     override suspend fun saveRemoteFile(url: String, target: String): Boolean =
         suspendCoroutine { continuation ->
-            bridge.downloadToDestination(url, target) { written -> continuation.resume(written) }
+            bridge.downloadToDestination(url, target) { written -> continuation.resume(written != null) }
         }
 
     override suspend fun downloadFile(url: String): ByteArray? =
