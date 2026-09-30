@@ -24,10 +24,34 @@ internal const val IOS_RESUME_NOTIFICATION = "dev.naominet.lazer.resume"
 
 /** iOS state holder. Rendering stays in Compose while AVPlayer remains a native shell concern. */
 internal class IOSGatewayController {
-    val settings = IOSSettingsStore()
+    init {
+        println("LAZER_IOS_CONTROLLER_STAGE:start")
+    }
 
-    private val gateway = NeteaseMusicGateway(sessionStore = IOSGatewaySessionStore())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    val settings = IOSSettingsStore().also {
+        println("LAZER_IOS_CONTROLLER_STAGE:settings")
+    }
+
+    // HttpClient engine discovery can touch native networking code. Keep it out of the first
+    // composition so an engine/setup failure becomes a recoverable page error instead of aborting
+    // the Compose root before iOS can draw its first frame.
+    private val gatewayDelegate = lazy(LazyThreadSafetyMode.NONE) {
+        println("LAZER_IOS_CONTROLLER_STAGE:gateway:create")
+        try {
+            NeteaseMusicGateway(sessionStore = IOSGatewaySessionStore()).also {
+                println("LAZER_IOS_CONTROLLER_STAGE:gateway:ready")
+            }
+        } catch (error: Throwable) {
+            println("LAZER_IOS_CONTROLLER_GATEWAY_ERROR:$error")
+            throw error
+        }
+    }
+    private val gateway: NeteaseMusicGateway
+        get() = gatewayDelegate.value
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main).also {
+        println("LAZER_IOS_CONTROLLER_STAGE:scope")
+    }
     private var searchJob: Job? = null
     private var didBootstrap = false
     private var queue: List<Song> = emptyList()
@@ -242,7 +266,9 @@ internal class IOSGatewayController {
     fun close() {
         searchJob?.cancel()
         scope.cancel()
-        gateway.close()
+        if (gatewayDelegate.isInitialized()) {
+            gateway.close()
+        }
     }
 
     private fun handleFailure(error: Throwable, userMessage: String) {
