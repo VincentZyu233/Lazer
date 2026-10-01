@@ -268,7 +268,12 @@ private final class LazerAudio: NSObject {
 
     func release() {
         player?.pause()
-        mediaQueue.async { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
+        mediaQueue.async { [weak self] in
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            self?.nowPlayingKey = nil
+            self?.artworkUrl = nil
+            self?.artwork = nil
+        }
         if let item = observedItem {
             NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
         }
@@ -285,6 +290,10 @@ private final class LazerAudio: NSObject {
     private var commands: IosPlayerCommands?
     private var wantsSystemMedia = true
     private var exclusiveAudio = false
+    private var wasPlayingBeforeInterruption = false
+    private var nowPlayingKey: String?
+    private var artworkUrl: String?
+    private var artwork: MPMediaItemArtwork?
 
     /// Sharing audio means ducking whoever else is playing; taking it over means silencing them.
     private func applySessionCategory() {
@@ -301,10 +310,76 @@ private final class LazerAudio: NSObject {
             let center = MPRemoteCommandCenter.shared()
             center.playCommand.addTarget(self, action: #selector(self.handlePlay))
             center.pauseCommand.addTarget(self, action: #selector(self.handlePause))
+            center.togglePlayPauseCommand.addTarget(self, action: #selector(self.handleToggle))
             center.nextTrackCommand.addTarget(self, action: #selector(self.handleNext))
             center.previousTrackCommand.addTarget(self, action: #selector(self.handlePrevious))
             center.changePlaybackPositionCommand.addTarget(self, action: #selector(self.handleSeek(_:)))
+            // Control Centre and the lock screen offer ±15/±30 skips rather than a scrub bar, and a
+            // Bluetooth or headset button reaches for the toggle. Without all three the transport
+            // looks present and answers to nothing.
+            center.skipForwardCommand.preferredIntervals = [30]
+            center.skipBackwardCommand.preferredIntervals = [30]
+            center.skipForwardCommand.addTarget(self, action: #selector(self.handleSkipForward(_:)))
+            center.skipBackwardCommand.addTarget(self, action: #selector(self.handleSkipBackward(_:)))
         }
+        // A call, a Siri interruption or a pulled-out earbud is the system telling the player what
+        // just happened to its audio. Nobody else in the app hears those, so the queue would keep
+        // believing it was playing.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleInterruption(_:)),
+            name: AVAudioSession.interruptionNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleRouteChange(_:)),
+            name: AVAudioSession.routeChangeNotification, object: nil
+        )
+    }
+
+    @objc private func handleToggle() -> MPRemoteCommandHandlerStatus {
+        if player?.timeControlStatus == .playing {
+            commands?.pause()
+        } else {
+            commands?.play()
+        }
+        return .success
+    }
+
+    @objc private func handleSkipForward(_ event: MPSkipIntervalCommandEvent) -> MPRemoteCommandHandlerStatus {
+        commands?.seekToMillis(millis: positionMillis + Int64(event.interval * 1000))
+        return .success
+    }
+
+    @objc private func handleSkipBackward(_ event: MPSkipIntervalCommandEvent) -> MPRemoteCommandHandlerStatus {
+        commands?.seekToMillis(millis: max(0, positionMillis - Int64(event.interval * 1000)))
+        return .success
+    }
+
+    @objc private func handleInterruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            wasPlayingBeforeInterruption = player?.timeControlStatus == .playing
+            commands?.pause()
+        case .ended:
+            guard wasPlayingBeforeInterruption else { return }
+            wasPlayingBeforeInterruption = false
+            let options = AVAudioSession.InterruptionOptions(
+                rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            )
+            applySessionCategory()
+            if options.contains(.shouldResume) { commands?.play() }
+        @unknown default:
+            wasPlayingBeforeInterruption = false
+        }
+    }
+
+    @objc private func handleRouteChange(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+        // The output went away with the listener: stop, rather than keep playing into a speaker
+        // nobody is holding.
+        DispatchQueue.main.async { self.commands?.pause() }
     }
 
     @objc private func handlePlay() -> MPRemoteCommandHandlerStatus {
@@ -337,44 +412,74 @@ private final class LazerAudio: NSObject {
         positionMillis: Int64, durationMillis: Int64, isPlaying: Bool
     ) {
         guard wantsSystemMedia else { return }
-        let info: [String: Any] = [
-            "MPMediaItemPropertyTitle": title,
-            "MPMediaItemPropertyArtist": artist,
-            "MPMediaItemPropertyAlbumTitle": album,
-            "MPMediaItemPropertyPlaybackDuration": Double(durationMillis) / 1000,
-            "MPNowPlayingInfoPropertyElapsedPlaybackTime": Double(positionMillis) / 1000,
-            "MPNowPlayingInfoPropertyPlaybackRate": isPlaying ? 1.0 : 0.0,
-            "MPNowPlayingInfoPropertyDefaultPlaybackRate": 1.0,
-        ]
+        // The metadata belongs to the track and the clock belongs to the tick. Publishing the whole
+        // dictionary four times a second made the system rebuild the artwork on every tick and the
+        // lock-screen scrubber stutter, so only elapsed time and rate move in between tracks.
+        let key = "\(title)\u{1}\(artist)\u{1}\(album)\u{1}\(durationMillis)"
         mediaQueue.async {
             let center = MPNowPlayingInfoCenter.default()
-            center.nowPlayingInfo = info
-            center.playbackState = isPlaying ? .playing : .paused
-            guard let coverUrl, let address = URL(string: coverUrl) else { return }
-            URLSession.shared.dataTask(with: address) { data, _, _ in
-                guard let data, let image = UIImage(data: data) else { return }
-                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
-                self.mediaQueue.async {
-                    var withArtwork = info
-                    withArtwork["MPMediaItemPropertyArtwork"] = artwork
-                    center.nowPlayingInfo = withArtwork
+            if center.nowPlayingInfo == nil || self.nowPlayingKey != key {
+                self.nowPlayingKey = key
+                var info: [String: Any] = [
+                    MPMediaItemPropertyTitle: title,
+                    MPMediaItemPropertyArtist: artist,
+                    MPMediaItemPropertyAlbumTitle: album,
+                    MPMediaItemPropertyPlaybackDuration: Double(durationMillis) / 1000,
+                    MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(positionMillis) / 1000,
+                    MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
+                    MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
+                ]
+                if self.artworkUrl == coverUrl, let artwork = self.artwork {
+                    info[MPMediaItemPropertyArtwork] = artwork
                 }
-            }.resume()
+                center.nowPlayingInfo = info
+                self.loadArtwork(url: coverUrl, center: center)
+            } else {
+                var info = center.nowPlayingInfo ?? [:]
+                info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(positionMillis) / 1000
+                info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+                center.nowPlayingInfo = info
+            }
+            center.playbackState = isPlaying ? .playing : .paused
         }
+    }
+
+    /// One artwork per cover. The system wants the artwork in the same dictionary as the rest, so the
+    /// download patches whatever the now-playing info holds by the time it lands.
+    private func loadArtwork(url: String?, center: MPNowPlayingInfoCenter) {
+        guard let url, let address = URL(string: url) else { return }
+        guard artworkUrl != url else { return }
+        artworkUrl = url
+        artwork = nil
+        URLSession.shared.dataTask(with: address) { [weak self] data, _, _ in
+            guard let self, let data, let image = UIImage(data: data) else { return }
+            let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+            self.mediaQueue.async {
+                guard self.artworkUrl == url else { return }
+                self.artwork = artwork
+                var info = center.nowPlayingInfo ?? [:]
+                info[MPMediaItemPropertyArtwork] = artwork
+                center.nowPlayingInfo = info
+            }
+        }.resume()
     }
 
     func applyMode(exclusive: Bool, systemMedia: Bool) {
         wantsSystemMedia = systemMedia
         exclusiveAudio = exclusive
         applySessionCategory()
-        mediaQueue.async {
+        mediaQueue.async { [weak self] in
             let center = MPRemoteCommandCenter.shared()
-            [center.playCommand, center.pauseCommand, center.nextTrackCommand,
-             center.previousTrackCommand, center.changePlaybackPositionCommand].forEach {
+            [center.playCommand, center.pauseCommand, center.togglePlayPauseCommand,
+             center.nextTrackCommand, center.previousTrackCommand,
+             center.changePlaybackPositionCommand,
+             center.skipForwardCommand, center.skipBackwardCommand].forEach {
                 $0.isEnabled = systemMedia
             }
             if !systemMedia {
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                // Switching back has to republish the track itself, not just the clock.
+                self?.nowPlayingKey = nil
             }
         }
     }
