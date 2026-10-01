@@ -85,17 +85,12 @@ class LyricEmphasizeTest {
         val emphasis = lyricCharEmphasis(
             strength = strength,
             glowProgress = 0.5f,
-            floatProgress = 0.5f,
             charIndex = 0,
             characterCount = 4,
-            isBackgroundLine = false,
         )
         assertEquals(1f + 0.1f * strength.amount, emphasis.scale, 0.0001f)
-        assertEquals(-0.025f * strength.amount, emphasis.offsetYEm, 0.0001f)
         assertEquals(strength.blur, emphasis.glowAlpha, 0.0001f)
         assertEquals(0.3f * strength.blur, emphasis.glowRadiusEm, 0.0001f)
-        // sin(pi/2) is the top of the arc, so the lift is at its peak mid-animation.
-        assertEquals(-0.05f, emphasis.floatOffsetEm, 0.0001f)
     }
 
     @Test
@@ -104,10 +99,8 @@ class LyricEmphasizeTest {
         fun offsetFor(index: Int) = lyricCharEmphasis(
             strength = strength,
             glowProgress = 0.5f,
-            floatProgress = 0f,
             charIndex = index,
             characterCount = 4,
-            isBackgroundLine = false,
         ).offsetXEm
         // AMLL offsets each character by (n/2 - i), so the word spreads outward from its middle and
         // characters further from that middle travel proportionally further.
@@ -115,27 +108,6 @@ class LyricEmphasizeTest {
         assertTrue(offsets.zipWithNext().all { (left, right) -> left < right })
         assertEquals(0f, offsets[2], 0.0001f)
         assertEquals(2f * offsets[1], offsets[0], 0.0001f)
-    }
-
-    @Test
-    fun backgroundLinesLiftTwiceAsFar() {
-        val strength = lyricEmphasizeStrength(wordDurationMillis = 1000L, isLastWord = false)
-        fun lift(background: Boolean) = lyricCharEmphasis(
-            strength = strength,
-            glowProgress = 0f,
-            floatProgress = 0.5f,
-            charIndex = 0,
-            characterCount = 1,
-            isBackgroundLine = background,
-        ).floatOffsetEm
-        assertEquals(lift(false) * 2f, lift(true), 0.0001f)
-    }
-
-    @Test
-    fun theFloatStartsEarlyAndRunsLongerThanTheGlow() {
-        val strength = lyricEmphasizeStrength(wordDurationMillis = 2000L, isLastWord = false)
-        assertEquals(-400f, lyricCharFloatStartMillis(0f), 0.0001f)
-        assertEquals(2800f, lyricCharFloatDurationMillis(strength), 0.0001f)
     }
 
     @Test
@@ -148,29 +120,6 @@ class LyricEmphasizeTest {
         assertTrue(!lyricWordIsEmphasizable(TimedLyricWord(0L, 999L, "长")))
         assertTrue(!lyricWordIsEmphasizable(TimedLyricWord(0L, 1_200L, "a")))
         assertTrue(!lyricWordIsEmphasizable(TimedLyricWord(0L, 1_200L, "absolutely")))
-    }
-
-    @Test
-    fun theWordRiseCoversMostOfItsDistanceFirst() {
-        val word = TimedLyricWord(0L, 1_000L, "词")
-        fun liftAt(millis: Long): Float = -lyricWordFloatOffsetEm(word, millis) / SettledLyricWordFloatEm
-        // 先快后慢: a quarter of the time buys most of the travel, and the tail is barely moving.
-        assertTrue(liftAt(250L) > 0.5f)
-        assertTrue(liftAt(750L) > liftAt(250L))
-        assertTrue(1f - liftAt(750L) < 0.1f)
-    }
-
-    @Test
-    fun aSungWordRisesToItsFloatHeightAndKeepsIt() {
-        val word = TimedLyricWord(1_000L, 400L, "音")
-        assertEquals(0f, lyricWordFloatOffsetEm(word, 900L), 0.0001f)
-        // The lift takes at least a second even when the word itself is shorter, so a quick syllable
-        // still moves rather than snapping.
-        val midway = lyricWordFloatOffsetEm(word, 1_500L)
-        assertTrue(midway < 0f && midway > -SettledLyricWordFloatEm)
-        // fill:"both" holds it there for the rest of the line, which is what puts the sung half
-        // slightly above the half still to come.
-        assertEquals(-SettledLyricWordFloatEm, lyricWordFloatOffsetEm(word, 3_000L), 0.0001f)
     }
 
     @Test
