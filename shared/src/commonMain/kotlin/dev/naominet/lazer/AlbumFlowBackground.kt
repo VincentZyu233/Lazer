@@ -75,9 +75,7 @@ fun LazerAlbumFlowBackground(
         Crossfade(
             targetState = palette,
             animationSpec = if (paletteAnimated) {
-                // AMLL morphs its palette over PALETTE_TRANSITION_MS, easing each channel with
-                // smoothstep rather than crossing the two gradients over each other.
-                tween(durationMillis = 1_000, easing = FluidPaletteEasing)
+                tween(durationMillis = 650, easing = FluidPaletteEasing)
             } else {
                 snap()
             },

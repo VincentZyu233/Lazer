@@ -10,8 +10,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Dp
 import kotlinx.coroutines.Dispatchers
@@ -23,23 +21,20 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-/** What one cover gives the interface: the accent seed screens tint with, and the flow palette. */
-private class ArtworkColors(val seed: Color, val palette: List<Color>)
+/** Keeps the last few seeds so scrolling back over a list does not re-download artwork. */
+private class LazerArtworkSeedCache(private val capacity: Int) {
+    private val entries = LinkedHashMap<String, Color>()
 
-/** Keeps the last few covers so scrolling back over a list does not re-download artwork. */
-private class LazerArtworkCache(private val capacity: Int) {
-    private val entries = LinkedHashMap<String, ArtworkColors>()
+    fun get(key: String): Color? = entries.remove(key)?.also { entries[key] = it }
 
-    fun get(key: String): ArtworkColors? = entries.remove(key)?.also { entries[key] = it }
-
-    fun put(key: String, value: ArtworkColors) {
+    fun put(key: String, value: Color) {
         entries[key] = value
         while (entries.size > capacity) entries.remove(entries.keys.first())
     }
 }
 
-private val ArtworkColorsCache = LazerArtworkCache(capacity = 24)
-private val ArtworkColorsMutex = Mutex()
+private val ArtworkSeedCache = LazerArtworkSeedCache(capacity = 24)
+private val ArtworkSeedMutex = Mutex()
 private val DefaultArtworkSeed = Color(0xFF5F91AC)
 
 @Composable
@@ -138,108 +133,24 @@ private fun LazerArtworkFlowBackground(
     )
 }
 
-/**
- * One cover is downloaded, decoded and measured once, and both extractions come out of that pass.
- */
-private suspend fun artworkColors(host: LazerPlatformHost, coverUrl: String?): ArtworkColors? {
-    if (coverUrl.isNullOrBlank()) return null
-    val artworkUrl = coverUrl.toLazerPaletteArtworkUrl()
-    return withContext(Dispatchers.Default) {
-        ArtworkColorsMutex.withLock {
-            ArtworkColorsCache.get(artworkUrl)?.let { return@withLock it }
+private suspend fun extractLazerFlowPalette(host: LazerPlatformHost, coverUrl: String?): List<Color> =
+    extractLazerArtworkSeed(host, coverUrl)?.let(::flowColorsFromSeed)
+        ?: flowColorsFromSeed(DefaultArtworkSeed)
+
+private suspend fun extractLazerArtworkSeed(host: LazerPlatformHost, coverUrl: String?): Color? =
+    withContext(Dispatchers.Default) {
+        if (coverUrl.isNullOrBlank()) return@withContext null
+        val artworkUrl = coverUrl.toLazerPaletteArtworkUrl()
+        ArtworkSeedCache.get(artworkUrl)?.let { return@withContext it }
+        ArtworkSeedMutex.withLock {
+            ArtworkSeedCache.get(artworkUrl)?.let { return@withLock it }
             runCatching {
                 val bytes = host.downloadFile(artworkUrl) ?: return@runCatching null
                 val artwork = host.decodeImageBytes(bytes) ?: return@runCatching null
-                ArtworkColors(
-                    seed = seedFromArtwork(artwork),
-                    palette = flowPaletteFromDominant(paletteFromArtwork(artwork)),
-                ).also { ArtworkColorsCache.put(artworkUrl, it) }
+                seedFromArtwork(artwork).also { ArtworkSeedCache.put(artworkUrl, it) }
             }.getOrNull()
         }
     }
-}
-
-private suspend fun extractLazerFlowPalette(host: LazerPlatformHost, coverUrl: String?): List<Color> =
-    artworkColors(host, coverUrl)?.palette ?: flowColorsFromSeed(DefaultArtworkSeed)
-
-private suspend fun extractLazerArtworkSeed(host: LazerPlatformHost, coverUrl: String?): Color? =
-    artworkColors(host, coverUrl)?.seed
-
-/**
- * AMLL paints its gradient from the four colours the cover is actually made of. The fifth field this
- * renderer orbits takes the darkest of them, which is where upstream's palette sits in practice.
- */
-private fun flowPaletteFromDominant(dominant: List<Color>): List<Color> {
-    val darkest = dominant.minByOrNull { it.luminance() }
-        ?: return flowColorsFromSeed(DefaultArtworkSeed)
-    return dominant + lerp(darkest, Color.Black, 0.35f)
-}
-
-/**
- * AMLL's `buildColorHistogram` and its dominant-colour pick, without a canvas: the artwork is
- * reduced to AMLL's 64 px longest edge, every pixel of that is counted under its exact RGB key,
- * near-white pixels are dropped the way upstream's octree drops them, and the most counted colours
- * win. Upstream clusters with k-means or an octree once a cover has more distinct colours than its
- * bucket limit, which a 64 px thumbnail rarely reaches; counting the thumbnail directly is the same
- * answer for the artwork sizes this app downloads.
- */
-internal fun lazerDominantPalette(
-    argbPixels: IntArray,
-    width: Int,
-    height: Int,
-    colorCount: Int = 4,
-): List<Color> {
-    if (width <= 0 || height <= 0 || argbPixels.size < width * height) return emptyList()
-    val scale = min(1f, PaletteSampleSize / max(width, height).toFloat())
-    val sampleWidth = max(1, (width * scale).roundToInt())
-    val sampleHeight = max(1, (height * scale).roundToInt())
-    val counts = HashMap<Int, Int>(sampleWidth * sampleHeight)
-    for (y in 0 until sampleHeight) {
-        val sourceY = (y * height / sampleHeight).coerceIn(0, height - 1)
-        for (x in 0 until sampleWidth) {
-            val sourceX = (x * width / sampleWidth).coerceIn(0, width - 1)
-            val argb = argbPixels[sourceY * width + sourceX]
-            val alpha = (argb ushr 24) and 0xFF
-            if (alpha == 0) continue
-            val red = (argb ushr 16) and 0xFF
-            val green = (argb ushr 8) and 0xFF
-            val blue = argb and 0xFF
-            if (red > 250 && green > 250 && blue > 250) continue
-            val key = (red shl 16) or (green shl 8) or blue
-            counts[key] = (counts[key] ?: 0) + 1
-        }
-    }
-    if (counts.isEmpty()) return emptyList()
-    val dominant = counts.entries
-        .sortedWith(compareByDescending<Map.Entry<Int, Int>> { it.value }
-            .thenByDescending { it.key })
-        .take(colorCount)
-        .map { Color(0xFF000000L or it.key.toLong()) }
-    // AMLL pads a short palette by cycling what it found, rather than inventing a neutral.
-    return List(colorCount) { dominant[it % dominant.size] }
-}
-
-private const val PaletteSampleSize = 64
-
-@OptIn(ExperimentalComposeUiApi::class)
-private fun paletteFromArtwork(artwork: ImageBitmap): List<Color> {
-    val pixelMap = artwork.toPixelMap()
-    val pixels = IntArray(pixelMap.width * pixelMap.height)
-    var index = 0
-    for (y in 0 until pixelMap.height) {
-        for (x in 0 until pixelMap.width) {
-            val pixel = pixelMap[x, y]
-            pixels[index] = (pixel.alpha.toArgbChannel() shl 24) or
-                (pixel.red.toArgbChannel() shl 16) or
-                (pixel.green.toArgbChannel() shl 8) or
-                pixel.blue.toArgbChannel()
-            index++
-        }
-    }
-    return lazerDominantPalette(pixels, pixelMap.width, pixelMap.height)
-}
-
-private fun Float.toArgbChannel(): Int = (this * 255f).roundToInt().coerceIn(0, 255)
 
 @OptIn(ExperimentalComposeUiApi::class)
 private fun seedFromArtwork(artwork: ImageBitmap): Color {
