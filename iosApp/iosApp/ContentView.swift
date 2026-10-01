@@ -334,7 +334,10 @@ private final class LazerAudio: NSObject {
     /// Built once around the one player, then reused for every track.
     private func ensureSession() -> MPNowPlayingSession {
         if let session = nowPlayingSession { return session }
-        let session = MPNowPlayingSession(players: [player], durationMode: .default, active: false)
+        let session = MPNowPlayingSession(players: [player])
+        // The session would otherwise publish what it reads off the AVPlayerItem, and our stream
+        // carries no metadata - title, artist and artwork come from the API and have to be written.
+        session.automaticallyPublishesNowPlayingInfo = false
         let center = session.remoteCommandCenter
         center.playCommand.addTarget(self, action: #selector(handlePlay))
         center.pauseCommand.addTarget(self, action: #selector(handlePause))
@@ -354,12 +357,26 @@ private final class LazerAudio: NSObject {
         return session
     }
 
+    /* Whether the system gets to hear about this playback at all. A session holding no players has
+       nothing to publish, which is the honest form of "independent playback" - and being active is
+       something the system grants rather than something the app assigns, so it has to be asked for. */
+    private func applySessionOwnership(_ systemMedia: Bool) {
+        let session = ensureSession()
+        let holds = session.players.contains { $0 === player }
+        if systemMedia {
+            if !holds { session.addPlayer(player) }
+            session.becomeActiveIfPossible()
+        } else if holds {
+            session.removePlayer(player)
+        }
+    }
+
     func attach(commands: IosPlayerCommands) {
         guard self.commands == nil else { return }
         self.commands = commands
         mediaQueue.async { [weak self] in
             guard let self else { return }
-            self.ensureSession().active = self.wantsSystemMedia
+            self.applySessionOwnership(self.wantsSystemMedia)
         }
         // A call, a Siri interruption or a pulled-out earbud is the system telling the player what
         // just happened to its audio. Nobody else in the app hears those, so the queue would keep
@@ -521,12 +538,10 @@ private final class LazerAudio: NSObject {
         exclusiveAudio = exclusive
         applySessionCategory()
         mediaQueue.async { [weak self] in
-            guard let self, let session = self.nowPlayingSession else { return }
-            // The session is the switch. An inactive one tells the system nothing at all, which is
-            // exactly what "independent playback" should mean to the lock screen and to CarPlay.
-            session.active = systemMedia
+            guard let self else { return }
+            self.applySessionOwnership(systemMedia)
             if !systemMedia {
-                session.nowPlayingInfoCenter.nowPlayingInfo = nil
+                self.nowPlayingSession?.nowPlayingInfoCenter.nowPlayingInfo = nil
                 self.nowPlayingKey = nil
                 self.publishedPlaying = nil
             }
