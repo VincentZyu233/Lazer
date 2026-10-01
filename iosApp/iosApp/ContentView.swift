@@ -218,21 +218,27 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 private final class LazerAudio: NSObject {
     var onEnded: (() -> Void)?
 
-    private var player: AVPlayer?
+    // One player for the life of the app. MPNowPlayingSession is built around a fixed list of players,
+    // so the item is what gets swapped between tracks; replacing the player would mean throwing away
+    // the session, and with it the lock screen's and Dynamic Island's hold on the song.
+    private let player = AVPlayer()
     private var observedItem: AVPlayerItem?
 
-    var positionMillis: Int64 { Int64((player?.currentTime().seconds ?? 0) * 1000) }
+    var positionMillis: Int64 {
+        let seconds = player.currentTime().seconds
+        return seconds.isFinite ? Int64(seconds * 1000) : 0
+    }
 
     var durationMillis: Int64 {
-        guard let seconds = player?.currentItem?.duration.seconds, seconds.isFinite else { return 0 }
+        guard let seconds = player.currentItem?.duration.seconds, seconds.isFinite else { return 0 }
         return Int64(max(0, seconds) * 1000)
     }
 
-    var isPlaying: Bool { player?.timeControlStatus == .playing }
+    var isPlaying: Bool { player.timeControlStatus == .playing }
 
     /// How far the audio has arrived. The shared seek bar paints that behind the playhead.
     var bufferedEndMillis: Int64 {
-        guard let item = player?.currentItem, let value = item.loadedTimeRanges.first as? NSValue else {
+        guard let item = player.currentItem, let value = item.loadedTimeRanges.first as? NSValue else {
             return 0
         }
         let range = value.timeRangeValue
@@ -245,40 +251,53 @@ private final class LazerAudio: NSObject {
         // that moment whether this is background audio at all, which is what puts the track on the
         // lock screen and in the Dynamic Island and keeps it audible once the app is suspended.
         applySessionCategory()
+        if let previous = observedItem {
+            NotificationCenter.default.removeObserver(
+                self, name: .AVPlayerItemDidPlayToEndTime, object: previous
+            )
+        }
         let item = AVPlayerItem(url: address)
-        let next = AVPlayer(playerItem: item)
         NotificationCenter.default.addObserver(
             self, selector: #selector(itemDidFinish), name: .AVPlayerItemDidPlayToEndTime, object: item
         )
         observedItem = item
-        player = next
-        if positionMillis > 0 {
-            next.seek(to: CMTime(seconds: positionMillis / 1000, preferredTimescale: 600))
+        // A new song has new metadata, so the next publish writes the whole record again. These
+        // belong to the queue that publishes them, not to the thread that asked for the track.
+        mediaQueue.async { [weak self] in
+            guard let self else { return }
+            self.nowPlayingKey = nil
+            self.publishedPlaying = nil
         }
-        if startPlaying { next.play() }
+        player.replaceCurrentItem(with: item)
+        if positionMillis > 0 {
+            player.seek(to: CMTime(seconds: positionMillis / 1000, preferredTimescale: 600))
+        }
+        if startPlaying { player.play() }
     }
 
-    func play() { player?.play() }
+    func play() { player.play() }
 
-    func pause() { player?.pause() }
+    func pause() { player.pause() }
 
     func seek(toMillis millis: Int64) {
-        player?.seek(to: CMTime(seconds: Double(millis) / 1000, preferredTimescale: 600))
+        player.seek(to: CMTime(seconds: Double(millis) / 1000, preferredTimescale: 600))
     }
 
     func release() {
-        player?.pause()
+        player.pause()
         mediaQueue.async { [weak self] in
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            self?.nowPlayingKey = nil
-            self?.artworkUrl = nil
-            self?.artwork = nil
+            guard let self else { return }
+            self.nowPlayingSession?.nowPlayingInfoCenter.nowPlayingInfo = nil
+            self.nowPlayingKey = nil
+            self.artworkUrl = nil
+            self.artwork = nil
+            self.publishedPlaying = nil
         }
         if let item = observedItem {
             NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
         }
         observedItem = nil
-        player = nil
+        player.replaceCurrentItem(with: nil)
     }
 
     @objc private func itemDidFinish() { onEnded?() }
@@ -294,6 +313,16 @@ private final class LazerAudio: NSObject {
     private var nowPlayingKey: String?
     private var artworkUrl: String?
     private var artwork: MPMediaItemArtwork?
+    /* Now Playing, as a session rather than a dictionary. MPNowPlayingSession owns the info center and
+       the command center for this app's own audio, and it keeps the playhead moving on its own between
+       updates, which is what the lock screen, Control Centre, CarPlay and the Dynamic Island all read.
+       Commands go to the session's centre and never to MPRemoteCommandCenter.shared(), because two
+       centres answering for one player is how controls end up dead. */
+    private var nowPlayingSession: MPNowPlayingSession?
+    private var publishedPlaying: Bool?
+    private var publishedElapsed: Double = 0
+    private var publishedAt: TimeInterval = 0
+    private var publishedRate: Double = 0
 
     /// Sharing audio means ducking whoever else is playing; taking it over means silencing them.
     private func applySessionCategory() {
@@ -302,25 +331,35 @@ private final class LazerAudio: NSObject {
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
+    /// Built once around the one player, then reused for every track.
+    private func ensureSession() -> MPNowPlayingSession {
+        if let session = nowPlayingSession { return session }
+        let session = MPNowPlayingSession(players: [player], durationMode: .default, active: false)
+        let center = session.remoteCommandCenter
+        center.playCommand.addTarget(self, action: #selector(handlePlay))
+        center.pauseCommand.addTarget(self, action: #selector(handlePause))
+        center.togglePlayPauseCommand.addTarget(self, action: #selector(handleToggle))
+        center.nextTrackCommand.addTarget(self, action: #selector(handleNext))
+        center.previousTrackCommand.addTarget(self, action: #selector(handlePrevious))
+        center.changePlaybackPositionCommand.addTarget(self, action: #selector(handleSeek(_:)))
+        // Control Centre and the lock screen offer ±15/±30 skips rather than a scrub bar, and a
+        // Bluetooth or headset button reaches for the toggle. Without all three the transport looks
+        // present and answers to nothing.
+        center.skipForwardCommand.preferredIntervals = [30]
+        center.skipBackwardCommand.preferredIntervals = [30]
+        center.skipForwardCommand.addTarget(self, action: #selector(handleSkipForward(_:)))
+        center.skipBackwardCommand.addTarget(self, action: #selector(handleSkipBackward(_:)))
+        center.changePlaybackRateCommand.isEnabled = false
+        nowPlayingSession = session
+        return session
+    }
+
     func attach(commands: IosPlayerCommands) {
         guard self.commands == nil else { return }
         self.commands = commands
         mediaQueue.async { [weak self] in
             guard let self else { return }
-            let center = MPRemoteCommandCenter.shared()
-            center.playCommand.addTarget(self, action: #selector(self.handlePlay))
-            center.pauseCommand.addTarget(self, action: #selector(self.handlePause))
-            center.togglePlayPauseCommand.addTarget(self, action: #selector(self.handleToggle))
-            center.nextTrackCommand.addTarget(self, action: #selector(self.handleNext))
-            center.previousTrackCommand.addTarget(self, action: #selector(self.handlePrevious))
-            center.changePlaybackPositionCommand.addTarget(self, action: #selector(self.handleSeek(_:)))
-            // Control Centre and the lock screen offer ±15/±30 skips rather than a scrub bar, and a
-            // Bluetooth or headset button reaches for the toggle. Without all three the transport
-            // looks present and answers to nothing.
-            center.skipForwardCommand.preferredIntervals = [30]
-            center.skipBackwardCommand.preferredIntervals = [30]
-            center.skipForwardCommand.addTarget(self, action: #selector(self.handleSkipForward(_:)))
-            center.skipBackwardCommand.addTarget(self, action: #selector(self.handleSkipBackward(_:)))
+            self.ensureSession().active = self.wantsSystemMedia
         }
         // A call, a Siri interruption or a pulled-out earbud is the system telling the player what
         // just happened to its audio. Nobody else in the app hears those, so the queue would keep
@@ -336,7 +375,7 @@ private final class LazerAudio: NSObject {
     }
 
     @objc private func handleToggle() -> MPRemoteCommandHandlerStatus {
-        if player?.timeControlStatus == .playing {
+        if player.timeControlStatus == .playing {
             commands?.pause()
         } else {
             commands?.play()
@@ -359,7 +398,7 @@ private final class LazerAudio: NSObject {
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         switch type {
         case .began:
-            wasPlayingBeforeInterruption = player?.timeControlStatus == .playing
+            wasPlayingBeforeInterruption = player.timeControlStatus == .playing
             commands?.pause()
         case .ended:
             guard wasPlayingBeforeInterruption else { return }
@@ -412,20 +451,33 @@ private final class LazerAudio: NSObject {
         positionMillis: Int64, durationMillis: Int64, isPlaying: Bool
     ) {
         guard wantsSystemMedia else { return }
-        // The metadata belongs to the track and the clock belongs to the tick. Publishing the whole
-        // dictionary four times a second made the system rebuild the artwork on every tick and the
-        // lock-screen scrubber stutter, so only elapsed time and rate move in between tracks.
+        // The metadata belongs to the track and the clock belongs to the playhead, and the session
+        // keeps that playhead running on its own from one update. Rewriting the record every tick is
+        // what makes the scrubber stutter, so this only speaks up when the song changes, when the
+        // transport flips, or when reality has drifted more than half a second from what the system
+        // is showing.
         let key = "\(title)\u{1}\(artist)\u{1}\(album)\u{1}\(durationMillis)"
+        let seconds = Double(positionMillis) / 1000
+        let now = ProcessInfo.processInfo.systemUptime
         mediaQueue.async {
-            let center = MPNowPlayingInfoCenter.default()
-            if center.nowPlayingInfo == nil || self.nowPlayingKey != key {
+            guard let center = self.nowPlayingSession?.nowPlayingInfoCenter else { return }
+            let metadataChanged = center.nowPlayingInfo == nil || self.nowPlayingKey != key
+            let carried = self.publishedElapsed
+                + (self.publishedRate > 0 ? (now - self.publishedAt) * self.publishedRate : 0)
+            let transportChanged = self.publishedPlaying != isPlaying
+            if !metadataChanged && !transportChanged && abs(seconds - carried) < 0.5 { return }
+            self.publishedPlaying = isPlaying
+            self.publishedElapsed = seconds
+            self.publishedAt = now
+            self.publishedRate = isPlaying ? 1.0 : 0.0
+            if metadataChanged {
                 self.nowPlayingKey = key
                 var info: [String: Any] = [
                     MPMediaItemPropertyTitle: title,
                     MPMediaItemPropertyArtist: artist,
                     MPMediaItemPropertyAlbumTitle: album,
                     MPMediaItemPropertyPlaybackDuration: Double(durationMillis) / 1000,
-                    MPNowPlayingInfoPropertyElapsedPlaybackTime: Double(positionMillis) / 1000,
+                    MPNowPlayingInfoPropertyElapsedPlaybackTime: seconds,
                     MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0,
                     MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
                 ]
@@ -436,8 +488,8 @@ private final class LazerAudio: NSObject {
                 self.loadArtwork(url: coverUrl, center: center)
             } else {
                 var info = center.nowPlayingInfo ?? [:]
-                info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(positionMillis) / 1000
-                info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+                info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = seconds
+                info[MPNowPlayingInfoPropertyPlaybackRate] = self.publishedRate
                 center.nowPlayingInfo = info
             }
             center.playbackState = isPlaying ? .playing : .paused
@@ -469,17 +521,14 @@ private final class LazerAudio: NSObject {
         exclusiveAudio = exclusive
         applySessionCategory()
         mediaQueue.async { [weak self] in
-            let center = MPRemoteCommandCenter.shared()
-            [center.playCommand, center.pauseCommand, center.togglePlayPauseCommand,
-             center.nextTrackCommand, center.previousTrackCommand,
-             center.changePlaybackPositionCommand,
-             center.skipForwardCommand, center.skipBackwardCommand].forEach {
-                $0.isEnabled = systemMedia
-            }
+            guard let self, let session = self.nowPlayingSession else { return }
+            // The session is the switch. An inactive one tells the system nothing at all, which is
+            // exactly what "independent playback" should mean to the lock screen and to CarPlay.
+            session.active = systemMedia
             if !systemMedia {
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-                // Switching back has to republish the track itself, not just the clock.
-                self?.nowPlayingKey = nil
+                session.nowPlayingInfoCenter.nowPlayingInfo = nil
+                self.nowPlayingKey = nil
+                self.publishedPlaying = nil
             }
         }
     }
