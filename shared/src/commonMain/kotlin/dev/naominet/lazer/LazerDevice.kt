@@ -122,6 +122,13 @@ interface LazerPlatformHost {
     /** Hands the loaded lyric lines to whatever lyric surface the platform owns. */
     fun publishLyrics(trackId: Long, lines: List<TimedLyricLine>)
 
+    /**
+     * What the exclusive-audio switch starts at for someone who never opens the settings. iOS ducks
+     * other audio rather than being handed it back, so a player that intends to be the music takes it
+     * by default; platforms that arbitrate focus through the system keep the sharing default.
+     */
+    val defaultsToExclusiveAudio: Boolean get() = false
+
     fun log(message: String, error: Throwable)
 }
 
@@ -135,5 +142,8 @@ class LazerDevice(
     /** A platform that plays through its own client builds the Gateway here so both share it. */
     val gateway: NeteaseMusicGateway? = null,
 ) {
-    val settings: LazerSettingsStore = LazerSettingsStore(preferences)
+    val settings: LazerSettingsStore = LazerSettingsStore(
+        preferences,
+        defaultsExclusiveAudio = host.defaultsToExclusiveAudio,
+    )
 }

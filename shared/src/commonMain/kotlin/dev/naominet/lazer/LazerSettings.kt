@@ -43,7 +43,11 @@ fun normalizeBackgroundImageBlurIntensity(value: Float): Float = value.coerceIn(
  * below are the contract: one instance reads the same names on every host, so a preference set on
  * one platform means exactly what it means on another.
  */
-class LazerSettingsStore(private val preferences: LazerPreferences) {
+class LazerSettingsStore(
+    private val preferences: LazerPreferences,
+    /** What a setting the listener never touched reads back as, where platforms genuinely differ. */
+    private val defaultsExclusiveAudio: Boolean = false,
+) {
 
     var isDark: Boolean
         get() = preferences.getBoolean(KEY_DARK_THEME, false)
@@ -154,7 +158,7 @@ class LazerSettingsStore(private val preferences: LazerPreferences) {
         set(value) = preferences.putString(KEY_PLAY_MODE, value.name)
 
     var exclusiveAudio: Boolean
-        get() = preferences.getBoolean(KEY_EXCLUSIVE_AUDIO, false)
+        get() = preferences.getBoolean(KEY_EXCLUSIVE_AUDIO, defaultsExclusiveAudio)
         set(value) = preferences.putBoolean(KEY_EXCLUSIVE_AUDIO, value)
 
     var playbackInterface: LazerPlaybackInterface

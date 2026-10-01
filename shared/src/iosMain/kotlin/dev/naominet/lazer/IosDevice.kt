@@ -111,6 +111,10 @@ internal class IosPlatformHost(private val bridge: IosShellBridge) : LazerPlatfo
     /** iOS has no system lyric surface to feed, so the lines stay inside the app. */
     override fun publishLyrics(trackId: Long, lines: List<TimedLyricLine>) = Unit
 
+    /* iOS ducks other audio rather than being handed it, so a listener who never opened the settings
+       is better served owning the session than living in a half-audible mix. */
+    override val defaultsToExclusiveAudio: Boolean get() = true
+
     override fun log(message: String, error: Throwable) {
         println("LAZER_IOS $message: $error")
     }
