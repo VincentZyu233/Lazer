@@ -157,6 +157,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
@@ -165,6 +166,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.hapticfeedback.HapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -865,7 +867,12 @@ private fun LazerAppContent(
         } else {
             0.dp
         }
-        Box(Modifier.fillMaxSize().background(colors.background)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .releaseKeyboardOnAnyTap()
+                .background(colors.background),
+        ) {
             // Keep the wallpaper and its scrim in one fixed, capturable canvas. Animated pages
             // reuse this exact canvas, so their interiors and any exposed transition gaps match.
             Box(
@@ -4790,6 +4797,28 @@ private fun QrLogin(controller: LazerGatewayController) {
 }
 
 @OptIn(ExperimentalStdlibApi::class)
+/**
+ * Gives the keyboard back when a tap lands anywhere but a text field. The focus is dropped on the way
+ * in, before the screens are told about the press, so a field the tap actually hits asks for focus
+ * again in the same gesture and keeps the keyboard. That is what saves this from having to know where
+ * the fields are, or from a second tap being needed to put the keyboard down.
+ */
+@Composable
+internal fun Modifier.releaseKeyboardOnAnyTap(): Modifier {
+    val focusManager = LocalFocusManager.current
+    return pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            // Unconditional: with nothing focused this gives up a focus stack that is already empty.
+            focusManager.clearFocus()
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.none { it.pressed }) break
+            }
+        }
+    }
+}
+
 private fun decodeQrImage(host: LazerPlatformHost, data: String?): ImageBitmap? = runCatching {
     val encoded = data?.substringAfter("base64,", data)?.filterNot(Char::isWhitespace)
         ?: return null
