@@ -61,10 +61,11 @@ const val LyricActiveLineAlpha = 0.85f
 const val LyricInactiveLineAlpha = 0.4f
 
 /**
- * AMLL's translation and romanisation sub-line: the same ink at 0.3, not a second colour. It rides
- * the row's own wrapper opacity, so a sub-line of the singing line is brighter than one elsewhere.
+ * AMLL's translation and romanisation sub-line: the same ink, not a second colour, riding the row's
+ * own wrapper opacity. Upstream holds it at 0.3, which on this sheet leaves a translation too faint
+ * to read at a glance, so it sits higher - still clearly the second voice of the pair.
  */
-const val LyricSubLineOpacity = 0.3f
+const val LyricSubLineOpacity = 0.6f
 
 /**
  * AMLL's line-focus spring: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so
