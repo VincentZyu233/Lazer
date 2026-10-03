@@ -141,6 +141,7 @@ import io.ktor.util.date.getTimeMillis
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
@@ -209,6 +210,7 @@ import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.SongComment
 import dev.naominet.lazer.gateway.model.parseListenTogetherInvite
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -521,6 +523,23 @@ private fun LazerVisualBackground(
         )
     }
 }
+
+/**
+ * Draws nothing and answers no taps. A page that is under another one must not respond to a finger
+ * aimed at the page above it, and it has to stay composed so that returning to it is one frame
+ * rather than a page rebuilding its scroll position and replaying its entrance.
+ */
+private fun Modifier.hiddenBehindPages(): Modifier = this
+    .drawWithContent { }
+    .pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).consume()
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.none { it.pressed }) break
+            }
+        }
+    }
 
 @Composable
 private fun isLandscapeLayout(): Boolean =
@@ -942,6 +961,23 @@ private fun LazerAppContent(
                 Box(Modifier.weight(1f)) {
                     // Keep the root page mounted. Detail pages animate above it, so returning from
                     // a playlist cannot replay the root page or bottom-edge entrance animation.
+                    var rootPagesCovered by remember { mutableStateOf(false) }
+                    LaunchedEffect(mainPage.kind) {
+                        if (mainPage.kind == LazerMainPageKind.ROOT) {
+                            rootPagesCovered = false
+                        } else {
+                            // Wait for the page above to finish arriving. Hiding on the first frame
+                            // would bare the wallpaper behind a page that is still fading in.
+                            delay(PAGE_TRANSITION_MILLIS.toLong())
+                            rootPagesCovered = true
+                        }
+                    }
+                    // A detail page is translucent by design, so the pages under it stop drawing
+                    // rather than showing through it. They come back for a back gesture, where the
+                    // page above is on its way out and what lies beneath is meant to be revealed.
+                    val hideRootPages = mainPage.kind != LazerMainPageKind.ROOT &&
+                        rootPagesCovered &&
+                        renderedBackProgress == 0f
                     LazerRootContent(
                         controller = controller,
                         currentTrackId = playback.track?.id,
@@ -949,7 +985,11 @@ private fun LazerAppContent(
                         onListenTogether = controller::openListenTogether,
                         onScan = launchScanner,
                         showHeaderControls = true,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(
+                                if (hideRootPages) Modifier.hiddenBehindPages() else Modifier,
+                            ),
                     )
                     AnimatedContent(
                         targetState = mainPage,
@@ -992,51 +1032,36 @@ private fun LazerAppContent(
                                     progress = renderedBackProgress,
                                     swipeEdge = backSwipeEdge,
                                 ),
-                            // The page carries its own visual plane, which hides the page below it
-                            // without adding a second translucent scrim over the app's one.
+                            // The tab pages below stop drawing once a detail page has arrived, so a
+                            // translucent page never shows its neighbour through itself.
                             color = if (hasVisualBackground) Color.Transparent else colors.background,
                             contentColor = colors.onBackground,
                             shape = RoundedCornerShape(screenCornerRadius),
                         ) {
-                            Box(Modifier.fillMaxSize()) {
-                                if (hasVisualBackground) {
-                                    LazerVisualBackground(
-                                        controller = controller,
-                                        track = playback.track,
-                                        colors = colors,
-                                        uiAlpha = uiAlpha,
-                                        wallpaper = wallpaper,
-                                        usesNowPlayingPalette = usesNowPlayingPalette,
-                                        animated = controller.backgroundMode ==
-                                            LazerBackgroundMode.NOW_PLAYING_DYNAMIC && !playerVisible,
-                                        modifier = Modifier.fillMaxSize(),
+                            when (page.kind) {
+                                LazerMainPageKind.SETTINGS -> SettingsPage(controller)
+                                LazerMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
+                                LazerMainPageKind.ARTIST -> page.artist?.let { artist ->
+                                    ArtistPage(
+                                        artist = artist,
+                                        tracks = page.tracks,
+                                        isLoading = page.isLoading,
+                                        currentId = playback.track?.id,
+                                        onBack = controller::closeArtist,
+                                        onPlay = playFromQueue,
                                     )
                                 }
-                                when (page.kind) {
-                                    LazerMainPageKind.SETTINGS -> SettingsPage(controller)
-                                    LazerMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
-                                    LazerMainPageKind.ARTIST -> page.artist?.let { artist ->
-                                        ArtistPage(
-                                            artist = artist,
-                                            tracks = page.tracks,
-                                            isLoading = page.isLoading,
-                                            currentId = playback.track?.id,
-                                            onBack = controller::closeArtist,
-                                            onPlay = playFromQueue,
-                                        )
-                                    }
-                                    LazerMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
-                                        PlaylistDetail(
-                                            playlist = playlist,
-                                            tracks = page.tracks,
-                                            isLoading = page.isLoading,
-                                            currentId = playback.track?.id,
-                                            onBack = controller::closePlaylist,
-                                            onPlay = playFromQueue,
-                                        )
-                                    }
-                                    LazerMainPageKind.ROOT -> Unit
+                                LazerMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
+                                    PlaylistDetail(
+                                        playlist = playlist,
+                                        tracks = page.tracks,
+                                        isLoading = page.isLoading,
+                                        currentId = playback.track?.id,
+                                        onBack = controller::closePlaylist,
+                                        onPlay = playFromQueue,
+                                    )
                                 }
+                                LazerMainPageKind.ROOT -> Unit
                             }
                         }
                     }
