@@ -105,6 +105,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.NavigationBar
@@ -202,11 +203,6 @@ import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.LocalPlatformContext
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.graphics.layer.GraphicsLayer
-import androidx.compose.ui.graphics.layer.drawLayer
-import androidx.compose.ui.graphics.rememberGraphicsLayer
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.material.icons.outlined.Headphones
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
@@ -466,25 +462,65 @@ private fun Modifier.predictiveBackTransform(
     }
 }
 
-/** Records the fixed wallpaper canvas into [layer] so a moving page can repaint the same pixels. */
-private fun Modifier.capturePageBackground(layer: GraphicsLayer): Modifier =
-    drawWithContent {
-        layer.record(
-            this,
-            layoutDirection,
-            IntSize(size.width.roundToInt(), size.height.roundToInt()),
-        ) {
-            this@drawWithContent.drawContent()
+/**
+ * The visual plane a page paints for itself: the app base, the wallpaper or the album flow, and the
+ * scrim that lifts text off them.
+ *
+ * Pages used to borrow a snapshot of the fixed canvas behind the whole stack, which meant a page was
+ * only ever as opaque as that snapshot - and when the snapshot came up empty the page underneath it
+ * showed straight through. Every page carries its own now, so no sibling can be seen through another.
+ */
+@Composable
+private fun LazerVisualBackground(
+    controller: LazerGatewayController,
+    track: LazerTrack?,
+    colors: ColorScheme,
+    uiAlpha: Float,
+    wallpaper: ImageBitmap?,
+    usesNowPlayingPalette: Boolean,
+    animated: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier) {
+        // The opaque app base belongs inside the plane, so a transparent PNG wallpaper cannot reveal
+        // another page underneath wherever it lets light through.
+        Box(Modifier.fillMaxSize().background(colors.background))
+        wallpaper?.let { image ->
+            val imageModifier = if (controller.backgroundImageBlurEnabled) {
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = 1.08f
+                        scaleY = 1.08f
+                    }
+                    .blur(40.dp * controller.backgroundImageBlurIntensity)
+            } else {
+                Modifier.fillMaxSize()
+            }
+            Image(
+                bitmap = image,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = imageModifier,
+            )
         }
-        drawLayer(layer)
+        if (usesNowPlayingPalette) {
+            LazerAlbumFlowBackground(
+                track = track,
+                modifier = Modifier.fillMaxSize(),
+                cornerRadius = 0.dp,
+                veil = Color.Transparent,
+                animated = animated,
+                solid = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_STATIC,
+            )
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(colors.background.copy(alpha = uiAlpha)),
+        )
     }
-
-/** Paints the fixed wallpaper canvas inside a moving page, keeping transition seams hidden. */
-private fun Modifier.capturedPageBackground(layer: GraphicsLayer): Modifier =
-    drawWithContent {
-        drawLayer(layer)
-        drawContent()
-    }
+}
 
 @Composable
 private fun isLandscapeLayout(): Boolean =
@@ -860,7 +896,6 @@ private fun LazerAppContent(
         // The slider controls the opacity of app surfaces above visual backgrounds. The image or
         // artwork palette itself stays opaque, so navigation transitions never expose another page.
         val uiAlpha = resolveLazerUiAlpha(hasVisualBackground, controller.backgroundAlpha)
-        val pageBackgroundBackdrop = rememberGraphicsLayer()
         val landscape = isLandscapeLayout()
         val floatingControlsInset = if (landscape) {
             if (playback.track != null) 60.dp + navigationBarBottomInset() else 0.dp
@@ -873,58 +908,19 @@ private fun LazerAppContent(
                 .releaseKeyboardOnAnyTap()
                 .background(colors.background),
         ) {
-            // Keep the wallpaper and its scrim in one fixed, capturable canvas. Animated pages
-            // reuse this exact canvas, so their interiors and any exposed transition gaps match.
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .then(
-                        if (hasVisualBackground) {
-                            Modifier.capturePageBackground(pageBackgroundBackdrop)
-                        } else {
-                            Modifier
-                        },
-                    ),
-            ) {
-                // Include the opaque app base in the recorded canvas so transparent PNG
-                // wallpapers cannot reveal another page underneath during overlap.
-                Box(Modifier.fillMaxSize().background(colors.background))
-                wallpaper?.let { image ->
-                    val imageModifier = if (controller.backgroundImageBlurEnabled) {
-                        Modifier
-                            .fillMaxSize()
-                            .graphicsLayer {
-                                scaleX = 1.08f
-                                scaleY = 1.08f
-                            }
-                            .blur(40.dp * controller.backgroundImageBlurIntensity)
-                    } else {
-                        Modifier.fillMaxSize()
-                    }
-                    Image(
-                        bitmap = image,
-                        contentDescription = null,
-                        contentScale = ContentScale.Crop,
-                        modifier = imageModifier,
-                    )
-                }
-                if (usesNowPlayingPalette) {
-                    LazerAlbumFlowBackground(
-                        track = playback.track,
-                        modifier = Modifier.fillMaxSize(),
-                        cornerRadius = 0.dp,
-                        veil = Color.Transparent,
-                        animated = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_DYNAMIC &&
-                            !playerVisible,
-                        solid = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_STATIC,
-                    )
-                }
-                Box(
-                    Modifier
-                        .fillMaxSize()
-                        .background(colors.background.copy(alpha = uiAlpha)),
-                )
-            }
+            // The tab pages sit directly on this plane; every page stacked above them carries its
+            // own copy, so a page is never translucent over its neighbour.
+            LazerVisualBackground(
+                controller = controller,
+                track = playback.track,
+                colors = colors,
+                uiAlpha = uiAlpha,
+                wallpaper = wallpaper,
+                usesNowPlayingPalette = usesNowPlayingPalette,
+                animated = controller.backgroundMode == LazerBackgroundMode.NOW_PLAYING_DYNAMIC &&
+                    !playerVisible,
+                modifier = Modifier.fillMaxSize(),
+            )
             // Android 16 forces edge-to-edge. Keep the visual canvas under the status bar, while
             // placing every interactive root-page element below its dynamic inset.
             CompositionLocalProvider(
@@ -995,44 +991,52 @@ private fun LazerAppContent(
                                     },
                                     progress = renderedBackProgress,
                                     swipeEdge = backSwipeEdge,
-                                )
-                                .then(
-                                    if (hasVisualBackground) {
-                                        Modifier.capturedPageBackground(pageBackgroundBackdrop)
-                                    } else {
-                                        Modifier
-                                    },
                                 ),
-                            // With wallpaper, the captured canvas is an opaque visual page plane:
-                            // it hides sibling content without adding a second translucent scrim.
+                            // The page carries its own visual plane, which hides the page below it
+                            // without adding a second translucent scrim over the app's one.
                             color = if (hasVisualBackground) Color.Transparent else colors.background,
                             contentColor = colors.onBackground,
                             shape = RoundedCornerShape(screenCornerRadius),
                         ) {
-                            when (page.kind) {
-                                LazerMainPageKind.SETTINGS -> SettingsPage(controller)
-                                LazerMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
-                                LazerMainPageKind.ARTIST -> page.artist?.let { artist ->
-                                    ArtistPage(
-                                        artist = artist,
-                                        tracks = page.tracks,
-                                        isLoading = page.isLoading,
-                                        currentId = playback.track?.id,
-                                        onBack = controller::closeArtist,
-                                        onPlay = playFromQueue,
+                            Box(Modifier.fillMaxSize()) {
+                                if (hasVisualBackground) {
+                                    LazerVisualBackground(
+                                        controller = controller,
+                                        track = playback.track,
+                                        colors = colors,
+                                        uiAlpha = uiAlpha,
+                                        wallpaper = wallpaper,
+                                        usesNowPlayingPalette = usesNowPlayingPalette,
+                                        animated = controller.backgroundMode ==
+                                            LazerBackgroundMode.NOW_PLAYING_DYNAMIC && !playerVisible,
+                                        modifier = Modifier.fillMaxSize(),
                                     )
                                 }
-                                LazerMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
-                                    PlaylistDetail(
-                                        playlist = playlist,
-                                        tracks = page.tracks,
-                                        isLoading = page.isLoading,
-                                        currentId = playback.track?.id,
-                                        onBack = controller::closePlaylist,
-                                        onPlay = playFromQueue,
-                                    )
+                                when (page.kind) {
+                                    LazerMainPageKind.SETTINGS -> SettingsPage(controller)
+                                    LazerMainPageKind.ABOUT -> AboutPage(controller::closeAbout)
+                                    LazerMainPageKind.ARTIST -> page.artist?.let { artist ->
+                                        ArtistPage(
+                                            artist = artist,
+                                            tracks = page.tracks,
+                                            isLoading = page.isLoading,
+                                            currentId = playback.track?.id,
+                                            onBack = controller::closeArtist,
+                                            onPlay = playFromQueue,
+                                        )
+                                    }
+                                    LazerMainPageKind.PLAYLIST -> page.playlist?.let { playlist ->
+                                        PlaylistDetail(
+                                            playlist = playlist,
+                                            tracks = page.tracks,
+                                            isLoading = page.isLoading,
+                                            currentId = playback.track?.id,
+                                            onBack = controller::closePlaylist,
+                                            onPlay = playFromQueue,
+                                        )
+                                    }
+                                    LazerMainPageKind.ROOT -> Unit
                                 }
-                                LazerMainPageKind.ROOT -> Unit
                             }
                         }
                     }
