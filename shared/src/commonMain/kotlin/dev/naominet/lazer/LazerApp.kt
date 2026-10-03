@@ -210,7 +210,6 @@ import dev.naominet.lazer.gateway.SONG_COMMENT_CONTENT_LIMIT
 import dev.naominet.lazer.gateway.model.Artist
 import dev.naominet.lazer.gateway.model.SongComment
 import dev.naominet.lazer.gateway.model.parseListenTogetherInvite
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -229,6 +228,12 @@ import kotlin.math.sin
 
 private const val PAGE_TRANSITION_MILLIS = LazerTokens.Motion.pageMillis
 private val LazerMotionEasing = LazerTokens.Motion.pageEasing
+
+// A page that is being covered gives way just ahead of the page arriving above it: three quarters
+// gone when the newcomer is two thirds in, and gone for good once the newcomer reaches 90%.
+private const val COVER_HIDE_LEAD = 0.1f
+private const val COVER_HIDE_LEAD_FROM = 0.65f
+private const val COVER_HIDE_GONE_AT = 0.9f
 
 // Extra bottom content padding for scrollable pages so their last rows stay reachable behind the
 // floating landscape mini player.
@@ -524,16 +529,36 @@ private fun LazerVisualBackground(
     }
 }
 
+/** How far a covered page has given way, given how far the page above it has arrived. */
+private fun coveredPageHideProgress(cover: Float): Float {
+    val arrived = cover.coerceIn(0f, 1f)
+    return when {
+        arrived >= COVER_HIDE_GONE_AT -> 1f
+        arrived >= COVER_HIDE_LEAD_FROM -> arrived + COVER_HIDE_LEAD
+        else -> arrived * ((COVER_HIDE_LEAD_FROM + COVER_HIDE_LEAD) / COVER_HIDE_LEAD_FROM)
+    }
+}
+
 /**
- * Draws nothing and answers no taps. A page that is under another one must not respond to a finger
- * aimed at the page above it, and it has to stay composed so that returning to it is one frame
- * rather than a page rebuilding its scroll position and replaying its entrance.
+ * Keeps a page another one has arrived above out of the way: it fades as the newcomer covers it,
+ * stops drawing altogether once there is nothing of it left to see, and answers no taps for as long
+ * as either holds. A page under another one must not respond to a finger aimed at the page above
+ * it, and it has to stay composed so that returning to it is one frame rather than a page
+ * rebuilding its scroll position and replaying its entrance.
+ *
+ * [hideProgress] is read while drawing rather than while composing, so a transition fades the page
+ * out without recomposing it every frame.
  */
-private fun Modifier.hiddenBehindPages(): Modifier = this
-    .drawWithContent { }
+private fun Modifier.behindPages(hideProgress: () -> Float): Modifier = this
+    .graphicsLayer { alpha = 1f - hideProgress().coerceIn(0f, 1f) }
+    .drawWithContent {
+        if (hideProgress() < 1f) drawContent()
+    }
     .pointerInput(Unit) {
         awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial).consume()
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            if (hideProgress() <= 0f) return@awaitEachGesture
+            down.consume()
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 if (event.changes.none { it.pressed }) break
@@ -798,7 +823,9 @@ private fun LazerAppContent(
         enabled = !controller.isLoginVisible && activeBackLayer != null,
         onProgress = { progress, edge ->
             transformedBackLayer = activeBackLayer
-            isPredictiveBackRunning = true
+            // Both platforms end a gesture by reporting no progress, whether it closed the layer or
+            // slid back into place, so that zero is the gesture letting go rather than a first frame.
+            isPredictiveBackRunning = progress > 0f
             requestedBackProgress = progress
             backSwipeEdge = edge
         },
@@ -959,25 +986,25 @@ private fun LazerAppContent(
                         .height(if (landscape) 0.dp else statusBarTopInset()),
                 )
                 Box(Modifier.weight(1f)) {
-                    // Keep the root page mounted. Detail pages animate above it, so returning from
-                    // a playlist cannot replay the root page or bottom-edge entrance animation.
-                    var rootPagesCovered by remember { mutableStateOf(false) }
-                    LaunchedEffect(mainPage.kind) {
-                        if (mainPage.kind == LazerMainPageKind.ROOT) {
-                            rootPagesCovered = false
+                    // How far the page above has arrived, which is also how far a back gesture has
+                    // lifted it away again. It runs on the transition's own clock, so the pages
+                    // below give way with the page arriving over them and come back with the one
+                    // leaving - and a finger dragging that page aside pulls them back directly.
+                    val rootCover = animateFloatAsState(
+                        targetValue = when {
+                            mainPage.kind == LazerMainPageKind.ROOT -> 0f
+                            isPredictiveBackRunning -> (1f - requestedBackProgress).coerceIn(0f, 1f)
+                            else -> 1f
+                        },
+                        animationSpec = if (isPredictiveBackRunning) {
+                            snap()
                         } else {
-                            // Wait for the page above to finish arriving. Hiding on the first frame
-                            // would bare the wallpaper behind a page that is still fading in.
-                            delay(PAGE_TRANSITION_MILLIS.toLong())
-                            rootPagesCovered = true
-                        }
-                    }
-                    // A detail page is translucent by design, so the pages under it stop drawing
-                    // rather than showing through it. They come back for a back gesture, where the
-                    // page above is on its way out and what lies beneath is meant to be revealed.
-                    val hideRootPages = mainPage.kind != LazerMainPageKind.ROOT &&
-                        rootPagesCovered &&
-                        renderedBackProgress == 0f
+                            tween(PAGE_TRANSITION_MILLIS, easing = LazerMotionEasing)
+                        },
+                        label = "lazer-root-cover",
+                    )
+                    // The root page stays mounted under all of that, so returning from a playlist
+                    // cannot replay its scroll position or its bottom-edge entrance.
                     LazerRootContent(
                         controller = controller,
                         currentTrackId = playback.track?.id,
@@ -987,9 +1014,7 @@ private fun LazerAppContent(
                         showHeaderControls = true,
                         modifier = Modifier
                             .fillMaxSize()
-                            .then(
-                                if (hideRootPages) Modifier.hiddenBehindPages() else Modifier,
-                            ),
+                            .behindPages { coveredPageHideProgress(rootCover.value) },
                     )
                     AnimatedContent(
                         targetState = mainPage,
