@@ -559,6 +559,11 @@ private fun AnimatedLyricsViewport(
             val lineColor = lyricSelectionColor(colors.onBackground, rowLight, colors.primary)
             val clickGlowActive = clickGlowTokens.containsKey(line)
             val contentBlurRadiusPx = with(density) { blurRadiusDp.dp.toPx() }
+            // The row's blur is measured against the main line's ink. Applying the same radius to
+            // half-size text dissolves it, so the translation takes its share of the font size and
+            // stays legible on the rows around the one being sung.
+            val translationBlurRadiusPx =
+                contentBlurRadiusPx * (translationFontSp.value / mainFontSp.value)
             val hasTranslation = !line.translation.isNullOrBlank()
             val textWidthFraction = 1f / 1.04f
             val mainHeightPx = measuredMainHeightsPx[line]?.toFloat() ?: estimatedMainHeightPx
@@ -725,10 +730,14 @@ private fun AnimatedLyricsViewport(
                                 scaleX = scale
                                 scaleY = scale
                                 // AMLL's sub-line is dimmed ink inside the same wrapper, so the row's
-                                // brightness applies on top of its own 0.3.
+                                // own brightness applies on top of the sub-line's share of it.
                                 this.alpha = alpha * LyricSubLineOpacity
-                                renderEffect = if (contentBlurRadiusPx > 0.01f) {
-                                    BlurEffect(contentBlurRadiusPx, contentBlurRadiusPx, TileMode.Decal)
+                                renderEffect = if (translationBlurRadiusPx > 0.01f) {
+                                    BlurEffect(
+                                        translationBlurRadiusPx,
+                                        translationBlurRadiusPx,
+                                        TileMode.Decal,
+                                    )
                                 } else {
                                     null
                                 }

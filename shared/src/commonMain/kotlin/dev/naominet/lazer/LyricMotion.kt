@@ -207,8 +207,9 @@ fun lyricWordVisualProgress(
 }
 
 /**
- * AMLL's word mask moves linearly through the measured word. The smoothing belongs to the
- * renderer's clock interpolation; the mask itself must stay tied to the source word timing.
+ * AMLL's mask moves linearly through the word being sung: no easing, and the smoothing belongs to
+ * the renderer's clock interpolation rather than to the mask itself. This is the fraction of one
+ * word that has been sung, which is what drives the whole line's sweep.
  */
 internal fun lyricWordMaskProgress(
     word: TimedLyricWord,
@@ -216,20 +217,48 @@ internal fun lyricWordMaskProgress(
 ): Float = lyricWordProgress(word, positionMillis)
 
 /**
- * Position of the right edge of a word's moving fade band, in local word pixels.
- *
- * [extraTravelPixels] is AMLL's per-line allowance: the line's first word gets one and a half feather
- * widths more runway and its last word half a feather more, both swept over the same word duration,
- * which is what makes the first syllable arrive rather than appear.
+ * AMLL's mask accumulator: the width of every word sung so far. It grows while a word is being sung
+ * and holds through the pauses between them, so the lit edge is one wave crossing the whole line
+ * rather than a feather that restarts at each word and leaves a hard edge behind it.
  */
-internal fun lyricWordMaskEdge(
-    wordProgress: Float,
-    wordWidthPixels: Float,
-    fadeWidthPixels: Float,
-    extraTravelPixels: Float = 0f,
-): Float = wordProgress.coerceIn(0f, 1f) *
-    (wordWidthPixels.coerceAtLeast(0f) + fadeWidthPixels.coerceAtLeast(0.01f) +
-        extraTravelPixels.coerceAtLeast(0f))
+internal fun lyricLineSweptWidth(
+    wordWidths: List<Float>,
+    fractions: List<Float>,
+): Float {
+    var swept = 0f
+    wordWidths.forEachIndexed { index, width ->
+        swept += width.coerceAtLeast(0f) * fractions.getOrElse(index) { 0f }.coerceIn(0f, 1f)
+    }
+    return swept
+}
+
+/**
+ * AMLL's extra runway at the two ends of a line, in feather widths: the first word sweeps one and a
+ * half further and the last half further. The head start is what centres the feather on the sung
+ * position for every word after the first, and the tail is what lands the lit edge exactly on the
+ * end of the line instead of half a feather short of it.
+ */
+internal fun lyricLineSweepAllowance(firstWordFraction: Float, lastWordFraction: Float): Float =
+    1.5f * firstWordFraction.coerceIn(0f, 1f) + 0.5f * lastWordFraction.coerceIn(0f, 1f)
+
+/**
+ * How far a word's lit edge has travelled from its own left edge, given how much of the line has
+ * been swept. The feather rides centred on the sung position, so a word is half a feather lit when
+ * its turn starts and finishes half a feather into the next one.
+ *
+ * [headStart] lifts a word's sweep by that much. Upstream's first word sits dark until the sweep has
+ * crossed one feather of nothing, because upstream also pulls every line's start time forward by up
+ * to 600ms to pay for it; this sheet takes the clock as it comes, so the line's first word starts at
+ * its own left edge instead.
+ */
+internal fun lyricWordMaskTravel(
+    sweptWidth: Float,
+    widthBefore: Float,
+    wordWidth: Float,
+    fadeWidth: Float,
+    headStart: Float = 0f,
+): Float = (sweptWidth - widthBefore - fadeWidth + headStart.coerceAtLeast(0f))
+    .coerceIn(0f, wordWidth.coerceAtLeast(0f) + fadeWidth.coerceAtLeast(0f))
 
 
 internal fun lyricBaseMaskAlpha(): Float = AMLL_BASE_MASK_ALPHA

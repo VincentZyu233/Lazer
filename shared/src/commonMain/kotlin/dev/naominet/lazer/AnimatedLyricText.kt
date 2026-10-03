@@ -63,9 +63,11 @@ const val LyricInactiveLineAlpha = 0.4f
 /**
  * AMLL's translation and romanisation sub-line: the same ink, not a second colour, riding the row's
  * own wrapper opacity. Upstream holds it at 0.3, which on this sheet leaves a translation too faint
- * to read at a glance, so it sits higher - still clearly the second voice of the pair.
+ * to read at a glance - half-size ink on a moving wallpaper has to work harder than upstream's
+ * full-white line on a dark ground - so it sits well above that while still reading as the second
+ * voice of the pair.
  */
-const val LyricSubLineOpacity = 0.6f
+const val LyricSubLineOpacity = 0.75f
 
 /**
  * AMLL's line-focus spring: mass 2, stiffness 100, damping 25. Compose fixes mass at one, so
@@ -508,28 +510,34 @@ private fun buildWordMasks(
     positionMillis: Long,
 ): List<LyricWordMask> {
     if (laidOutWords.isEmpty()) return emptyList()
+    val fractions = laidOutWords.map { lyricWordMaskProgress(it.word, positionMillis) }
+    val sweptWidth = lyricLineSweptWidth(laidOutWords.map { it.bounds.width }, fractions)
+    // One accumulator drives every word's mask, exactly as AMLL's does: the width sung so far,
+    // growing while a word is sung and holding through the pauses between them. The lit edge is
+    // therefore a single wave that crosses word boundaries instead of a feather that restarts at
+    // each word and leaves a hard edge where the previous one stopped.
+    val allowance = lyricLineSweepAllowance(fractions.first(), fractions.last())
     val masks = ArrayList<LyricWordMask>(laidOutWords.size)
+    var widthBefore = 0f
     laidOutWords.forEachIndexed { index, laidOutWord ->
         val bounds = laidOutWord.bounds
         val fadeWidth = bounds.height * 0.5f
-        // AMLL gives the line extra runway at its two ends, inside the same word duration: the first
-        // word's feather starts a whole feather further back and the last travels half a feather on,
-        // so the line opens and closes instead of popping. A one-word line gets both.
-        val extraTravel = fadeWidth * (if (index == 0) 1.5f else 0f) +
-            fadeWidth * (if (index == laidOutWords.lastIndex) 0.5f else 0f)
-        // Upstream eases nothing: each word's reveal is linear across exactly its own span, and the
-        // feather leaving the edge of the previous word is what holds between words.
-        val progress = lyricWordMaskProgress(laidOutWord.word, positionMillis)
-        val edgeX = bounds.left +
-            lyricWordMaskEdge(progress, bounds.width, fadeWidth, extraTravel)
-        val fadeStartX = edgeX - fadeWidth
+        val travel = lyricWordMaskTravel(
+            sweptWidth = sweptWidth + fadeWidth * allowance,
+            widthBefore = widthBefore,
+            wordWidth = bounds.width,
+            fadeWidth = fadeWidth,
+            headStart = if (index == 0) fadeWidth else 0f,
+        )
+        val edgeX = bounds.left + travel
         masks += LyricWordMask(
             wordIndex = laidOutWord.wordIndex,
             bounds = bounds,
             edgeX = edgeX,
-            fadeStartX = fadeStartX,
-            fullyRevealed = progress >= 1f,
+            fadeStartX = edgeX - fadeWidth,
+            fullyRevealed = travel >= bounds.width + fadeWidth,
         )
+        widthBefore += bounds.width
     }
     return masks
 }

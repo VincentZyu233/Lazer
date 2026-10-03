@@ -90,20 +90,63 @@ class LyricMotionTest {
         assertEquals(0f, lyricWordMaskProgress(word, 999L), 0.0001f)
         assertEquals(0.5f, lyricWordMaskProgress(word, 1_500L), 0.0001f)
         assertEquals(1f, lyricWordMaskProgress(word, 2_001L), 0.0001f)
-        assertEquals(0f, lyricWordMaskEdge(0f, 100f, 20f), 0.0001f)
-        assertEquals(60f, lyricWordMaskEdge(0.5f, 100f, 20f), 0.0001f)
-        assertEquals(120f, lyricWordMaskEdge(1f, 100f, 20f), 0.0001f)
+        assertEquals(0f, lyricWordMaskTravel(0f, 0f, 100f, 20f), 0.0001f)
+        assertEquals(30f, lyricWordMaskTravel(50f, 0f, 100f, 20f), 0.0001f)
+        assertEquals(120f, lyricWordMaskTravel(900f, 0f, 100f, 20f), 0.0001f)
     }
 
     @Test
     fun theLineOpensAndClosesWithExtraFeatherRunway() {
-        // AMLL adds 1.5 feather widths to its first word's travel and 0.5 to its last, inside the same
-        // word duration, so the sweep is already moving when it reaches the line's edges.
-        val half = lyricWordMaskEdge(0.5f, 100f, 20f, extraTravelPixels = 20f * 1.5f)
-        val quarter = lyricWordMaskEdge(0.5f, 100f, 20f, extraTravelPixels = 20f * 0.5f)
-        assertEquals(75f, half, 0.0001f)
-        assertEquals(65f, quarter, 0.0001f)
-        assertTrue(quarter - 60f == (half - 60f) / 3f)
+        // AMLL sweeps its first word one and a half feather widths further and its last half a
+        // feather further. The head start is what centres the feather on the sung position for every
+        // word after the first; the tail is what lands the lit edge on the end of the line.
+        assertEquals(0f, lyricLineSweepAllowance(0f, 0f), 0.0001f)
+        assertEquals(1.5f, lyricLineSweepAllowance(1f, 0f), 0.0001f)
+        assertEquals(2f, lyricLineSweepAllowance(1f, 1f), 0.0001f)
+        assertEquals(130f, lyricLineSweptWidth(listOf(100f, 100f), listOf(1f, 0.3f)), 0.0001f)
+    }
+
+    @Test
+    fun theLitEdgeIsOneContinuousSweepAcrossTheLine() {
+        val widths = listOf(100f, 100f, 100f)
+        val fade = 50f
+        val words = listOf(
+            TimedLyricWord(0L, 1_000L, "还"),
+            TimedLyricWord(1_400L, 1_000L, "没"),
+            TimedLyricWord(2_400L, 1_000L, "好"),
+        )
+        fun travelAt(positionMillis: Long, index: Int): Float {
+            val fractions = words.map { lyricWordMaskProgress(it, positionMillis) }
+            val swept = lyricLineSweptWidth(widths, fractions) +
+                fade * lyricLineSweepAllowance(fractions.first(), fractions.last())
+            return lyricWordMaskTravel(
+                sweptWidth = swept,
+                widthBefore = widths.take(index).sum(),
+                wordWidth = widths[index],
+                fadeWidth = fade,
+                headStart = if (index == 0) fade else 0f,
+            )
+        }
+        // Nothing is lit before the line, and the whole line is lit exactly when it ends.
+        assertEquals(0f, travelAt(-1L, 0), 0.0001f)
+        assertEquals(0f, travelAt(-1L, 2), 0.0001f)
+        for (index in widths.indices) {
+            assertEquals(widths[index] + fade, travelAt(3_400L, index), 0.0001f)
+        }
+        // Halfway through a word the feather is centred on the sung position, so half the word plus
+        // half the feather has travelled.
+        assertEquals(75f, travelAt(1_900L, 1), 0.0001f)
+        // The edge crosses a word boundary as one wave: the first word is lit to its last pixel at
+        // the same moment the next one is lit from its first, so no hard edge appears between them.
+        assertEquals(widths[0] + fade, travelAt(1_000L, 0), 0.0001f)
+        assertEquals(fade / 2f, travelAt(1_000L, 1), 0.0001f)
+        // A pause holds the sweep where it stopped rather than finishing the word or rewinding it.
+        assertEquals(travelAt(1_000L, 0), travelAt(1_400L, 0), 0.0001f)
+        assertEquals(travelAt(1_000L, 1), travelAt(1_400L, 1), 0.0001f)
+        // The line's first word lights as the line starts: upstream can afford to hold it dark
+        // because upstream also pulls the line's start time forward, and this sheet does not.
+        assertEquals(0f, travelAt(0L, 0), 0.0001f)
+        assertTrue(travelAt(1L, 0) > 0f)
     }
 
     @Test
