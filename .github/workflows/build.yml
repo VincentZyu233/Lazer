@@ -141,8 +141,9 @@ jobs:
         run: |
           set -euo pipefail
           kernel_modules="linux-modules-extra-$(uname -r)"
+          kernel_headers="linux-headers-$(uname -r)"
           sudo apt-get update
-          sudo apt-get install -y fakeroot rpm pkg-config cmake g++ nasm libasound2-dev "$kernel_modules"
+          sudo apt-get install -y fakeroot rpm pkg-config cmake g++ nasm libasound2-dev "$kernel_modules" "$kernel_headers"
       - name: Build the pinned DSD-capable FFmpeg SDK
         run: bash native/lazer-audio/tools/build_dsd_ffmpeg.sh "$FFMPEG_ROOT"
       - name: Record Linux HiFi toolchain versions
@@ -190,10 +191,15 @@ jobs:
         run: |
           set -euo pipefail
           kernel_release="$(uname -r)"
+          module_dir="$RUNNER_TEMP/snd-aloop"
+          mkdir -p "$module_dir"
+          curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/torvalds/linux/v6.8/sound/drivers/aloop.c \
+            --output "$module_dir/aloop.c"
+          printf 'obj-m := snd-aloop.o\nsnd-aloop-y := aloop.o\n' > "$module_dir/Makefile"
+          make -C "/lib/modules/${kernel_release}/build" M="$module_dir" modules
+          sudo install -D "$module_dir/snd-aloop.ko" "/lib/modules/${kernel_release}/extra/snd-aloop.ko"
           sudo depmod -a "$kernel_release"
-          package="linux-modules-extra-${kernel_release}"
-          dpkg-query -L "$package" | grep -E '/snd-aloop\.ko(\.(xz|zst|gz))?$' || true
-          find "/lib/modules/${kernel_release}" -type f -iname 'snd-aloop.ko*' -print
           modinfo snd-aloop
           sudo modprobe snd-aloop pcm_substreams=1
           cat /proc/asound/cards
