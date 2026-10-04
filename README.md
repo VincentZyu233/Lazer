@@ -210,6 +210,13 @@ LAZER_KEY_PASSWORD
 
 也可以在项目根目录创建 `keystore.properties`，字段名对应 `storeFile`、`storePassword`、`keyAlias` 和 `keyPassword`。请勿将真实密钥、密码或签名文件提交到版本库。
 
+### iOS Release (IPA)
+
+CI 会自动为真机设备打包未签名的安装包（`.ipa`）。因未配置开发者证书，真机安装需自行签名：
+
+- 支持使用 [AltStore](https://altstore.io/)、SideStore 或 TrollStore 等侧载工具；
+- 每次 Release 发布说明中附有详细的 AltStore 自签名安装操作指引。
+
 ## 数据与隐私
 
 - Gateway 登录会话保存在平台私有存储中
