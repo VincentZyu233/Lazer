@@ -8,6 +8,8 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributeView
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.time.Clock
 import java.time.Duration
@@ -22,9 +24,25 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeNoException
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 class DesktopUpnpMediaServerTest {
+    @Test
+    fun `Windows file identity distinguishes files when all timestamps and sizes match`() = withFixture { wav ->
+        assumeTrue("The native file ID is Windows-specific", isWindows())
+        val replacement = wav.resolveSibling("same-metadata.wav")
+        Files.copy(wav, replacement)
+        val originalAttributes = Files.readAttributes(wav, BasicFileAttributes::class.java)
+        matchReplacementTimestamps(replacement, originalAttributes)
+
+        val originalIdentity = DesktopWindowsFileIdentity.read(wav)
+        val replacementIdentity = DesktopWindowsFileIdentity.read(replacement)
+        assertNotNull(originalIdentity)
+        assertNotNull(replacementIdentity)
+        assertFalse("Distinct files with matching metadata must have distinct native IDs", originalIdentity == replacementIdentity)
+    }
+
     @Test
     fun `serves authorized file with exact metadata for GET and HEAD`() = withFixture { wav ->
         DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { server ->
@@ -168,7 +186,7 @@ class DesktopUpnpMediaServerTest {
             val originalAttributes = Files.readAttributes(wav, java.nio.file.attribute.BasicFileAttributes::class.java)
             val replacement = wav.resolveSibling("replacement.wav")
             Files.write(replacement, wavBytes().also { it[it.lastIndex] = 0x55 })
-            Files.setLastModifiedTime(replacement, FileTime.from(originalAttributes.lastModifiedTime().toInstant()))
+            matchReplacementTimestamps(replacement, originalAttributes)
             Files.move(replacement, wav, StandardCopyOption.REPLACE_EXISTING)
 
             assertFalse(lease.renew())
@@ -313,7 +331,7 @@ class DesktopUpnpMediaServerTest {
                 )
                 val replacement = replaced.resolveSibling("replacement.wav")
                 Files.write(replacement, wavBytes().also { it[it.lastIndex] = 0x66 })
-                Files.setLastModifiedTime(replacement, FileTime.from(originalAttributes.lastModifiedTime().toInstant()))
+                matchReplacementTimestamps(replacement, originalAttributes)
                 Files.move(replacement, replaced, StandardCopyOption.REPLACE_EXISTING)
 
                 assertNull(targetServer.reissueLease(replacedLease))
@@ -423,8 +441,12 @@ class DesktopUpnpMediaServerTest {
             val originalAttributes = Files.readAttributes(wav, java.nio.file.attribute.BasicFileAttributes::class.java)
             val replacement = wav.resolveSibling("replacement.wav")
             Files.write(replacement, wavBytes().also { it[it.lastIndex] = 0x55 })
-            Files.setLastModifiedTime(replacement, FileTime.from(originalAttributes.lastModifiedTime().toInstant()))
+            matchReplacementTimestamps(replacement, originalAttributes)
             Files.move(replacement, wav, StandardCopyOption.REPLACE_EXISTING)
+            val replacementAttributes = Files.readAttributes(wav, BasicFileAttributes::class.java)
+            assertEquals(originalAttributes.size(), replacementAttributes.size())
+            assertEquals(originalAttributes.lastModifiedTime(), replacementAttributes.lastModifiedTime())
+            if (isWindows()) assertEquals(originalAttributes.creationTime(), replacementAttributes.creationTime())
             assertEquals(410, request(lease.mediaUri).status)
         }
     }
@@ -458,6 +480,20 @@ class DesktopUpnpMediaServerTest {
         cueStartFrame75 = cueStartFrame75,
         cueEndFrame75 = cueEndFrame75,
     )
+
+    private fun matchReplacementTimestamps(path: Path, original: BasicFileAttributes) {
+        Files.setLastModifiedTime(path, original.lastModifiedTime())
+        if (isWindows()) {
+            Files.getFileAttributeView(path, BasicFileAttributeView::class.java)
+                .setTimes(original.lastModifiedTime(), null, original.creationTime())
+        }
+        val replacement = Files.readAttributes(path, BasicFileAttributes::class.java)
+        assertEquals(original.size(), replacement.size())
+        assertEquals(original.lastModifiedTime(), replacement.lastModifiedTime())
+        if (isWindows()) assertEquals(original.creationTime(), replacement.creationTime())
+    }
+
+    private fun isWindows(): Boolean = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)
 
     private fun withFixture(test: (Path) -> Unit) {
         val directory = Files.createTempDirectory("lazer-upnp-media-")

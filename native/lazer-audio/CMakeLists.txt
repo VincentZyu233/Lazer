@@ -2,11 +2,38 @@ cmake_minimum_required(VERSION 3.21)
 project(lazer_audio LANGUAGES CXX)
 
 # FFmpeg stays outside the repository. Windows consumes the supplied import-library bundle;
-# Linux/macOS use system pkg-config unless -DLAZER_FFMPEG_ROOT=<dir> or FFMPEG_ROOT points to a
-# shared development package with lib/pkgconfig metadata.
+# Linux/macOS use pkg-config unless -DLAZER_FFMPEG_ROOT=<dir> or FFMPEG_ROOT points to a shared
+# development package with lib/pkgconfig metadata. All builds require the upstream DSD sample
+# format/API; ordinary distro packages may be too old or lack DSD support entirely.
 set(LAZER_FFMPEG_ROOT "" CACHE PATH "Directory holding the prebuilt FFmpeg include/ lib/ bin/")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 find_package(LazerFFmpeg REQUIRED)
+
+# Fail at configure time with an actionable message instead of emitting dozens of confusing
+# source.cpp errors when a system package lacks AV_SAMPLE_FMT_DSD, modern channel layouts or the
+# matching swresample API. This is a mandatory feature check: there is no non-DSD build mode.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_INCLUDES ${LAZER_FFMPEG_INCLUDE_DIRS})
+unset(LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS CACHE)
+check_cxx_source_compiles("\
+    #include <libavutil/channel_layout.h>\n\
+    #include <libavutil/samplefmt.h>\n\
+    #include <libswresample/swresample.h>\n\
+    #include <type_traits>\n\
+    int main() {\n\
+        static_assert(AV_SAMPLE_FMT_DSD >= 0);\n\
+        AVChannelLayout layout = AV_CHANNEL_LAYOUT_STEREO;\n\
+        using SetOpts2 = decltype(&swr_alloc_set_opts2);\n\
+        static_assert(std::is_pointer<SetOpts2>::value);\n\
+        return layout.nb_channels != 2;\n\
+    }" LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS)
+unset(CMAKE_REQUIRED_INCLUDES)
+if(NOT LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS)
+    message(FATAL_ERROR
+        "The native HiFi engine requires FFmpeg with AV_SAMPLE_FMT_DSD, AVChannelLayout, and "
+        "swr_alloc_set_opts2. Do not use a distro/Homebrew FFmpeg without those APIs; configure "
+        "with -DLAZER_FFMPEG_ROOT=<DSD-capable FFmpeg prefix> or FFMPEG_ROOT.")
+endif()
 option(LAZER_AUDIO_BUILD_PROBE "Build the lazer-audio-probe console harness" OFF)
 option(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL
     "Allow the test-only ALSA null PCM route (requires a Linux probe build)" OFF)

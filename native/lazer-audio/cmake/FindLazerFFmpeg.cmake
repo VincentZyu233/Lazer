@@ -38,6 +38,7 @@ if(WIN32)
 
     if(LazerFFmpeg_FOUND)
         set(LAZER_FFMPEG_LIBRARIES ${_lazer_ffmpeg_libraries})
+        set(LAZER_FFMPEG_INCLUDE_DIRS ${LAZER_FFMPEG_INCLUDE_DIR})
     endif()
 else()
     find_package(PkgConfig REQUIRED)

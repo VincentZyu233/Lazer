@@ -603,8 +603,10 @@ private final class LazerAudio: NSObject {
 
     @objc private func itemFailedToPlayToEnd(_ notification: Notification) {
         guard let item = notification.object as? AVPlayerItem else { return }
-        let detail = (notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error)
-            ?.localizedDescription ?? item.error?.localizedDescription ?? "The audio item failed to play."
+        let playbackError = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+        let detail = playbackError?.localizedDescription
+            ?? item.error?.localizedDescription
+            ?? "The audio item failed to play."
         DispatchQueue.main.async { [weak self, weak item] in
             guard let self, let item else { return }
             guard self.observedItem === item,

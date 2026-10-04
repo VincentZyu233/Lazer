@@ -228,7 +228,7 @@ internal class DesktopUpnpMediaServer(
             current.size() == record.snapshot.size &&
             current.lastModifiedTime() == record.snapshot.modifiedTime &&
             current.creationTime() == record.snapshot.creationTime &&
-            (record.snapshot.fileKey == null || current.fileKey() == record.snapshot.fileKey)
+            (record.snapshot.fileIdentity == null || stableFileIdentity(record.path, current) == record.snapshot.fileIdentity)
     } catch (_: IOException) {
         false
     } catch (_: SecurityException) {
@@ -382,7 +382,7 @@ internal class DesktopUpnpMediaServer(
         val size: Long,
         val modifiedTime: FileTime,
         val creationTime: FileTime,
-        val fileKey: Any?,
+        val fileIdentity: Any?,
     )
 
     private data class LeaseRecord(
@@ -456,12 +456,16 @@ internal class DesktopUpnpMediaServer(
             require(initial.isRegularFile && !initial.isSymbolicLink) { "Only regular, non-symlink files can be served." }
             require(initial.size() > 0L) { "The local audio file is empty." }
             require(hasExpectedAudioSignature(path, mimeType)) { "The local file does not match its WAV/FLAC MIME type." }
+            val initialIdentity = stableFileIdentity(path, initial)
             val afterRead = readAttributes(path)
-            require(sameIdentityAndMetadata(initial, afterRead)) { "The local file changed while it was being authorized." }
-            require(afterRead.fileKey() != null || afterRead.creationTime().toMillis() != 0L) {
+            val afterReadIdentity = stableFileIdentity(path, afterRead)
+            require(sameIdentityAndMetadata(initial, afterRead) && initialIdentity == afterReadIdentity) {
+                "The local file changed while it was being authorized."
+            }
+            require(afterReadIdentity != null || afterRead.creationTime().toMillis() != 0L) {
                 "This filesystem does not expose a stable identity for the local file."
             }
-            return FileSnapshot(afterRead.size(), afterRead.lastModifiedTime(), afterRead.creationTime(), afterRead.fileKey())
+            return FileSnapshot(afterRead.size(), afterRead.lastModifiedTime(), afterRead.creationTime(), afterReadIdentity)
         }
 
         private fun hasExpectedAudioSignature(path: Path, mimeType: String): Boolean {
@@ -487,6 +491,9 @@ internal class DesktopUpnpMediaServer(
 
         private fun readAttributes(path: Path): BasicFileAttributes =
             java.nio.file.Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+
+        private fun stableFileIdentity(path: Path, attributes: BasicFileAttributes): Any? =
+            DesktopWindowsFileIdentity.read(path) ?: attributes.fileKey()
 
         private fun hasSymbolicLinkComponent(path: Path): Boolean {
             var current = path.root ?: return true

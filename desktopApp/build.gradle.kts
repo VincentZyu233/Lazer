@@ -91,10 +91,11 @@ val buildWindowsTaskbarBridge = tasks.register<Exec>("buildWindowsTaskbarBridge"
     commandLine("cmake", "--build", nativeBridgeBuildDir.get().asFile.absolutePath, "--config", "Release")
 }
 
-// The native FFmpeg engine is opt-in unless an external development package was configured.
-// Linux/macOS use the host's FFmpeg pkg-config modules; Windows uses the supplied import package.
+// The native FFmpeg engine is opt-in unless a DSD-capable SDK was configured. Linux/macOS use
+// pkg-config metadata under FFMPEG_ROOT when supplied; Windows uses the supplied import package.
 val nativeAudioBuildDir = layout.buildDirectory.dir("native/lazer-audio/$nativeAudioPlatformId")
 val ffmpegRoot = providers.environmentVariable("FFMPEG_ROOT").orElse(providers.gradleProperty("lazerFfmpegRoot"))
+val ffmpegLicenseDir = ffmpegRoot.orNull?.let { file("$it/share/lazer-ffmpeg") }
 val buildNativeAudio = providers.gradleProperty("lazerNativeAudio")
     .map { it.toBoolean() }
     .orElse(ffmpegRoot.isPresent)
@@ -155,6 +156,18 @@ val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") 
             eachFile { relativePath = RelativePath(true, name) }
             into("native/$nativeAudioPlatformId")
         }
+        if (!isWindowsHost) {
+            require(ffmpegLicenseDir != null &&
+                ffmpegLicenseDir.resolve("COPYING.LGPLv2.1").isFile &&
+                ffmpegLicenseDir.resolve("BUILDINFO.txt").isFile) {
+                "Bundling the native FFmpeg engine requires COPYING.LGPLv2.1 and BUILDINFO.txt " +
+                    "under FFMPEG_ROOT/share/lazer-ffmpeg"
+            }
+            from(ffmpegLicenseDir!!) {
+                include("COPYING.LGPLv2.1", "BUILDINFO.txt")
+                into("legal/ffmpeg")
+            }
+        }
     }
 }
 
@@ -174,12 +187,22 @@ if (isWindowsHost && embedTaskbarBridgeInJar) {
 // Windows keeps the bridge behind a dedicated property; the other hosts only build the
 // engine when the native flag is present, so they key off that same flag.
 if (buildNativeAudio.get() && (isLinuxHost || isMacOSHost)) {
+    require(ffmpegLicenseDir != null &&
+        ffmpegLicenseDir.resolve("COPYING.LGPLv2.1").isFile &&
+        ffmpegLicenseDir.resolve("BUILDINFO.txt").isFile) {
+        "Bundling the native FFmpeg engine requires COPYING.LGPLv2.1 and BUILDINFO.txt " +
+            "under FFMPEG_ROOT/share/lazer-ffmpeg"
+    }
     tasks.named<ProcessResources>("processResources") {
         dependsOn(buildLazerAudio)
         from(nativeAudioBuildDir) {
             include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
             eachFile { relativePath = RelativePath(true, name) }
             into("native/$nativeAudioPlatformId")
+        }
+        from(ffmpegLicenseDir!!) {
+            include("COPYING.LGPLv2.1", "BUILDINFO.txt")
+            into("legal/ffmpeg")
         }
     }
 }
