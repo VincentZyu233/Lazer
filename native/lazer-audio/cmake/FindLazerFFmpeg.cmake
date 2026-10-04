@@ -101,7 +101,7 @@ else()
         foreach(directory IN LISTS LAZER_FFMPEG_LIBRARY_DIRS)
             file(GLOB runtime_files
                 "${directory}/lib${component}.so*"
-                "${directory}/lib${component}.dylib*")
+                "${directory}/lib${component}*.dylib")
             list(APPEND LAZER_FFMPEG_RUNTIME_FILES ${runtime_files})
         endforeach()
     endforeach()

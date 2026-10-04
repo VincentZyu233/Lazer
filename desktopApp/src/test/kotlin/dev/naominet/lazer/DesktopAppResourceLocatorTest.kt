@@ -12,7 +12,7 @@ class DesktopAppResourceLocatorTest {
         try {
             val layouts = listOf(
                 Triple("windows", "image/Lazer.exe", "image/app/resources/native/windows-x64/lazer-audio.dll"),
-                Triple("linux", "image/lib/runtime/bin/java", "image/lib/resources/native/linux-x64/liblazer-audio.so"),
+                Triple("linux", "image/lib/runtime/bin/java", "image/lib/app/resources/native/linux-x64/liblazer-audio.so"),
                 Triple("macos", "Lazer.app/Contents/runtime/Contents/Home/bin/java", "Lazer.app/Contents/app/resources/native/macos-arm64/liblazer-audio.dylib"),
             )
             layouts.forEach { (_, executablePath, resourcePath) ->
