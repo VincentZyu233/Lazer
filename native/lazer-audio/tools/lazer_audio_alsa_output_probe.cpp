@@ -1,6 +1,7 @@
 /* Hardware-free checks for ALSA output negotiation and queue lifecycle. The `null` PCM is enabled
  * only when both explicit CMake test options are on; release builds accept direct hw: names only. */
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -19,6 +20,10 @@
 extern "C" int32_t lazer_audio_test_alsa_dop_null_negotiation(int32_t carrierRate,
     int32_t channels, int32_t *actualRate, int32_t *actualChannels,
     int32_t *validBits, int32_t *containerBits);
+extern "C" int32_t lazer_audio_test_alsa_native_dsd_null_negotiation(
+    int32_t dsdByteClock, int32_t dsdRateMultiplier, int32_t channels, int32_t formatIndex,
+    int32_t *actualRate, int32_t *actualChannels, int32_t *validBits,
+    int32_t *containerBits, int32_t *formatSelection);
 extern "C" int32_t lazer_audio_test_alsa_dop_stage_bytes(const uint8_t *bytes,
     int32_t frameCount, int32_t channels, uint8_t *destination, int32_t destinationBytes);
 extern "C" int32_t lazer_audio_test_alsa_dop_suspend_resume(int32_t alsaError,
@@ -439,6 +444,18 @@ lazer::audio::AudioOutputRequest exactDopRequest(const std::string &device) {
     return request;
 }
 
+lazer::audio::AudioOutputRequest exactNativeDsdRequest(const std::string &device) {
+    lazer::audio::AudioOutputRequest request;
+    request.deviceId = device;
+    request.requireNativeDsd = true;
+    request.exclusive = true;
+    request.bufferMillis = 120;
+    request.desired.sampleRate = 352'800;
+    request.desired.channels = 2;
+    request.desired.nativeDsd = true;
+    return request;
+}
+
 lazer::audio::StreamDescription rawDsdDescription() {
     lazer::audio::StreamDescription source;
     source.sampleRate = 352'800;
@@ -448,6 +465,61 @@ lazer::audio::StreamDescription rawDsdDescription() {
     source.dsdRateMultiplier = 64;
     source.lossless = true;
     return source;
+}
+
+bool exerciseNativeDsdExactFormatNegotiation() {
+    constexpr std::array<int32_t, 5> expectedSelections{
+        LazerAudioFormatSelectionNativeDsdU32Be,
+        LazerAudioFormatSelectionNativeDsdU32Le,
+        LazerAudioFormatSelectionNativeDsdU16Be,
+        LazerAudioFormatSelectionNativeDsdU16Le,
+        LazerAudioFormatSelectionNativeDsdU8,
+    };
+    constexpr std::array<int32_t, 5> expectedWordBits{32, 32, 16, 16, 8};
+    for (const int32_t multiplier : {64, 128, 256, 512, 1024}) {
+        const int32_t dsdByteClock = static_cast<int32_t>(
+            static_cast<int64_t>(44'100) * multiplier / 8);
+        for (const int32_t channels : {1, 2}) {
+            for (int32_t formatIndex = -1; formatIndex < 5; ++formatIndex) {
+                int32_t actualRate = 0;
+                int32_t actualChannels = 0;
+                int32_t validBits = 0;
+                int32_t containerBits = 0;
+                int32_t formatSelection = LazerAudioFormatSelectionUnknown;
+                const int32_t negotiated = lazer_audio_test_alsa_native_dsd_null_negotiation(
+                    dsdByteClock, multiplier, channels, formatIndex, &actualRate,
+                    &actualChannels, &validBits, &containerBits, &formatSelection);
+                const int32_t selectedIndex = formatIndex < 0 ? 0 : formatIndex;
+                const int32_t expectedBits = expectedWordBits[static_cast<size_t>(selectedIndex)];
+                if (negotiated != LazerAudioOk || actualRate <= 0 || actualChannels != channels ||
+                    validBits != expectedBits || containerBits != expectedBits ||
+                    formatSelection != expectedSelections[static_cast<size_t>(selectedIndex)] ||
+                    static_cast<int64_t>(actualRate) * (containerBits / 8) != dsdByteClock) {
+                    return fail("test-only ALSA null route did not negotiate the exact " +
+                        std::string(formatIndex < 0 ? "preferred" : "forced") +
+                        " Native DSD clock/format for DSD" + std::to_string(multiplier) +
+                        " " + std::to_string(channels) + "ch");
+                }
+            }
+        }
+    }
+
+    /* Public Native DSD output remains direct-hw-only. The null negotiation hook above tests ALSA
+     * rate/format acceptance only; it must not make the plugin usable as a production endpoint. */
+    for (const char *device : {"null", "plughw:0,0"}) {
+        auto request = exactNativeDsdRequest(device);
+        lazer::audio::AlsaOutput output;
+        lazer::audio::AudioOutputSession session;
+        std::string error;
+        const int32_t opened = output.open(request, rawDsdDescription(), session, error, nullptr);
+        if (opened != LazerAudioErrorInvalidArgument || output.isOpen() ||
+            error.find("direct hw:") == std::string::npos) {
+            return fail("Native DSD public open accepted a plugin/null endpoint for " +
+                std::string(device));
+        }
+    }
+    std::puts("PASS: ALSA Native DSD negotiates every DSD_U8/U16/U32 endian tuple at DSD64-1024 clocks and rejects plugin endpoints");
+    return true;
 }
 
 bool exerciseDopExactCarrierNegotiation() {
@@ -548,6 +620,7 @@ int main(int argc, char **argv) {
     passed &= exerciseFormat(16);
     passed &= exerciseFormat(24);
     passed &= exerciseFormat(32);
+    passed &= exerciseNativeDsdExactFormatNegotiation();
     passed &= exerciseDopExactCarrierNegotiation();
     passed &= exerciseDopMarkerBytesPassThrough();
     passed &= exerciseDopRecoveryFailsWhenMarkerPhaseIsUnknown();

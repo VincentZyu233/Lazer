@@ -1155,7 +1155,8 @@ int32_t AudioSource::decodePacket(AVPacket *packet, SourceConsumer &consumer) {
 }
 
 int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
-    if ((!target_.doP && resampler_ == nullptr) || frame->nb_samples <= 0) return LazerAudioOk;
+    if ((!target_.doP && !target_.nativeDsd && resampler_ == nullptr) ||
+        frame->nb_samples <= 0) return LazerAudioOk;
     if (description_.dsd &&
         ((dstDecodedToPcm_ ? frame->format != AV_SAMPLE_FMT_FLT
                            : frame->format != AV_SAMPLE_FMT_DSD) ||

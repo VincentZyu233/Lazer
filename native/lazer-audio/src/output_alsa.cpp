@@ -374,6 +374,27 @@ bool tryOpenConfigured(const std::string &device, unsigned int rate, unsigned in
     return true;
 }
 
+bool tryOpenNativeDsdConfigured(const std::string &device,
+    const AudioOutputRequest &request, const StreamDescription &source,
+    ConfiguredPcm &configured, std::string &failure, int32_t forcedFormatIndex = -1) {
+    const auto formats = nativeDsdFormats();
+    if (forcedFormatIndex < -1 ||
+        forcedFormatIndex >= static_cast<int32_t>(formats.size())) return false;
+    for (size_t index = 0; index < formats.size(); ++index) {
+        if (forcedFormatIndex >= 0 && index != static_cast<size_t>(forcedFormatIndex)) continue;
+        const FormatChoice &format = formats[index];
+        const unsigned int wordBytes = static_cast<unsigned int>(format.containerBits / 8);
+        if (wordBytes == 0 || source.sampleRate <= 0 ||
+            source.sampleRate % static_cast<int32_t>(wordBytes) != 0) continue;
+        const unsigned int rate = static_cast<unsigned int>(source.sampleRate) / wordBytes;
+        if (tryOpenConfigured(device, rate, static_cast<unsigned int>(source.channels), format,
+                request.bufferMillis, configured, failure)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 size_t queuedBufferFrames(const std::vector<uint8_t> &bytes, size_t offsetFrames, int32_t frameBytes) {
     if (frameBytes <= 0) return 0;
     const size_t totalFrames = bytes.size() / static_cast<size_t>(frameBytes);
@@ -419,6 +440,57 @@ extern "C" int32_t lazer_audio_test_alsa_dop_null_negotiation(int32_t carrierRat
     *actualChannels = static_cast<int32_t>(configured.channels);
     *validBits = 24;
     *containerBits = 24;
+    snd_pcm_close(configured.pcm);
+    return LazerAudioOk;
+}
+
+extern "C" int32_t lazer_audio_test_alsa_native_dsd_null_negotiation(
+    int32_t dsdByteClock, int32_t dsdRateMultiplier, int32_t channels, int32_t formatIndex,
+    int32_t *actualRate, int32_t *actualChannels, int32_t *validBits,
+    int32_t *containerBits, int32_t *formatSelection) {
+    if (dsdByteClock <= 0 || dsdByteClock > 5'644'800 ||
+        (channels != 1 && channels != 2) || formatIndex < -1 || formatIndex >= 5 ||
+        actualRate == nullptr ||
+        actualChannels == nullptr || validBits == nullptr || containerBits == nullptr ||
+        formatSelection == nullptr) {
+        return LazerAudioErrorInvalidArgument;
+    }
+
+    AudioOutputRequest request;
+    request.exclusive = true;
+    request.requireNativeDsd = true;
+    request.desired.nativeDsd = true;
+    request.desired.sampleRate = dsdByteClock;
+    request.desired.channels = channels;
+    request.bufferMillis = 120;
+    StreamDescription source;
+    source.dsd = true;
+    source.rawDsd = true;
+    source.sampleRate = dsdByteClock;
+    source.channels = channels;
+    source.dsdRateMultiplier = dsdRateMultiplier;
+    std::string failure;
+    if (!validNativeDsdRequest(request, source, failure)) return LazerAudioErrorUnsupported;
+
+    ConfiguredPcm configured;
+    if (!tryOpenNativeDsdConfigured("null", request, source, configured, failure,
+            formatIndex)) {
+        return LazerAudioErrorUnsupported;
+    }
+    const auto formats = nativeDsdFormats();
+    const auto selected = std::find_if(formats.begin(), formats.end(),
+        [&configured](const FormatChoice &choice) {
+            return choice.alsaFormat == configured.format;
+        });
+    if (selected == formats.end()) {
+        snd_pcm_close(configured.pcm);
+        return LazerAudioErrorUnsupported;
+    }
+    *actualRate = static_cast<int32_t>(configured.rate);
+    *actualChannels = static_cast<int32_t>(configured.channels);
+    *validBits = selected->validBits;
+    *containerBits = selected->containerBits;
+    *formatSelection = configured.formatSelection;
     snd_pcm_close(configured.pcm);
     return LazerAudioOk;
 }
@@ -532,16 +604,7 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     std::string lastFailure;
     bool found = false;
     if (request.requireNativeDsd) {
-        for (const FormatChoice &format : formats) {
-            const unsigned int wordBytes = static_cast<unsigned int>(format.containerBits / 8);
-            if (wordBytes == 0 || source.sampleRate % static_cast<int32_t>(wordBytes) != 0) continue;
-            const unsigned int rate = static_cast<unsigned int>(source.sampleRate) / wordBytes;
-            if (tryOpenConfigured(device, rate, sourceChannels, format,
-                request.bufferMillis, configured, lastFailure)) {
-                found = true;
-                break;
-            }
-        }
+        found = tryOpenNativeDsdConfigured(device, request, source, configured, lastFailure);
     } else {
         for (const unsigned int rate : rates) {
             for (const unsigned int channelCount : channels) {

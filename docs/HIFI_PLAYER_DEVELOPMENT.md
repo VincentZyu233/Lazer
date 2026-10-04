@@ -4,6 +4,7 @@
 
 > 2026-10-05 CI 更新：前一轮 [Actions #37227900339](https://github.com/Bad0RANG3/Lazer/actions/runs/37227900339) 全部通过。新一轮 [Actions #37231000341](https://github.com/Bad0RANG3/Lazer/actions/runs/37231000341) 也已全部通过，新增 Fedora 44 RPM 干净安装、ldd 依赖解析和 JNA/ALSA 目录冒烟；Windows、Linux、macOS、Android、iOS 设备构建和 iOS 模拟器检查均成功。该 run 总耗时 23 分钟，包含 macOS runner 容量等待。CI 成功仅证明构建与软件侧测试，不等于实体 DAC bit-perfect 或物理采样率验证。下文较早实现记录保留当时状态；与本更新冲突的待验证描述以本更新为准。
 > 2026-10-05 Native DSD 开发进展：Linux ALSA 原生输出现只对 raw DSD 使用直连 `hw:`，按 DSD 字节时钟和 U8/U16/U32 字宽协商精确 ALSA 格式；U16/U32 按端序组字，DoP 与 PCM 路径保持独立。遇到设备不支持时明确失败，不静默转 PCM/DoP。Native DSD 会旁路 EQ、限幅、软件音量和 ReplayGain，并在时钟格式不连续的 XRUN 后停止；Native DSD 当前不做 gapless 预取，逐曲重开端点。离线打包与 fake-output 引擎探针已通过 Windows Release 构建，Linux ALSA 构建、ALSA null/snd-aloop 和实体 DAC 确认仍待 CI/硬件验证。报告的 ALSA 会话格式不等于 DAC 已识别 Native DSD。
+> 2026-10-05 Native DSD payload 回归：复核发现 `AudioSource::emitAVFrame` 曾把“未配置 PCM 重采样器”一律视为跳过，因此虽然 Native DSD 会话可打开，raw DSD 解码帧仍被丢弃，输出可能只有 `0x69` idle。入口条件已修正，并把 fake-output 引擎探针改为等到捕获已知合成 DSF 的 U32_BE 声道样本；这避免只凭“写出过字节”误判成功。Linux ALSA 输出探针现会用测试专属 ALSA `null` 参数协商检查 DSD64–1024、单/双声道的精确 DSD 字节时钟和五种 U8/U16/U32 端序格式，并确认公共 Native DSD API 仍拒绝 `null`/`plughw:`；null 只验证 ALSA 参数协商，不验证 `hw:` 驱动或 DAC。Windows Release 完整 CTest 15/15 通过；Actions #37241111573 对上一提交的 Linux job 已通过，但本次帧输出修复及 ALSA 参数矩阵仍待新 CI 确认。
 
 ## 1. 目标与完成标准
 

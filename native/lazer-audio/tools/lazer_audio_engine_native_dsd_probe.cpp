@@ -25,6 +25,9 @@ constexpr int32_t kNativeDsdRate = 88'200; // U32 words at the DSD byte clock
 constexpr int32_t kStereo = 2;
 constexpr int32_t kNativeFrameBytes = kStereo * 4;
 constexpr int32_t kDsfBlockBytes = 4096;
+constexpr std::array<uint8_t, kNativeFrameBytes> kExpectedFirstFrame{
+    0xAA, 0x55, 0xAA, 0x55, 0x33, 0xCC, 0x33, 0xCC,
+};
 
 void append16(std::vector<uint8_t> &bytes, uint16_t value) {
     bytes.push_back(static_cast<uint8_t>(value));
@@ -213,10 +216,15 @@ private:
     std::atomic<bool> open_{false};
 };
 
-bool waitForWrite(const std::shared_ptr<Capture> &capture) {
+bool hasExpectedDsdPayload(const Capture &capture) {
+    return std::search(capture.bytes.begin(), capture.bytes.end(),
+        kExpectedFirstFrame.begin(), kExpectedFirstFrame.end()) != capture.bytes.end();
+}
+
+bool waitForNativePayload(const std::shared_ptr<Capture> &capture) {
     std::unique_lock guard(capture->mutex);
     return capture->changed.wait_for(guard, std::chrono::seconds(5), [&capture] {
-        return capture->writeCount > 0;
+        return hasExpectedDsdPayload(*capture);
     });
 }
 
@@ -270,7 +278,7 @@ int runNativeDsdCase() {
         return fail("EQ was accepted during Native DSD output");
     }
 
-    if (engine->play() != LazerAudioOk || !waitForWrite(capture)) {
+    if (engine->play() != LazerAudioOk || !waitForNativePayload(capture)) {
         std::cerr << "play error: " << engine->lastError() << '\n';
         engine->destroy();
         return fail("Native DSD output did not submit packed frames to the fake endpoint");
@@ -294,6 +302,11 @@ int runNativeDsdCase() {
         capture->writeCount == 0 || capture->bytes.empty() ||
         capture->bytes.size() % kNativeFrameBytes != 0) {
         return fail("the fake endpoint did not receive the exact direct U32 Native DSD clock and frames");
+    }
+    const auto firstPackedDsdFrame = std::search(capture->bytes.begin(), capture->bytes.end(),
+        kExpectedFirstFrame.begin(), kExpectedFirstFrame.end());
+    if (firstPackedDsdFrame == capture->bytes.end()) {
+        return fail("Native DSD output contained no source payload matching the packed DSF data");
     }
     std::cout << "PASS: DSD64 opened as exclusive Native DSD U32_BE at 88.2 kHz; telemetry, DSP guards and stop are correct\n";
     return 0;
