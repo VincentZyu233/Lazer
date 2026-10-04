@@ -521,7 +521,7 @@ extern "C" int32_t lazer_audio_test_alsa_dop_suspend_resume(int32_t alsaError,
     }
     int calls = 0;
     int waits = 0;
-    const AlsaRecoveryResult result = resumeAlsaDopSuspend(alsaError, -ESTRPIPE, -EAGAIN,
+    const AlsaRecoveryResult result = resumeAlsaDirectDsdSuspend(alsaError, -ESTRPIPE, -EAGAIN,
         [&]() {
             ++calls;
             return calls <= retryCount ? -EAGAIN : finalResumeResult;
@@ -558,8 +558,19 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
         return LazerAudioErrorUnsupported;
     }
 
+#if defined(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
+    std::string device = request.deviceId.empty() ? "hw:0,0" : request.deviceId;
+    const bool testNativeDsdNull = request.requireNativeDsd &&
+        device == "lazer-test:alsa-null";
+    if (testNativeDsdNull) device = "null";
+#else
     const std::string device = request.deviceId.empty() ? "hw:0,0" : request.deviceId;
-    if ((request.requireDoP || request.requireNativeDsd) && !isHwDeviceName(device)) {
+#endif
+    if ((request.requireDoP || request.requireNativeDsd) && !isHwDeviceName(device)
+#if defined(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
+        && !testNativeDsdNull
+#endif
+        ) {
         error = request.requireDoP
             ? "ALSA DoP output requires a direct hw: device; ALSA plugins and the test null PCM are not accepted"
             : "ALSA Native DSD requires a direct hw: device; ALSA plugins are not accepted";
@@ -997,20 +1008,18 @@ int32_t AlsaOutput::recover(std::string &error, int alsaError) {
     if (pcm_ == nullptr) return LazerAudioErrorState;
     auto *pcm = static_cast<snd_pcm_t *>(pcm_);
     if (session_.doP || session_.nativeDsd) {
-        if (alsaError == -EPIPE) {
-            error = session_.doP
-                ? "DoP output stopped after ALSA XRUN because carrier frame loss makes marker phase unknown"
-                : "Native DSD output stopped after ALSA XRUN because DSD word loss breaks stream continuity";
-            return LazerAudioErrorDevice;
-        }
-
-        const AlsaRecoveryResult result = resumeAlsaDopSuspend(alsaError, -ESTRPIPE, -EAGAIN,
+        const AlsaRecoveryResult result = recoverAlsaDirectDsd(alsaError, -EPIPE, -ESTRPIPE,
+            -EAGAIN,
             [pcm]() { return snd_pcm_resume(pcm); },
             []() { (void) poll(nullptr, 0, 1000); });
         const int resumeError = result.error;
         const bool resumed = result.outcome == AlsaRecoveryOutcome::SuspendResumed;
         if (!resumed) {
-            if (alsaError == -ESTRPIPE) {
+            if (alsaError == -EPIPE) {
+                error = session_.doP
+                    ? "DoP output stopped after ALSA XRUN because carrier frame loss makes marker phase unknown"
+                    : "Native DSD output stopped after ALSA XRUN because DSD word loss breaks stream continuity";
+            } else if (alsaError == -ESTRPIPE) {
                 error = alsaErrorText(session_.doP
                     ? "DoP output stopped because ALSA suspend could not resume without resetting the carrier queue"
                     : "Native DSD output stopped because ALSA suspend could not resume without resetting the DSD queue",
@@ -1028,8 +1037,9 @@ int32_t AlsaOutput::recover(std::string &error, int alsaError) {
             return LazerAudioErrorDevice;
         }
         if (log_ != nullptr) {
-            log_->write(LazerAudioLogInfo,
-                "DoP ALSA suspend resumed with the existing carrier queue preserved");
+            log_->write(LazerAudioLogInfo, session_.doP
+                ? "DoP ALSA suspend resumed with the existing carrier queue preserved"
+                : "Native DSD ALSA suspend resumed with the existing DSD queue preserved");
         }
         error.clear();
         return LazerAudioOk;

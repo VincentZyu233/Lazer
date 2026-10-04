@@ -133,7 +133,7 @@ bool testPcmSuspendResumeRetryLimitFallsBackToPrepareAndRequeuesPendingFrames() 
 bool testDopSuspendResumeRetryLimitFailsWithoutResettingQueue() {
     int resumeCalls = 0;
     int waitCalls = 0;
-    const auto result = lazer::audio::resumeAlsaDopSuspend(
+    const auto result = lazer::audio::resumeAlsaDirectDsdSuspend(
         kSuspend, kSuspend, kTryAgain,
         [&resumeCalls]() { ++resumeCalls; return kTryAgain; },
         [&waitCalls]() { ++waitCalls; });
@@ -147,13 +147,100 @@ bool testDopSuspendResumeRetryLimitFailsWithoutResettingQueue() {
 bool testDopSuspendResumePreservesQueueAfterTransientEagain() {
     int resumeCalls = 0;
     int waitCalls = 0;
-    const auto result = lazer::audio::resumeAlsaDopSuspend(
+    const auto result = lazer::audio::resumeAlsaDirectDsdSuspend(
         kSuspend, kSuspend, kTryAgain,
         [&resumeCalls]() { return ++resumeCalls <= 2 ? kTryAgain : 0; },
         [&waitCalls]() { ++waitCalls; });
 
     return result.outcome == lazer::audio::AlsaRecoveryOutcome::SuspendResumed &&
         result.error == 0 && resumeCalls == 3 && waitCalls == 2;
+}
+
+bool testNativeDsdXrunFailsWithoutResumeOrWait() {
+    std::vector<uint8_t> staged{0xb0, 0xb1};
+    size_t stagedOffset = 0;
+    std::vector<uint8_t> submitted{0xa0, 0xa1};
+    size_t submittedOffset = 0;
+    int resumeCalls = 0;
+    int waitCalls = 0;
+    const auto result = lazer::audio::recoverAlsaDirectDsd(
+        kXrun, kXrun, kSuspend, kTryAgain,
+        [&resumeCalls]() { ++resumeCalls; return 0; },
+        [&waitCalls]() { ++waitCalls; });
+    lazer::audio::reconcileAlsaRecoveryQueues(result.outcome,
+        staged, stagedOffset, submitted, submittedOffset, 2);
+    return result.outcome == lazer::audio::AlsaRecoveryOutcome::Failed &&
+        result.error == kXrun && resumeCalls == 0 && waitCalls == 0 &&
+        expectBytes(submitted, {0xa0, 0xa1},
+            "Native DSD XRUN modified the submitted mirror") &&
+        expectBytes(staged, {0xb0, 0xb1},
+            "Native DSD XRUN modified the staged queue");
+}
+
+bool testNativeDsdSuspendResumePreservesQueues() {
+    std::vector<uint8_t> staged{0xb0, 0xb1};
+    size_t stagedOffset = 0;
+    std::vector<uint8_t> submitted{0xa0, 0xa1};
+    size_t submittedOffset = 0;
+    int resumeCalls = 0;
+    int waitCalls = 0;
+    const auto result = lazer::audio::recoverAlsaDirectDsd(
+        kSuspend, kXrun, kSuspend, kTryAgain,
+        [&resumeCalls]() { return ++resumeCalls <= 2 ? kTryAgain : 0; },
+        [&waitCalls]() { ++waitCalls; });
+    lazer::audio::reconcileAlsaRecoveryQueues(result.outcome,
+        staged, stagedOffset, submitted, submittedOffset, 2);
+    return result.outcome == lazer::audio::AlsaRecoveryOutcome::SuspendResumed &&
+        result.error == 0 && resumeCalls == 3 && waitCalls == 2 &&
+        submittedOffset == 0 && stagedOffset == 0 &&
+        expectBytes(submitted, {0xa0, 0xa1},
+            "Native DSD suspend resume lost or replayed already submitted frames") &&
+        expectBytes(staged, {0xb0, 0xb1},
+            "Native DSD suspend resume changed frames still in the staging queue");
+}
+
+bool testNativeDsdSuspendFailureIsTerminalWithoutRequeue() {
+    std::vector<uint8_t> staged{0xb0, 0xb1};
+    size_t stagedOffset = 0;
+    std::vector<uint8_t> submitted{0xa0, 0xa1};
+    size_t submittedOffset = 0;
+    int resumeCalls = 0;
+    int waitCalls = 0;
+    const auto result = lazer::audio::recoverAlsaDirectDsd(
+        kSuspend, kXrun, kSuspend, kTryAgain,
+        [&resumeCalls]() { ++resumeCalls; return kNotSupported; },
+        [&waitCalls]() { ++waitCalls; });
+    lazer::audio::reconcileAlsaRecoveryQueues(result.outcome,
+        staged, stagedOffset, submitted, submittedOffset, 2);
+    return result.outcome == lazer::audio::AlsaRecoveryOutcome::Failed &&
+        result.error == kNotSupported && resumeCalls == 1 && waitCalls == 0 &&
+        expectBytes(submitted, {0xa0, 0xa1},
+            "failed Native DSD resume modified submitted bytes") &&
+        expectBytes(staged, {0xb0, 0xb1},
+            "failed Native DSD resume modified staged bytes");
+}
+
+bool testNativeDsdSuspendRetryExhaustionStopsWithoutReprepare() {
+    std::vector<uint8_t> staged{0xb0, 0xb1};
+    size_t stagedOffset = 0;
+    std::vector<uint8_t> submitted{0xa0, 0xa1};
+    size_t submittedOffset = 0;
+    int resumeCalls = 0;
+    int waitCalls = 0;
+    const auto result = lazer::audio::recoverAlsaDirectDsd(
+        kSuspend, kXrun, kSuspend, kTryAgain,
+        [&resumeCalls]() { ++resumeCalls; return kTryAgain; },
+        [&waitCalls]() { ++waitCalls; });
+    lazer::audio::reconcileAlsaRecoveryQueues(result.outcome,
+        staged, stagedOffset, submitted, submittedOffset, 2);
+    return result.outcome == lazer::audio::AlsaRecoveryOutcome::Failed &&
+        result.error == kTryAgain &&
+        resumeCalls == static_cast<int>(lazer::audio::kAlsaSuspendResumeMaxWaitIntervals + 1) &&
+        waitCalls == static_cast<int>(lazer::audio::kAlsaSuspendResumeMaxWaitIntervals) &&
+        expectBytes(submitted, {0xa0, 0xa1},
+            "Native DSD retry exhaustion modified submitted bytes") &&
+        expectBytes(staged, {0xb0, 0xb1},
+            "Native DSD retry exhaustion modified staged bytes");
 }
 
 bool testAvailabilityIsQueriedAgainAfterXrunAndSuspendRecovery() {
@@ -215,6 +302,10 @@ int main() {
     passed &= testPcmSuspendResumeRetryLimitFallsBackToPrepareAndRequeuesPendingFrames();
     passed &= testDopSuspendResumeRetryLimitFailsWithoutResettingQueue();
     passed &= testDopSuspendResumePreservesQueueAfterTransientEagain();
+    passed &= testNativeDsdXrunFailsWithoutResumeOrWait();
+    passed &= testNativeDsdSuspendResumePreservesQueues();
+    passed &= testNativeDsdSuspendFailureIsTerminalWithoutRequeue();
+    passed &= testNativeDsdSuspendRetryExhaustionStopsWithoutReprepare();
     passed &= testAvailabilityIsQueriedAgainAfterXrunAndSuspendRecovery();
     passed &= testPrepareFailureLeavesMirrorsForErrorHandling();
     if (!passed) return 1;

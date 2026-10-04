@@ -471,9 +471,9 @@ if(LAZER_AUDIO_BUILD_PROBE)
     endif()
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
-        # This probe opens a test-only ALSA null PCM through the real AlsaOutput implementation,
-        # checks exact Native DSD/DoP rate negotiation, and has an explicit --loopback mode for a
-        # real snd-aloop digital capture test. Null PCM is never accepted by production output.
+        # This probe exercises Native DSD/DoP negotiation and the real AlsaOutput lifecycle over a
+        # test-only ALSA null PCM, plus an explicit --loopback mode for snd-aloop digital capture.
+        # Null PCM is never accepted by production output.
         target_compile_definitions(lazer-audio PRIVATE LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
         add_executable(lazer-audio-alsa-output-probe tools/lazer_audio_alsa_output_probe.cpp)
         target_include_directories(lazer-audio-alsa-output-probe PRIVATE

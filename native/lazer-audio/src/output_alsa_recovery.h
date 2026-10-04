@@ -42,10 +42,10 @@ int resumeAlsaSuspendBounded(int errorCode, int suspendCode, int retryCode,
     }
 }
 
-/* DoP cannot use snd_pcm_prepare as a fallback: resetting ALSA would discard queued carrier bytes
- * and make the next marker phase unknowable. This helper intentionally exposes no prepare path. */
+/* Direct DSD cannot use snd_pcm_prepare as a fallback: resetting ALSA would discard queued bytes
+ * and make the next carrier marker or native DSD word phase unknowable. */
 template <typename Resume, typename Wait>
-AlsaRecoveryResult resumeAlsaDopSuspend(int errorCode, int suspendCode, int retryCode,
+AlsaRecoveryResult resumeAlsaDirectDsdSuspend(int errorCode, int suspendCode, int retryCode,
     Resume &&resume, Wait &&wait) {
     if (errorCode != suspendCode) return {AlsaRecoveryOutcome::Failed, errorCode};
     const int result = resumeAlsaSuspendBounded(errorCode, suspendCode, retryCode,
@@ -53,6 +53,17 @@ AlsaRecoveryResult resumeAlsaDopSuspend(int errorCode, int suspendCode, int retr
     return result >= 0
         ? AlsaRecoveryResult{AlsaRecoveryOutcome::SuspendResumed, 0}
         : AlsaRecoveryResult{AlsaRecoveryOutcome::Failed, result};
+}
+
+/* Direct DSD cannot be reset after an XRUN or an unsuccessful suspend resume: the byte/word
+ * position in the source is no longer known to match the device. Keep this policy shared by DoP
+ * and Native DSD so neither path falls back to prepare/replaying a potentially shifted stream. */
+template <typename Resume, typename Wait>
+AlsaRecoveryResult recoverAlsaDirectDsd(int errorCode, int xrunCode, int suspendCode,
+    int retryCode, Resume &&resume, Wait &&wait) {
+    if (errorCode == xrunCode) return {AlsaRecoveryOutcome::Failed, errorCode};
+    return resumeAlsaDirectDsdSuspend(errorCode, suspendCode, retryCode,
+        std::forward<Resume>(resume), std::forward<Wait>(wait));
 }
 
 template <typename Resume, typename Prepare, typename Wait>

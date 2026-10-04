@@ -522,6 +522,91 @@ bool exerciseNativeDsdExactFormatNegotiation() {
     return true;
 }
 
+bool exerciseNativeDsdOutputLifecycle() {
+    constexpr int32_t dsdByteClock = 352'800;
+    constexpr std::array<int32_t, 5> nativeDsdSelections{
+        LazerAudioFormatSelectionNativeDsdU32Be,
+        LazerAudioFormatSelectionNativeDsdU32Le,
+        LazerAudioFormatSelectionNativeDsdU16Be,
+        LazerAudioFormatSelectionNativeDsdU16Le,
+        LazerAudioFormatSelectionNativeDsdU8,
+    };
+    auto request = exactNativeDsdRequest("lazer-test:alsa-null");
+    const auto source = rawDsdDescription();
+    lazer::audio::AlsaOutput output;
+    lazer::audio::AudioOutputSession session;
+    std::string error;
+    const int32_t opened = output.open(request, source, session, error, nullptr);
+    if (opened != LazerAudioOk || !output.isOpen()) {
+        return fail("test-only ALSA null route could not open the Native DSD output object: " + error);
+    }
+
+    const int32_t wordBytes = session.target.containerBitsPerSample / 8;
+    if (!session.nativeDsd || session.doP || session.exclusive ||
+        session.target.channels != source.channels || wordBytes <= 0 ||
+        static_cast<int64_t>(session.target.sampleRate) * wordBytes != dsdByteClock ||
+        session.target.bitsPerSample != session.target.containerBitsPerSample ||
+        std::find(nativeDsdSelections.begin(), nativeDsdSelections.end(),
+            session.formatSelection) == nativeDsdSelections.end()) {
+        return fail("Native DSD null session did not report its exact non-hardware output tuple");
+    }
+
+    const auto submitFewCompleteWords = [&output, &session, &error]() {
+        const int32_t writable = output.writableFrames(error);
+        if (writable <= 0) {
+            return fail("Native DSD ALSA null route reported no writable frames: " + error);
+        }
+        const int32_t frameCount = std::min(writable, 4);
+        const int32_t frameBytes = session.target.frameBytes();
+        if (frameBytes <= 0) return fail("Native DSD ALSA session reported an invalid frame size");
+        std::vector<uint8_t> payload(static_cast<size_t>(frameCount) *
+            static_cast<size_t>(frameBytes));
+        for (size_t index = 0; index < payload.size(); ++index) {
+            payload[index] = static_cast<uint8_t>((index * 37 + 0x5a) & 0xff);
+        }
+        const int32_t written = output.write(payload.data(), frameCount, error);
+        return written == frameCount || fail("Native DSD ALSA null write failed: " + error);
+    };
+    const auto drainWithinBound = [&output, &error](const char *stage) {
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            if (output.waitForReady(10, error) == lazer::audio::OutputWaitResult::Error) {
+                return fail(std::string("Native DSD ALSA null readiness failed during ") + stage +
+                    ": " + error);
+            }
+            const auto drain = output.drain(error);
+            if (drain == lazer::audio::OutputDrainResult::Error) {
+                return fail(std::string("Native DSD ALSA null drain failed during ") + stage +
+                    ": " + error);
+            }
+            if (drain == lazer::audio::OutputDrainResult::Drained) return true;
+        }
+        return fail(std::string("Native DSD ALSA null queue did not drain during ") + stage);
+    };
+
+    if (output.start(error) != LazerAudioOk || !submitFewCompleteWords()) {
+        return fail("Native DSD ALSA null route failed to start and submit complete words: " + error);
+    }
+    const auto readiness = output.waitForReady(0, error);
+    if (readiness == lazer::audio::OutputWaitResult::Error || output.queuedFrames(error) < 0 ||
+        !drainWithinBound("initial write")) {
+        return fail("Native DSD ALSA null route failed readiness, queue, or drain observation: " + error);
+    }
+    if (output.stop(error) != LazerAudioOk || output.start(error) != LazerAudioOk ||
+        !submitFewCompleteWords()) {
+        return fail("Native DSD ALSA null route failed stop/resume and second write: " + error);
+    }
+    if (output.reset(error) != LazerAudioOk || output.queuedFrames(error) != 0 ||
+        output.start(error) != LazerAudioOk || !submitFewCompleteWords() ||
+        !drainWithinBound("post-reset write")) {
+        return fail("Native DSD ALSA null route failed reset and subsequent output: " + error);
+    }
+
+    output.close();
+    if (output.isOpen()) return fail("Native DSD ALSA null route remained open after close");
+    std::puts("PASS: Native DSD ALSA output object opens, writes, stops/resumes, resets, drains and closes");
+    return true;
+}
+
 bool exerciseDopExactCarrierNegotiation() {
     for (const int32_t channels : {1, 2}) {
         int32_t actualRate = 0;
@@ -621,6 +706,7 @@ int main(int argc, char **argv) {
     passed &= exerciseFormat(24);
     passed &= exerciseFormat(32);
     passed &= exerciseNativeDsdExactFormatNegotiation();
+    passed &= exerciseNativeDsdOutputLifecycle();
     passed &= exerciseDopExactCarrierNegotiation();
     passed &= exerciseDopMarkerBytesPassThrough();
     passed &= exerciseDopRecoveryFailsWhenMarkerPhaseIsUnknown();
