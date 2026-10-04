@@ -322,6 +322,44 @@ jobs:
           done
           ./gradlew :desktopApp:test --tests 'dev.naominet.lazer.DesktopAudioOutputDeviceTest' \
             -PlazerNativeAudio=false "-PlazerAudioLibrary=$installed_native" --no-daemon --rerun-tasks --stacktrace
+      - name: Install RPM in Fedora and verify native loading
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          rpm_file="$(find desktopApp/build/compose/binaries -name '*.rpm' -print -quit)"
+          test -n "$rpm_file"
+          rpm_package="$(rpm -qp --queryformat '%{NAME}' "$rpm_file")"
+          rpm_relative_path="$(realpath --relative-to="$GITHUB_WORKSPACE" "$rpm_file")"
+          rpm_install_root="$RUNNER_TEMP/lazer-rpm-install"
+          mkdir -p "$rpm_install_root"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$rpm_install_root:/rpm-installed" \
+            --env "RPM_RELATIVE_PATH=$rpm_relative_path" \
+            --env "RPM_PACKAGE_NAME=$rpm_package" \
+            --workdir /workspace \
+            registry.fedoraproject.org/fedora:44 \
+            bash -euo pipefail -c '
+              mkdir -p /etc/xdg/menus /usr/share/desktop-directories
+              dnf -y install "/workspace/$RPM_RELATIVE_PATH"
+              rpm -q "$RPM_PACKAGE_NAME"
+              installed_native="$(rpm -ql "$RPM_PACKAGE_NAME" | grep -E "/lib/app/resources/native/linux-x64/liblazer-audio\\.so$" | head -n 1)"
+              test -n "$installed_native"
+              test -f "$installed_native"
+              native_dir="$(dirname "$installed_native")"
+              ldd -r "$installed_native" | tee /tmp/lazer-rpm-native-deps.txt
+              for component in avformat avcodec avutil swresample; do
+                grep -F "$native_dir/lib$component.so" /tmp/lazer-rpm-native-deps.txt
+              done
+              mkdir -p "/rpm-installed$native_dir"
+              cp -a "$native_dir/." "/rpm-installed$native_dir/"
+              printf "%s\\n" "$installed_native" > /rpm-installed/native-path.txt
+            '
+          installed_native_path="$(cat "$rpm_install_root/native-path.txt")"
+          installed_native="$rpm_install_root$installed_native_path"
+          test -f "$installed_native"
+          ./gradlew :desktopApp:test --tests 'dev.naominet.lazer.DesktopAudioOutputDeviceTest' \
+            -PlazerNativeAudio=false "-PlazerAudioLibrary=$installed_native" --no-daemon --rerun-tasks --stacktrace
       - name: Assemble AppImage
         shell: bash
         run: |
