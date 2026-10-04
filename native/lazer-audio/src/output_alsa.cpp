@@ -332,7 +332,7 @@ bool tryOpenConfigured(const std::string &device, unsigned int rate, unsigned in
     return true;
 }
 
-size_t queuedFrames(const std::vector<uint8_t> &bytes, size_t offsetFrames, int32_t frameBytes) {
+size_t queuedBufferFrames(const std::vector<uint8_t> &bytes, size_t offsetFrames, int32_t frameBytes) {
     if (frameBytes <= 0) return 0;
     const size_t totalFrames = bytes.size() / static_cast<size_t>(frameBytes);
     return totalFrames > offsetFrames ? totalFrames - offsetFrames : 0;
@@ -812,8 +812,8 @@ int32_t AlsaOutput::flushStaged(std::string &error) {
     int32_t normalized = normalizeAlsaState(error);
     if (normalized != LazerAudioOk) return normalized;
 
-    while (queuedFrames(stagedBytes_, stagedOffsetFrames_, frameBytes_) > 0) {
-        const size_t pendingFrames = queuedFrames(
+    while (queuedBufferFrames(stagedBytes_, stagedOffsetFrames_, frameBytes_) > 0) {
+        const size_t pendingFrames = queuedBufferFrames(
             stagedBytes_, stagedOffsetFrames_, frameBytes_);
         const size_t offsetBytes = stagedOffsetFrames_ * static_cast<size_t>(frameBytes_);
         const uint8_t *source = stagedBytes_.data() + offsetBytes;
@@ -923,8 +923,8 @@ int32_t AlsaOutput::recover(std::string &error, int alsaError) {
 int32_t AlsaOutput::currentQueuedFrames(std::string &error) {
     if (pcm_ == nullptr) return LazerAudioErrorState;
     if (!running_) {
-        const size_t stoppedFrames = queuedFrames(stagedBytes_, stagedOffsetFrames_, frameBytes_) +
-            queuedFrames(submittedBytes_, submittedOffsetFrames_, frameBytes_);
+        const size_t stoppedFrames = queuedBufferFrames(stagedBytes_, stagedOffsetFrames_, frameBytes_) +
+            queuedBufferFrames(submittedBytes_, submittedOffsetFrames_, frameBytes_);
         return static_cast<int32_t>(std::min<size_t>(
             static_cast<size_t>(bufferFrames_), stoppedFrames));
     }
@@ -957,18 +957,18 @@ int32_t AlsaOutput::currentQueuedFrames(std::string &error) {
     const size_t hardwareFrames = static_cast<size_t>(bufferFrames_ -
         std::clamp<snd_pcm_sframes_t>(available, 0,
             static_cast<snd_pcm_sframes_t>(bufferFrames_)));
-    const size_t submittedFrames = queuedFrames(
+    const size_t submittedFrames = queuedBufferFrames(
         submittedBytes_, submittedOffsetFrames_, frameBytes_);
     if (submittedFrames > hardwareFrames) pruneSubmitted(submittedFrames - hardwareFrames);
 
-    const size_t stagedFrames = queuedFrames(stagedBytes_, stagedOffsetFrames_, frameBytes_);
+    const size_t stagedFrames = queuedBufferFrames(stagedBytes_, stagedOffsetFrames_, frameBytes_);
     const size_t total = std::min<size_t>(
         static_cast<size_t>(bufferFrames_), hardwareFrames + stagedFrames);
     return static_cast<int32_t>(total);
 }
 
 void AlsaOutput::pruneSubmitted(size_t framesPlayed) {
-    const size_t pending = queuedFrames(submittedBytes_, submittedOffsetFrames_, frameBytes_);
+    const size_t pending = queuedBufferFrames(submittedBytes_, submittedOffsetFrames_, frameBytes_);
     submittedOffsetFrames_ += std::min(framesPlayed, pending);
     compactQueue(submittedBytes_, submittedOffsetFrames_);
 }

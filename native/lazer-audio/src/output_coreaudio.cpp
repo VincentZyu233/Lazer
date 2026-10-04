@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cmath>
@@ -326,7 +327,12 @@ bool configureIoProcStreamUsage(AudioDeviceID device, AudioDeviceIOProcID ioProc
         streams.size() * sizeof(UInt32);
     std::vector<uint64_t> storage((byteCount + sizeof(uint64_t) - 1) / sizeof(uint64_t), 0);
     auto *usage = reinterpret_cast<AudioHardwareIOProcStreamUsage *>(storage.data());
-    usage->mIOProc = ioProc;
+    // CoreAudio's variable-length property payload identifies its IOProc through
+    // mIOProc, which is exposed as a raw pointer even though AudioDeviceIOProcID
+    // is a function pointer. The HAL treats this value as an opaque IOProc token;
+    // preserve its pointer representation without dereferencing it as data.
+    static_assert(sizeof(usage->mIOProc) == sizeof(ioProc));
+    usage->mIOProc = std::bit_cast<decltype(usage->mIOProc)>(ioProc);
     usage->mNumberStreams = static_cast<UInt32>(streams.size());
     bool foundStream = false;
     for (size_t index = 0; index < streams.size(); ++index) {
