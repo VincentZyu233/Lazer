@@ -20,7 +20,7 @@ import kotlinx.coroutines.withContext
 internal class IosPlayer(
     private val gateway: NeteaseMusicGateway,
     private val bridge: IosShellBridge,
-) : LazerPlayer, IosPlayerCommands {
+) : LazerPlayer, IosPlayerCommands, IosAudioSessionSink, IosPlaybackFailureSink {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var ticker: Job? = null
 
@@ -30,8 +30,11 @@ internal class IosPlayer(
     private var exclusive = false
     private var systemMedia = true
     private var didAttachCommands = false
+    private var playbackGeneration = 0L
+    private val playbackFailureGate = PlaybackFailureGenerationGate()
 
     init {
+        bridge.playerAttachAudioSessionSink(this)
         bridge.playerSetEndedHandler {
             scope.launch {
                 if (LazerPlaybackQueue.mode == LazerPlayMode.SingleLoop) {
@@ -42,6 +45,7 @@ internal class IosPlayer(
                 }
             }
         }
+        bridge.playerAttachFailureSink(this)
     }
 
     override fun currentQueue(): List<LazerTrack> = LazerPlaybackQueue.tracks
@@ -58,6 +62,8 @@ internal class IosPlayer(
             bridge.playerAttachCommands(this)
         }
         LazerPlaybackQueue.replace(queue, track)
+        val generation = ++playbackGeneration
+        playbackFailureGate.begin(generation)
         LazerPlaybackStateStore.update(
             LazerPlaybackSnapshot(
                 track = track,
@@ -66,7 +72,7 @@ internal class IosPlayer(
                 durationMillis = track.durationMillis,
             ),
         )
-        scope.launch { start(track, startPlaying, positionMillis) }
+        scope.launch { start(track, startPlaying, positionMillis, generation) }
     }
 
     override fun playAt(position: Int) {
@@ -135,16 +141,73 @@ internal class IosPlayer(
     override fun updateAudioLevels(enabled: Boolean) = Unit
 
     override fun stopAndClearSession() {
+        playbackGeneration += 1
+        playbackFailureGate.begin(playbackGeneration)
         bridge.playerPause()
         bridge.playerRelease()
         ticker?.cancel()
         LazerPlaybackStateStore.update(LazerPlaybackSnapshot())
     }
 
-    private suspend fun start(track: LazerTrack, startPlaying: Boolean, positionMillis: Long) {
-        val url = withContext(Dispatchers.Default) {
-            runCatching { gateway.songUrls(listOf(track.id)).data.firstOrNull()?.url }.getOrNull()
+    override fun didChangeAudioSession(
+        sourceTrackSampleRateHz: Double,
+        preferredSampleRateHz: Double,
+        sampleRateHz: Double,
+        outputChannelCount: Int,
+        outputRouteName: String,
+        outputPortTypes: String,
+        ioBufferDurationSeconds: Double,
+        active: Boolean,
+        interrupted: Boolean,
+        configurationError: String,
+    ) {
+        PlaybackAudioSessionStateStore.publish(
+            PlaybackAudioSessionSnapshot.fromSystemReadback(
+                sampleRateHz = sampleRateHz,
+                outputChannelCount = outputChannelCount,
+                outputRouteName = outputRouteName,
+                outputPortTypes = outputPortTypes,
+                ioBufferDurationSeconds = ioBufferDurationSeconds,
+                active = active,
+                interrupted = interrupted,
+                configurationError = configurationError,
+                sourceTrackSampleRateHz = sourceTrackSampleRateHz,
+                preferredSampleRateHz = preferredSampleRateHz,
+            ),
+        )
+    }
+
+    override fun didFailPlayback(generation: Long, detail: String) {
+        scope.launch {
+            if (generation != playbackGeneration || !playbackFailureGate.accept(generation)) return@launch
+            val state = snapshot.value
+            if (state.track == null || LazerPlaybackQueue.current() != state.track) return@launch
+            bridge.playerPause()
+            val reason = detail.trim().ifEmpty { tr("status.track_unplayable") }
+            LazerPlaybackStateStore.update(
+                state.copy(
+                    isPreparing = false,
+                    isPlaying = false,
+                    message = "${tr("status.playback_failed")}: $reason",
+                ),
+            )
+            publish()
         }
+    }
+
+    private suspend fun start(
+        track: LazerTrack,
+        startPlaying: Boolean,
+        positionMillis: Long,
+        generation: Long,
+    ) {
+        val url = when (val source = track.source) {
+            LazerTrackSource.GatewaySong -> withContext(Dispatchers.Default) {
+                runCatching { gateway.songUrls(listOf(track.id)).data.firstOrNull()?.url }.getOrNull()
+            }
+            is LazerTrackSource.LocalFile -> source.uri
+        }
+        if (generation != playbackGeneration) return
         if (url.isNullOrBlank()) {
             LazerPlaybackStateStore.update(
                 LazerPlaybackSnapshot(
@@ -154,7 +217,7 @@ internal class IosPlayer(
             )
             return
         }
-        bridge.playerLoad(url, startPlaying, positionMillis.coerceAtLeast(0L))
+        bridge.playerLoad(url, startPlaying, positionMillis.coerceAtLeast(0L), generation)
         if (startPlaying) startTicker()
         publish()
     }

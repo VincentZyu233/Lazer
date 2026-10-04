@@ -63,32 +63,36 @@ internal class DesktopPlaylistCache(
 
     fun loadTracks(playlistId: Long): CachedPlaylistTracks? = load(file("tracks", playlistId.toString())) { properties ->
         val count = properties.getProperty("count")?.toIntOrNull() ?: return@load null
-        val tracks = (0 until count).mapNotNull { index -> properties.readTrack("item.$index") }
+        // Read no further than the cap: a cache written before the cap existed can name tens of
+        // thousands of rows, and decoding them is the cost being avoided.
+        val tracks = (0 until minOf(count, MAX_TRACKS)).mapNotNull { index -> properties.readTrack("item.$index") }
         CachedPlaylistTracks(tracks, properties.getProperty("complete").toBoolean())
     }
 
     fun saveTracks(playlistId: Long, tracks: List<TrackItem>, complete: Boolean) {
+        val capped = tracks.take(MAX_TRACKS)
         val properties = Properties().apply {
             setProperty("version", CACHE_VERSION)
-            setProperty("count", tracks.size.toString())
+            setProperty("count", capped.size.toString())
             setProperty("complete", complete.toString())
             setProperty("savedAt", System.currentTimeMillis().toString())
-            tracks.forEachIndexed { index, track -> writeTrack("item.$index", track) }
+            capped.forEachIndexed { index, track -> writeTrack("item.$index", track) }
         }
         save(file("tracks", playlistId.toString()), properties)
     }
 
     fun loadLikedTracks(userId: Long): List<TrackItem> = load(file("liked", userId.toString())) { properties ->
         val count = properties.getProperty("count")?.toIntOrNull() ?: return@load emptyList()
-        (0 until count).mapNotNull { index -> properties.readTrack("item.$index") }
+        (0 until minOf(count, MAX_TRACKS)).mapNotNull { index -> properties.readTrack("item.$index") }
     } ?: emptyList()
 
     fun saveLikedTracks(userId: Long, tracks: List<TrackItem>) {
+        val capped = tracks.take(MAX_TRACKS)
         val properties = Properties().apply {
             setProperty("version", CACHE_VERSION)
-            setProperty("count", tracks.size.toString())
+            setProperty("count", capped.size.toString())
             setProperty("savedAt", System.currentTimeMillis().toString())
-            tracks.forEachIndexed { index, track -> writeTrack("item.$index", track) }
+            capped.forEachIndexed { index, track -> writeTrack("item.$index", track) }
         }
         save(file("liked", userId.toString()), properties)
     }
@@ -226,6 +230,7 @@ internal class DesktopPlaylistCache(
 
     private companion object {
         const val CACHE_VERSION = "1"
+        const val MAX_TRACKS = LazerPlaybackQueue.MAX_TRACKS
         val USER_COLLECTION_FILE = Regex("collection-user-(\\d+)\\.properties")
         val encoder: Base64.Encoder = Base64.getUrlEncoder().withoutPadding()
         val decoder: Base64.Decoder = Base64.getUrlDecoder()

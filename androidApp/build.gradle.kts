@@ -109,6 +109,7 @@ dependencies {
 
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.media3.exoplayer)
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.compose.animation)

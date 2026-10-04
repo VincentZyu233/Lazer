@@ -184,7 +184,7 @@ internal class IosLibraryCache(
                 deviceJson.decodeFromString(ListSerializer(StoredTrack.serializer()), encoded)
                     .map(StoredTrack::toTrack)
             }.getOrNull()
-        }.orEmpty()
+        }.orEmpty().take(LazerPlaybackQueue.MAX_TRACKS)
         memory[key] = decoded
         return decoded
     }
@@ -195,9 +195,10 @@ internal class IosLibraryCache(
 
     override fun saveTracks(playlistId: Long, tracks: List<LazerTrack>) {
         val key = "$PLAYLIST_TRACKS$playlistId"
-        memory[key] = tracks
+        val capped = tracks.take(LazerPlaybackQueue.MAX_TRACKS)
+        memory[key] = capped
         defaults.setObject(
-            deviceJson.encodeToString(ListSerializer(StoredTrack.serializer()), tracks.map(StoredTrack::from)),
+            deviceJson.encodeToString(ListSerializer(StoredTrack.serializer()), capped.map(StoredTrack::from)),
             key,
         )
     }

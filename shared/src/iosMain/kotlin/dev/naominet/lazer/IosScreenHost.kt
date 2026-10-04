@@ -30,6 +30,8 @@ interface IosShellBridge {
 
     fun pickImage(onPicked: (path: String?) -> Unit)
 
+    fun pickLocalAudioFiles(onPicked: (LazerLocalAudioPickerResult) -> Unit)
+
     fun share(text: String, title: String)
 
     /** Offers an already written file to the listener, who chooses where it goes. */
@@ -52,7 +54,7 @@ interface IosShellBridge {
      * translation is exactly what a player should not rest on; every decision about what plays next
      * stays in the shared queue.
      */
-    fun playerLoad(url: String, startPlaying: Boolean, positionMillis: Long)
+    fun playerLoad(url: String, startPlaying: Boolean, positionMillis: Long, generation: Long)
 
     fun playerPlay()
 
@@ -72,6 +74,9 @@ interface IosShellBridge {
     fun playerIsPlaying(): Boolean
 
     fun playerSetEndedHandler(handler: () -> Unit)
+
+    /** Reports an AVPlayerItem failure tagged with the queue generation that opened it. */
+    fun playerAttachFailureSink(sink: IosPlaybackFailureSink)
 
     /**
      * Hands Swift the object to call when a lock-screen or headset control is used. An object with
@@ -96,10 +101,34 @@ interface IosShellBridge {
      */
     fun playerSetAudioMode(exclusive: Boolean, systemMedia: Boolean)
 
+    /** Sends active AVAudioSession hardware/route readback; it never describes the DAC's input. */
+    fun playerAttachAudioSessionSink(sink: IosAudioSessionSink)
+
     /** Asks UIKit to watch, or stop watching, the system's edge swipe for the layer on top. */
     fun setBackGesture(enabled: Boolean, sink: IosBackGestureSink)
 
     fun setDarkStatusBar(dark: Boolean)
+}
+
+/** Scalar-only bridge callback so AVAudioSession output state can be shown by the shared UI. */
+interface IosAudioSessionSink {
+    fun didChangeAudioSession(
+        sourceTrackSampleRateHz: Double,
+        preferredSampleRateHz: Double,
+        sampleRateHz: Double,
+        outputChannelCount: Int,
+        outputRouteName: String,
+        outputPortTypes: String,
+        ioBufferDurationSeconds: Double,
+        active: Boolean,
+        interrupted: Boolean,
+        configurationError: String,
+    )
+}
+
+/** Scalar-only callback for AVPlayerItem failures; method parameters bridge as native scalars. */
+interface IosPlaybackFailureSink {
+    fun didFailPlayback(generation: Long, detail: String)
 }
 
 /**
@@ -224,11 +253,18 @@ internal class IosScreenHost(private val bridge: IosShellBridge) : LazerScreenHo
     /** iOS mixes through an audio session, not a focus stack, so the focus wording would mislead. */
     override val usesSystemAudioFocus: Boolean get() = false
 
+    override val supportsAudioSessionSnapshot: Boolean get() = true
+
+    override val supportsLocalAudioFiles: Boolean get() = true
+
     override fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit) = onResult(false)
 
     override val microphoneGranted: Boolean get() = false
 
     override fun pickBackgroundImage(onPicked: (source: String?) -> Unit) = bridge.pickImage(onPicked)
+
+    override fun pickLocalAudioFiles(onPicked: (LazerLocalAudioPickerResult) -> Unit) =
+        bridge.pickLocalAudioFiles(onPicked)
 
     override fun pickExportDestination(suggestedName: String, onPicked: (target: String?) -> Unit) {
         // iOS writes into the app's own container first; the listener chooses the destination after.

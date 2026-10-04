@@ -200,6 +200,8 @@ class LazerGatewayController(private val device: LazerDevice) {
         private set
     var exclusiveAudio by mutableStateOf(settings.exclusiveAudio)
         private set
+    var equalizer by mutableStateOf(settings.equalizer)
+        private set
     var playbackInterface by mutableStateOf(settings.playbackInterface)
         private set
     var audioReactiveLevels by mutableStateOf(settings.audioReactiveLevels)
@@ -261,6 +263,7 @@ class LazerGatewayController(private val device: LazerDevice) {
         private set
     var lyricsLoading by mutableStateOf(false)
         private set
+    private var lyricTrackId: Long? = null
     var lyricsMessage by mutableStateOf<String?>(null)
         private set
 
@@ -318,7 +321,7 @@ class LazerGatewayController(private val device: LazerDevice) {
     val listenTogetherShareUrl: String?
         get() {
             val room = listenTogether ?: return null
-            val songId = player.snapshot.value.track?.id
+            val songId = player.snapshot.value.track?.takeIf { it.source == LazerTrackSource.GatewaySong }?.id
                 ?: room.remoteTrackId
                 ?: LISTEN_TOGETHER_SHARE_FALLBACK_SONG_ID
             return dev.naominet.lazer.gateway.model.ListenTogetherInvite(
@@ -374,7 +377,12 @@ class LazerGatewayController(private val device: LazerDevice) {
 
     /** Paints the cached page first, then asks the service for the same page again. */
     fun openSongComments() {
-        val songId = player.snapshot.value.track?.id ?: return
+        val track = player.snapshot.value.track ?: return
+        if (track.source is LazerTrackSource.LocalFile) {
+            message = tr("player.local.online_only")
+            return
+        }
+        val songId = track.id
         isCommentSheetVisible = true
         val cached = commentPages[songId]
         comments = cached ?: LazerSongCommentState(songId = songId, loading = true)
@@ -488,6 +496,7 @@ class LazerGatewayController(private val device: LazerDevice) {
     }
 
     private fun requestSongComments(songId: Long, offset: Int, append: Boolean) {
+        if (songId <= 0L) return
         commentJob?.cancel()
         commentJob = scope.launch {
             comments = comments.copy(
@@ -520,6 +529,12 @@ class LazerGatewayController(private val device: LazerDevice) {
     }
 
     fun createListenTogetherRoom(kind: ListenTogetherRoomKind) {
+        if (player.snapshot.value.track?.source is LazerTrackSource.LocalFile ||
+            player.currentQueue().any { it.source is LazerTrackSource.LocalFile }
+        ) {
+            message = tr("player.local.online_only")
+            return
+        }
         val user = currentUser
         if (user == null) {
             openLogin()
@@ -565,7 +580,10 @@ class LazerGatewayController(private val device: LazerDevice) {
         val queue = listenTogetherQueue.ifEmpty { return emptyList() }
         val index = queue.indexOfFirst { it.id == currentId }
         if (index < 0) return emptyList()
-        return queue.drop(index + 1).map(LazerTrack::id).distinct()
+        return queue.drop(index + 1)
+            .filter { it.source == LazerTrackSource.GatewaySong }
+            .map(LazerTrack::id)
+            .distinct()
     }
 
     fun joinListenTogetherRoom(roomId: String, inviterId: Long) {
@@ -573,6 +591,12 @@ class LazerGatewayController(private val device: LazerDevice) {
     }
 
     fun joinListenTogether(invitation: String) {
+        if (player.snapshot.value.track?.source is LazerTrackSource.LocalFile ||
+            player.currentQueue().any { it.source is LazerTrackSource.LocalFile }
+        ) {
+            message = tr("player.local.online_only")
+            return
+        }
         pendingListenTogetherInvitation = invitation
         isListenTogetherVisible = true
         if (!hasCompletedBootstrap) return
@@ -629,10 +653,49 @@ class LazerGatewayController(private val device: LazerDevice) {
         }
     }
 
-    /** Starts local playback and remembers its queue so room participants receive the same order. */
+    /** Starts playback and remembers the queue order for any later Listen Together session. */
     fun play(queue: List<LazerTrack>, track: LazerTrack) {
-        listenTogetherQueue = queue.ifEmpty { listOf(track) }.distinctBy(LazerTrack::id)
-        player.play(listenTogetherQueue, track)
+        val requestedQueue = queue.ifEmpty { listOf(track) }.distinctBy(LazerTrack::id)
+        if (listenTogether != null && requestedQueue.any { it.source is LazerTrackSource.LocalFile }) {
+            message = tr("player.local.online_only")
+            return
+        }
+        listenTogetherQueue = requestedQueue
+        player.play(requestedQueue, track)
+    }
+
+    /** Replaces the current queue with files returned by the platform's document picker. */
+    fun playLocalAudioFiles(files: List<LazerPickedAudioFile>) {
+        if (files.isEmpty()) return
+        if (listenTogether != null) {
+            message = tr("player.local.online_only")
+            return
+        }
+        val tracks = files
+            .distinctBy(LazerPickedAudioFile::uri)
+            .take(LazerPlaybackQueue.MAX_TRACKS)
+            .map { file ->
+                LazerTrack(
+                    id = LazerLocalTrackIdentity.nextId(),
+                    title = file.title.ifBlank { file.uri.substringAfterLast('/').ifBlank { "Audio file" } },
+                    artist = file.artist,
+                    album = file.album,
+                    durationMillis = file.durationMillis.coerceAtLeast(0L),
+                    source = LazerTrackSource.LocalFile(file.uri),
+                )
+            }
+        if (tracks.isEmpty()) return
+        listenTogetherQueue = tracks
+        player.play(tracks, tracks.first())
+    }
+
+    fun handleLocalAudioPickerResult(result: LazerLocalAudioPickerResult) {
+        playLocalAudioFiles(result.files)
+        if (result.failedFileCount > 0) {
+            message = tr("player.local.import_failed")
+        } else if (result.unsupportedFileCount > 0) {
+            message = tr("player.local.unsupported")
+        }
     }
 
     fun seekTo(positionMillis: Long) {
@@ -689,8 +752,11 @@ class LazerGatewayController(private val device: LazerDevice) {
                         // Naming the room order is only worth a request when the order itself moved.
                         if (remote.trackIds != lastListenTogetherRoomQueueIds) {
                             lastListenTogetherRoomQueueIds = remote.trackIds
-                            runCatching { loadListenTogetherTracks(remote.trackIds) }
-                                .onSuccess { listenTogetherRoomQueue = it }
+                            // Naming the order only needs the rows a member can scroll through. Resolving a
+                            // host's whole list would ask for hundreds of detail pages for songs nobody sees.
+                            runCatching {
+                                loadListenTogetherTracks(remote.trackIds.take(LazerPlaybackQueue.MAX_TRACKS))
+                            }.onSuccess { listenTogetherRoomQueue = it }
                         }
                     }
                     listenTogether = room.copy(
@@ -801,7 +867,10 @@ class LazerGatewayController(private val device: LazerDevice) {
     ) {
         val room = listenTogether ?: return
         val track = snapshot.track ?: return
+        if (track.source is LazerTrackSource.LocalFile) return
         val queue = listenTogetherQueue.ifEmpty { listOf(track) }
+            .filter { it.source == LazerTrackSource.GatewaySong }
+        if (queue.isEmpty()) return
         val queueIds = queue.map(LazerTrack::id).distinct()
         if (forceQueue || queueIds != lastReportedQueueIds) {
             val userId = currentUser?.userId ?: return
@@ -1062,6 +1131,13 @@ class LazerGatewayController(private val device: LazerDevice) {
         player.updateExclusiveAudio(enabled)
     }
 
+    fun updateEqualizer(state: LazerEqualizerState) {
+        if (equalizer == state) return
+        equalizer = state
+        settings.equalizer = state
+        player.updateEqualizer(state)
+    }
+
     fun updateAudioReactiveLevels(enabled: Boolean) {
         if (audioReactiveLevels == enabled) return
         audioReactiveLevels = enabled
@@ -1094,6 +1170,10 @@ class LazerGatewayController(private val device: LazerDevice) {
     fun isSongLiked(songId: Long): Boolean = songId in likedSongIds
 
     fun toggleSongLiked(track: LazerTrack) {
+        if (track.source is LazerTrackSource.LocalFile) {
+            message = tr("player.local.online_only")
+            return
+        }
         val user = currentUser
         if (user == null) {
             openLogin()
@@ -1117,12 +1197,14 @@ class LazerGatewayController(private val device: LazerDevice) {
         val requestGeneration = ++playlistRequestGeneration
         playlistJob?.cancel()
         activePlaylist = playlist
-        val cachedTracks = cache.peekTracks(playlist.id).orEmpty()
+        // A cache written before the queue was capped can still hold the whole playlist on disk.
+        val cachedTracks = cache.peekTracks(playlist.id).orEmpty().take(LazerPlaybackQueue.MAX_TRACKS)
         activePlaylistTracks = cachedTracks
         isPlaylistLoading = true
         playlistJob = scope.launch {
             val persistedTracks = if (cachedTracks.isEmpty()) {
                 withContext(Dispatchers.Default) { cache.loadTracks(playlist.id) }
+                    .take(LazerPlaybackQueue.MAX_TRACKS)
             } else {
                 cachedTracks
             }
@@ -1229,7 +1311,12 @@ class LazerGatewayController(private val device: LazerDevice) {
     }
 
     fun loadLyrics(trackId: Long) {
+        if (trackId <= 0L) {
+            clearLyrics()
+            return
+        }
         lyricJob?.cancel()
+        lyricTrackId = trackId
         lyrics = emptyList()
         host.publishLyrics(trackId, emptyList())
         lyricsMessage = null
@@ -1254,6 +1341,16 @@ class LazerGatewayController(private val device: LazerDevice) {
                 lyricsLoading = false
             }
         }
+    }
+
+    fun clearLyrics() {
+        lyricJob?.cancel()
+        lyricJob = null
+        lyricTrackId?.let { host.publishLyrics(it, emptyList()) }
+        lyricTrackId = null
+        lyrics = emptyList()
+        lyricsMessage = null
+        lyricsLoading = false
     }
 
     fun openLogin() {
@@ -1691,15 +1788,15 @@ class LazerGatewayController(private val device: LazerDevice) {
             if (!isCurrentPlaylistRequest(playlist.id, requestGeneration)) return emptyList()
             if (page.isEmpty()) break
             refreshed += page
-            val currentPage = refreshed.distinctBy(LazerTrack::id)
+            val currentPage = refreshed.distinctBy(LazerTrack::id).take(LazerPlaybackQueue.MAX_TRACKS)
             // A request owns the visible list for its full lifetime. Do not combine it with a
             // previous cache snapshot: that is how a cancelled playlist request could leave B's
             // rows visible under A's header while the next page was arriving.
             activePlaylistTracks = currentPage
             offset += page.size
-            if (page.size < PLAYLIST_PAGE_SIZE) break
+            if (page.size < PLAYLIST_PAGE_SIZE || currentPage.size >= LazerPlaybackQueue.MAX_TRACKS) break
         } while (true)
-        val complete = refreshed.distinctBy(LazerTrack::id)
+        val complete = refreshed.distinctBy(LazerTrack::id).take(LazerPlaybackQueue.MAX_TRACKS)
         if (isCurrentPlaylistRequest(playlist.id, requestGeneration) && complete.isNotEmpty()) {
             cache.saveTracks(playlist.id, complete)
         }

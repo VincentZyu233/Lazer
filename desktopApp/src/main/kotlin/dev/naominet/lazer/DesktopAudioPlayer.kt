@@ -40,7 +40,8 @@ internal class DesktopAudioPlayer(
     private val onCompleted: (playbackToken: Long) -> Unit,
     private val onError: (playbackToken: Long, error: Throwable) -> Unit,
     initialExclusiveAudio: Boolean = false,
-) : Closeable {
+    initialEqualizer: LazerEqualizerState = LazerEqualizerState(),
+) : DesktopAudioEngine {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile
     private var uiForeground = true
@@ -67,15 +68,18 @@ internal class DesktopAudioPlayer(
     @Volatile
     private var exclusiveAudio = initialExclusiveAudio && isWindowsDesktop()
 
-    fun play(
+    @Volatile
+    private var equalizerState = initialEqualizer
+
+    override fun play(
         url: String,
         trackId: Long,
         cacheVariant: String,
         expectedBytes: Long?,
         durationMillis: Long,
-        fromProgress: Float = 0f,
-        volume: Float = this.volume,
-        playWhenReady: Boolean = true,
+        fromProgress: Float,
+        volume: Float,
+        playWhenReady: Boolean,
     ): Long {
         stopCurrent()
         this.volume = volume.coerceIn(0f, 1f)
@@ -112,7 +116,7 @@ internal class DesktopAudioPlayer(
         return token
     }
 
-    fun pause() {
+    override fun pause() {
         activeLine?.let { output ->
             if (output.usesSoftwareVolume) {
                 // Finish the current PCM block at zero to avoid a discontinuity click.
@@ -129,23 +133,27 @@ internal class DesktopAudioPlayer(
         }
     }
 
-    fun resume() {
+    override fun resume() {
         pauseFadeRequested = false
         setPaused(false)
         PlaybackDebugLog.event("audio-resume", "token=${generation.get()}")
         runCatching { activeLine?.start() }
     }
 
-    fun setVolume(value: Float) {
+    override fun setVolume(value: Float) {
         volume = value.coerceIn(0f, 1f)
         activeLine?.setVolume(volume)
     }
 
-    fun setUiForeground(foreground: Boolean) {
+    override fun setEqualizer(state: LazerEqualizerState) {
+        equalizerState = state
+    }
+
+    override fun setUiForeground(foreground: Boolean) {
         uiForeground = foreground
     }
 
-    suspend fun setExclusiveAudio(enabled: Boolean) {
+    override suspend fun setExclusiveAudio(enabled: Boolean) {
         val requested = enabled && isWindowsDesktop()
         if (exclusiveAudio == requested) return
         exclusiveAudio = requested
@@ -159,11 +167,11 @@ internal class DesktopAudioPlayer(
         runInterruptible(Dispatchers.IO) { releaseActiveResources() }
     }
 
-    fun stop() {
+    override fun stop() {
         stopCurrent()
     }
 
-    suspend fun clearCache(): Int {
+    override suspend fun clearCache(): Int {
         stopCurrent()
         return audioCache.clear()
     }
@@ -228,6 +236,7 @@ internal class DesktopAudioPlayer(
             )
             val seekFadeIn = PcmSeekFadeIn(decodedFormat).takeIf { fromProgress > 0f }
             val volumeRamp = PcmVolumeRamp()
+            val equalizer = PcmEqualizer()
             val writeInProgress = AtomicReference<DesktopPcmAudioOutput?>(null)
             val writeStartedAtNanos = AtomicLong(0L)
 
@@ -332,6 +341,9 @@ internal class DesktopAudioPlayer(
                                 ramp.endVolume,
                             )
                         }
+                        // EQ runs after the software gain so a level change and a curve change stay
+                        // independent; the native engine orders it the same way.
+                        equalizer.process(buffer, count, decodedFormat, equalizerState)
                         val pauseAfterCurrentBuffer = pauseFadeRequested &&
                             volumeRamp.currentVolume <= VolumeRampCompleteTolerance
 

@@ -43,11 +43,20 @@ internal object WindowsMediaControlIcons {
     /** Finds a stable jpackage resource file without falling back to classpath extraction. */
     fun appResourceFile(resourcePath: String): File? {
         val executable = ProcessHandle.current().info().command().orElse(null) ?: return null
-        val appRoot = File(executable).parentFile ?: return null
-        return listOf(
-            File(appRoot, "app/resources/$resourcePath"),
-            File(appRoot, "resources/$resourcePath"),
-        ).firstOrNull(File::isFile)
+        return appResourceFile(File(executable), resourcePath)
+    }
+
+    internal fun appResourceFile(executable: File, resourcePath: String): File? {
+        var directory = executable.absoluteFile.parentFile ?: return null
+        repeat(12) {
+            listOf(
+                File(directory, "app/resources/$resourcePath"),
+                File(directory, "resources/$resourcePath"),
+                File(directory, "lib/app/resources/$resourcePath"),
+            ).firstOrNull(File::isFile)?.let { return it }
+            directory = directory.parentFile ?: return null
+        }
+        return null
     }
 
     internal fun resourcePath(theme: WindowsAppTheme, name: String): String =

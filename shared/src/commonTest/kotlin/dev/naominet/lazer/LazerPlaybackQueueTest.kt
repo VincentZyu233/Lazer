@@ -62,6 +62,28 @@ class LazerPlaybackQueueTest {
     }
 
     @Test
+    fun `shuffle plays every other track once before repeating`() {
+        fiveTrack(LazerPlayMode.Shuffle)
+        LazerPlaybackQueue.jumpTo(0)
+
+        val drawn = (1..4).map { LazerPlaybackQueue.next()!!.id }
+
+        assertEquals(setOf(2L, 3L, 4L, 5L), drawn.toSet())
+    }
+
+    @Test
+    fun `shuffle previous replays the track that was actually heard`() {
+        fiveTrack(LazerPlayMode.Shuffle)
+        LazerPlaybackQueue.jumpTo(0)
+
+        val next = LazerPlaybackQueue.next()!!.id
+        val back = LazerPlaybackQueue.previous()!!.id
+
+        assertEquals(1L, back)
+        assertEquals(next, LazerPlaybackQueue.next()!!.id)
+    }
+
+    @Test
     fun `moving an item past the audible one keeps the same track playing`() {
         fiveTrack()
         LazerPlaybackQueue.jumpTo(2)
@@ -127,6 +149,25 @@ class LazerPlaybackQueueTest {
         assertTrue(LazerPlaybackQueue.tracks.isEmpty())
         assertEquals(-1, LazerPlaybackQueue.index)
         assertNotEquals(9L, LazerPlaybackQueue.current()?.id ?: -1L)
+    }
+
+    @Test
+    fun `a queue longer than the cap keeps a window around the audible track`() {
+        val tracks = (1L..4_000L).map(::track)
+        LazerPlaybackQueue.replace(tracks, tracks[2_000])
+
+        assertEquals(LazerPlaybackQueue.MAX_TRACKS, LazerPlaybackQueue.tracks.size)
+        assertEquals(2_001L, LazerPlaybackQueue.current()?.id)
+        assertTrue(LazerPlaybackQueue.index >= 0)
+    }
+
+    @Test
+    fun `the window reaches the far end of a long queue without losing the tail`() {
+        val tracks = (1L..4_000L).map(::track)
+        LazerPlaybackQueue.replace(tracks, tracks.last())
+
+        assertEquals(4_000L, LazerPlaybackQueue.tracks.last().id)
+        assertEquals(4_000L, LazerPlaybackQueue.current()?.id)
     }
 
     @Test

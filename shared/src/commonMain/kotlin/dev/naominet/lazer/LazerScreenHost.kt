@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.max
 import kotlin.math.min
 
@@ -73,6 +74,54 @@ interface LazerScreenHost {
      * hint for sharing audio says so, and where there is no focus model it should not.
      */
     val usesSystemAudioFocus: Boolean
+
+    /** Android can exercise an exact PCM output format with a quiet local test tone. */
+    val supportsPcmTestTone: Boolean get() = false
+
+    /** Android can direct ordinary Media3 playback to a selected USB audio output. */
+    val supportsUsbAudioTargetSelection: Boolean get() = false
+
+    /** Android can inspect UAC controls on an explicitly selected raw USB device. */
+    val supportsUsbUacVolumeDiagnostics: Boolean get() = false
+
+    /** Whether this platform can hand local audio documents to the shared playback queue. */
+    val supportsLocalAudioFiles: Boolean get() = false
+
+    /** Opens the platform document picker and returns readable audio items with best-effort tags. */
+    fun pickLocalAudioFiles(onPicked: (LazerLocalAudioPickerResult) -> Unit) {
+        onPicked(LazerLocalAudioPickerResult())
+    }
+
+    val usbAudioTargetSelection: StateFlow<LazerUsbAudioTargetSnapshot>
+        get() = LazerUsbAudioTargetStateStore.state
+
+    fun selectUsbAudioTarget(identity: String?) { }
+
+    val usbUacVolumeState: StateFlow<LazerUsbUacVolumeSnapshot>
+        get() = LazerUsbUacVolumeStateStore.state
+
+    fun refreshUsbUacDevices() { }
+
+    fun selectUsbUacDevice(identity: String?) { }
+
+    fun readUsbUacVolume() { }
+
+    fun adjustUsbUacVolume(increase: Boolean) { }
+
+    val pcmTestToneState: StateFlow<LazerPcmTestToneSnapshot> get() = LazerPcmTestToneStateStore.state
+
+    /** Format and route reported by the active platform playback output, when available. */
+    val playbackSnapshot: StateFlow<LazerPlaybackSnapshot> get() = LazerPlaybackStateStore.snapshot
+
+    /** Readback from the platform audio session, when that API exposes useful output state. */
+    val supportsAudioSessionSnapshot: Boolean get() = false
+
+    val audioSessionSnapshot: StateFlow<PlaybackAudioSessionSnapshot>
+        get() = PlaybackAudioSessionStateStore.snapshot
+
+    fun playPcmTestTone(format: LazerPcmTestFormat) { }
+
+    fun stopPcmTestTone() { }
 
     fun requestMicrophonePermission(onResult: (granted: Boolean) -> Unit)
 

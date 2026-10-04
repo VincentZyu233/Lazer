@@ -45,6 +45,10 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
@@ -60,13 +64,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowScope
+import androidx.compose.ui.window.rememberDialogState
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import dev.naominet.lazer.gateway.AudioQuality
@@ -76,6 +86,7 @@ import dev.naominet.lazer.gateway.model.SongComment
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.awt.Frame
+import java.awt.Point
 import java.awt.datatransfer.StringSelection
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
@@ -161,24 +172,30 @@ fun WindowScope.DesktopPlayerApp(
             controller.setUiForeground(false)
         }
     }
-    // 系统托盘图标 + 右键媒体控制菜单(跨平台)。生命周期跟随本组件。
-    val mediaTray = remember {
+    // 系统托盘图标(跨平台)。生命周期跟随本组件;右键菜单交给下面的自绘浮层。
+    // WindowScope 只交出 java.awt.Window,而最小化状态记在 Frame 上。
+    val mainWindow = window as Frame
+    val showMainWindow: () -> Unit = {
+        mainWindow.isVisible = true
+        mainWindow.extendedState = Frame.NORMAL
+        mainWindow.toFront()
+        mainWindow.requestFocus()
+    }
+    var trayMenuAnchor by remember { mutableStateOf<DesktopTrayMenuAnchor?>(null) }
+    val mediaTray = remember(mainWindow) {
         DesktopMediaTray(
-            onAction = controller::dispatchMediaControlAction,
-            onShowWindow = {
-                window.isVisible = true
-                window.toFront()
-                window.requestFocus()
+            onMenuRequest = { anchor ->
+                // 再右键一次就收起,和原生托盘菜单一致。
+                trayMenuAnchor = if (trayMenuAnchor == null) anchor else null
+                // 浮层依附主窗口显示,窗口最小化时先把它带回来,否则菜单点了没反应。
+                if (trayMenuAnchor != null && mainWindow.extendedState and Frame.ICONIFIED != 0) showMainWindow()
             },
-            onQuit = onCloseWindow,
+            onShowWindow = showMainWindow,
         )
     }
     DisposableEffect(mediaTray) {
         mediaTray.start()
         onDispose { mediaTray.close() }
-    }
-    LaunchedEffect(controller.isPlaying) {
-        mediaTray.update(controller.isPlaying)
     }
     var taskbarAdminWarningVisible by remember { mutableStateOf(false) }
     var destination by remember { mutableStateOf(DesktopDestination.HOME) }
@@ -342,43 +359,55 @@ fun WindowScope.DesktopPlayerApp(
                         onToggleMaximize = onToggleMaximizeWindow,
                         onClose = onCloseWindow,
                     )
-                    Column(Modifier.weight(1f).fillMaxWidth()) {
-                        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                            val compactNavigation = maxWidth < 1100.dp
-                            Row(Modifier.fillMaxSize()) {
-                                NavigationPanel(
-                                    controller = controller,
-                                    selectedDestination = destination,
-                                    settingsSelected = settingsVisible,
-                                    compact = compactNavigation,
-                                    onDestinationSelected = {
-                                        settingsVisible = false
-                                        controller.closeArtist()
-                                        controller.closeCommentPanel()
-                                        destination = it
-                                    },
-                                    onPlaylistSelected = {
-                                        settingsVisible = false
-                                        controller.closeArtist()
-                                        controller.closeCommentPanel()
-                                        destination = DesktopDestination.LIBRARY
-                                        controller.openPlaylist(it)
-                                    },
-                                    onOpenSettings = {
-                                        controller.closeArtist()
-                                        controller.closeCommentPanel()
-                                        settingsVisible = true
-                                    },
-                                )
-                                MainContent(
-                                    controller = controller,
-                                    destination = destination,
-                                    settingsVisible = settingsVisible,
-                                    modifier = Modifier.weight(1f),
-                                )
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                        // The queue card hangs above the transport bar, so its list can only take the room
+                        // this column really has. A fixed height here spills past the window edge on a short
+                        // screen and the rows under it can never be reached.
+                        val queueListHeight =
+                            (maxHeight - DesktopPanelChromeHeight).coerceAtMost(DesktopPanelListHeight)
+                                .coerceAtLeast(120.dp)
+                        Column(Modifier.fillMaxSize()) {
+                            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                                val compactNavigation = maxWidth < 1100.dp
+                                Row(Modifier.fillMaxSize()) {
+                                    NavigationPanel(
+                                        controller = controller,
+                                        selectedDestination = destination,
+                                        settingsSelected = settingsVisible,
+                                        compact = compactNavigation,
+                                        onDestinationSelected = {
+                                            settingsVisible = false
+                                            controller.closeArtist()
+                                            controller.closeCommentPanel()
+                                            destination = it
+                                        },
+                                        onPlaylistSelected = {
+                                            settingsVisible = false
+                                            controller.closeArtist()
+                                            controller.closeCommentPanel()
+                                            destination = DesktopDestination.LIBRARY
+                                            controller.openPlaylist(it)
+                                        },
+                                        onOpenSettings = {
+                                            controller.closeArtist()
+                                            controller.closeCommentPanel()
+                                            settingsVisible = true
+                                        },
+                                    )
+                                    MainContent(
+                                        controller = controller,
+                                        destination = destination,
+                                        settingsVisible = settingsVisible,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
                             }
+                            PlayerBar(
+                                controller,
+                                queueListHeight = queueListHeight,
+                                onOpenNowPlaying = { nowPlayingVisible = true },
+                            )
                         }
-                        PlayerBar(controller, onOpenNowPlaying = { nowPlayingVisible = true })
                     }
                 }
 
@@ -430,6 +459,15 @@ fun WindowScope.DesktopPlayerApp(
                         }
                     },
                 )
+                trayMenuAnchor?.let { anchor ->
+                    TrayMenuDialog(
+                        controller = controller,
+                        anchor = anchor,
+                        onDismiss = { trayMenuAnchor = null },
+                        onShowWindow = showMainWindow,
+                        onQuit = onCloseWindow,
+                    )
+                }
                 if (taskbarAdminWarningVisible) {
                     AlertDialog(
                         onDismissRequest = { taskbarAdminWarningVisible = false },
@@ -1047,6 +1085,12 @@ private fun DesktopSettingsPage(
                     }
                     HorizontalDivider()
                 }
+                Text(tr("settings.equalizer.title"), style = MaterialTheme.typography.titleSmall)
+                DesktopEqualizerSection(controller)
+                HorizontalDivider()
+                Text(tr("settings.hifi.title"), style = MaterialTheme.typography.titleSmall)
+                DesktopHiFiSection(controller)
+                HorizontalDivider()
                 Text(tr("settings.lyrics"), style = MaterialTheme.typography.titleSmall)
                 Row(
                     modifier = Modifier
@@ -1405,6 +1449,14 @@ private fun TopBar(controller: DesktopPlayerController) {
         GatewayStatus(controller)
         Spacer(Modifier.width(8.dp))
         IconButton(
+            onClick = { chooseDesktopAudioFiles()?.let(controller::openLocalAudioFiles) },
+            modifier = Modifier.size(40.dp),
+            colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Icon(Icons.Outlined.FolderOpen, tr("player.open_audio_files"), Modifier.size(18.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        IconButton(
             onClick = controller::toggleTheme,
             modifier = Modifier.size(40.dp),
             colors = IconButtonDefaults.iconButtonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -1441,53 +1493,183 @@ private fun TopBar(controller: DesktopPlayerController) {
                     onDismissRequest = { accountMenuOpen = false },
                     properties = PopupProperties(focusable = true),
                 ) {
-                    val colors = MaterialTheme.colorScheme
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = colors.surface,
-                        shadowElevation = 8.dp,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
-                        modifier = Modifier.width(188.dp),
-                    ) {
-                        Column(Modifier.padding(vertical = 8.dp, horizontal = 6.dp)) {
-                            Text(
-                                controller.currentUser?.nickname.orEmpty(),
-                                style = MaterialTheme.typography.titleSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            )
-                            TextButton(
-                                onClick = {
-                                    accountMenuOpen = false
-                                    controller.syncLibrary()
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 10.dp),
-                            ) {
-                                Icon(Icons.Outlined.Sync, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text(tr("nav.sync"), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
-                            }
-                            TextButton(
-                                onClick = {
-                                    accountMenuOpen = false
-                                    controller.logout()
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                contentPadding = PaddingValues(horizontal = 10.dp),
-                                colors = ButtonDefaults.textButtonColors(contentColor = colors.error),
-                            ) {
-                                Icon(Icons.AutoMirrored.Outlined.Logout, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(8.dp))
-                                Text(tr("settings.account.logout"), modifier = Modifier.weight(1f), textAlign = TextAlign.Start)
-                            }
+                    PaperMenuCard(width = 188.dp) {
+                        Text(
+                            controller.currentUser?.nickname.orEmpty(),
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                        PaperMenuRow(Icons.Outlined.Sync, tr("nav.sync")) {
+                            accountMenuOpen = false
+                            controller.syncLibrary()
+                        }
+                        PaperMenuRow(
+                            Icons.AutoMirrored.Outlined.Logout,
+                            tr("settings.account.logout"),
+                            destructive = true,
+                        ) {
+                            accountMenuOpen = false
+                            controller.logout()
                         }
                     }
                 }
             }
         }
     }
+}
+
+/**
+ * 托盘右键菜单:浮在任务栏旁的自绘纸面菜单,样式与顶栏账号菜单同一套实例。
+ *
+ * 用 AWT 对话框而不是 Popup:菜单要落在主窗口之外的屏幕坐标上,又不想在任务栏多出一个窗口按钮。
+ * 替代品 DialogWindow 只能在 application 顶层作用域创建,而菜单需要依附主窗口,所以仍用已标废弃的 Dialog。
+ * 媒体控制顺序来自 [mediaControlItems];播放方式与播放栏共用一个循环按钮。
+ */
+@Suppress("DEPRECATION")
+@Composable
+private fun TrayMenuDialog(
+    controller: DesktopPlayerController,
+    anchor: DesktopTrayMenuAnchor,
+    onDismiss: () -> Unit,
+    onShowWindow: () -> Unit,
+    onQuit: () -> Unit,
+) {
+    val density = LocalDensity.current
+    val ringPx = with(density) { TrayMenuRing.roundToPx() }
+    // 首帧先按占位高度摆到光标左上方,量出真实高度后再收紧,免得闪在屏幕角落。
+    val placeholder = IntSize(
+        with(density) { TrayMenuCardWidth.roundToPx() } + ringPx * 2,
+        with(density) { TrayMenuPlaceholderHeight.roundToPx() } + ringPx * 2,
+    )
+    val state = rememberDialogState(
+        size = with(density) { DpSize(placeholder.width.toDp(), placeholder.height.toDp()) },
+        position = trayMenuPosition(anchor, placeholder, density),
+    )
+    var cardSize by remember { mutableStateOf(IntSize.Zero) }
+    Dialog(
+        onCloseRequest = onDismiss,
+        state = state,
+        title = "Lazer",
+        undecorated = true,
+        transparent = true,
+        onPreviewKeyEvent = { event ->
+            if (event.key == Key.Escape && event.type == KeyEventType.KeyDown) {
+                onDismiss()
+                true
+            } else {
+                false
+            }
+        },
+    ) {
+        // 菜单高度要等首个布局量出来才知道;尺寸和位置都写回窗口状态,直接 setBounds 会被 Compose 按状态改回去。
+        LaunchedEffect(anchor, cardSize) {
+            if (cardSize == IntSize.Zero) return@LaunchedEffect
+            val menuSize = IntSize(cardSize.width + ringPx * 2, cardSize.height + ringPx * 2)
+            state.size = with(density) { DpSize(menuSize.width.toDp(), menuSize.height.toDp()) }
+            state.position = trayMenuPosition(anchor, menuSize, density)
+            window.isAlwaysOnTop = true
+            window.requestFocus()
+        }
+        DisposableEffect(window) {
+            // 无边框透明窗口在不同机器上可能带回一块纸面底色,显式清掉,菜单外就不会出现一圈白边。
+            window.background = java.awt.Color(0, 0, 0, 0)
+            windowsClearPopupFrame(window)
+            // 焦点一离开就收起,和原生菜单一致;先等到真正拿到焦点,免得刚弹出就被抢走而闪掉。
+            var gainedFocus = false
+            val listener = object : WindowAdapter() {
+                override fun windowGainedFocus(event: WindowEvent) {
+                    gainedFocus = true
+                }
+
+                override fun windowLostFocus(event: WindowEvent) {
+                    if (gainedFocus) onDismiss()
+                }
+            }
+            window.addWindowFocusListener(listener)
+            onDispose { window.removeWindowFocusListener(listener) }
+        }
+        // 卡片外留一圈透明边,投影才有余地画开。量的必须是卡片本身:外层 wrapContentSize 会把
+        // 自己的尺寸压回窗口当前大小,在它下面量只会永远量到旧尺寸,菜单就再也长不开。
+        Box(
+            Modifier
+                .wrapContentSize()
+                .padding(TrayMenuRing),
+        ) {
+            PaperMenuCard(
+                width = TrayMenuCardWidth,
+                elevation = 0.dp,
+                modifier = Modifier.onSizeChanged { cardSize = it },
+            ) {
+                PaperMenuRow(Icons.Outlined.Monitor, tr("tray.open")) {
+                    onShowWindow()
+                    onDismiss()
+                }
+                PaperMenuDivider()
+                mediaControlItems(controller.isPlaying, ::tr).forEach { item ->
+                    PaperMenuRow(trayMediaIcon(item.iconResource), item.label) {
+                        controller.dispatchMediaControlAction(item.action)
+                        onDismiss()
+                    }
+                }
+                PaperMenuDivider()
+                val playMode = controller.playMode
+                PaperMenuRow(
+                    icon = desktopPlayModeIcon(playMode),
+                    label = tr("player.mode.now", tr(playMode.labelKey)),
+                ) {
+                    controller.cyclePlayMode()
+                    onDismiss()
+                }
+                PaperMenuDivider()
+                PaperMenuRow(Icons.Outlined.PowerSettingsNew, tr("tray.quit"), destructive = true) {
+                    onQuit()
+                    onDismiss()
+                }
+            }
+        }
+    }
+}
+
+/** 菜单卡片贴在光标左上方,并完整留在所在屏幕的工作区里。 */
+private fun trayMenuOrigin(anchor: DesktopTrayMenuAnchor, menuSize: IntSize): Point {
+    val work = anchor.workArea
+    val x = (anchor.point.x - menuSize.width - TRAY_MENU_GAP_PX)
+        .coerceIn(work.x, (work.x + work.width - menuSize.width).coerceAtLeast(work.x))
+    val y = (anchor.point.y - menuSize.height - TRAY_MENU_GAP_PX)
+        .coerceIn(work.y, (work.y + work.height - menuSize.height).coerceAtLeast(work.y))
+    return Point(x, y)
+}
+
+/** 光标坐标是像素,窗口尺寸与位置走 Compose 状态,这里统一做一次 px -> dp。 */
+private fun trayMenuPosition(
+    anchor: DesktopTrayMenuAnchor,
+    menuSize: IntSize,
+    density: Density,
+): WindowPosition = with(density) {
+    val origin = trayMenuOrigin(anchor, menuSize)
+    WindowPosition.Absolute(origin.x.toDp(), origin.y.toDp())
+}
+
+private val TrayMenuRing = 0.dp
+private val TrayMenuCardWidth = 200.dp
+private val TrayMenuPlaceholderHeight = 220.dp
+private const val TRAY_MENU_GAP_PX = 6
+
+/** 托盘媒体项沿用播放条里同一组图标。 */
+private fun trayMediaIcon(iconResource: String): ImageVector = when (iconResource) {
+    "previous" -> Icons.Filled.SkipPrevious
+    "pause" -> Icons.Filled.Pause
+    "next" -> Icons.Filled.SkipNext
+    else -> Icons.Filled.PlayArrow
+}
+
+private fun desktopPlayModeIcon(mode: DesktopPlayMode): ImageVector = when (mode) {
+    DesktopPlayMode.Sequential -> Icons.AutoMirrored.Outlined.PlaylistPlay
+    DesktopPlayMode.ListLoop -> Icons.Outlined.Repeat
+    DesktopPlayMode.SingleLoop -> Icons.Filled.RepeatOne
+    DesktopPlayMode.Shuffle -> Icons.Outlined.Shuffle
 }
 
 @Composable
@@ -1691,10 +1873,20 @@ private fun ArtistPage(controller: DesktopPlayerController, modifier: Modifier =
                     }
                     if (tracks.isNotEmpty()) {
                         Spacer(Modifier.height(16.dp))
-                        Button(onClick = { controller.playTrack(tracks.first()) }, shape = RoundedCornerShape(12.dp)) {
-                            Icon(Icons.Filled.PlayArrow, null, Modifier.size(19.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(tr("artist.play_all"))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(onClick = { controller.playTrack(tracks.first()) }, shape = RoundedCornerShape(12.dp)) {
+                                Icon(Icons.Filled.PlayArrow, null, Modifier.size(19.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(tr("artist.play_all"))
+                            }
+                            OutlinedButton(
+                                onClick = { controller.shufflePlay(tracks) },
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Icon(Icons.Outlined.Shuffle, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(tr("player.shuffle"))
+                            }
                         }
                     }
                 }
@@ -1717,7 +1909,9 @@ private fun LibraryPage(controller: DesktopPlayerController, modifier: Modifier 
     val browsing = controller.browsePlaylists()
     val listState = rememberLazyListState()
     val inertia = LocalScrollInertia.current
-    val currentTrackIndex = if (active?.isLikedCollection == false) {
+    val currentTrackIndex = if (controller.nowPlaying?.isLocalFile == true) {
+        controller.localLibraryTracks.indexOfFirst { it.id == controller.nowPlaying?.id }
+    } else if (active?.isLikedCollection == false) {
         controller.activePlaylistTracks.indexOfFirst { it.id == controller.nowPlaying?.id }
     } else {
         -1
@@ -1733,6 +1927,90 @@ private fun LibraryPage(controller: DesktopPlayerController, modifier: Modifier 
             ),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        PageHeading(
+                            tr("library.local.title"),
+                            tr("library.local.count", controller.localLibraryTracks.size),
+                        )
+                        Spacer(Modifier.weight(1f))
+                        TextButton(
+                            enabled = controller.localLibraryReady && !controller.localLibraryScanning,
+                            onClick = { chooseDesktopAudioDirectory()?.let(controller::addLocalLibraryRoot) },
+                        ) {
+                            Icon(Icons.Outlined.FolderOpen, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text(tr("library.local.add_folder"))
+                        }
+                        TextButton(
+                            enabled = controller.localLibraryReady && !controller.localLibraryScanning &&
+                                controller.localLibraryRoots.isNotEmpty(),
+                            onClick = controller::rescanLocalLibrary,
+                        ) {
+                            if (controller.localLibraryScanning) {
+                                CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Icons.Outlined.Refresh, null, Modifier.size(16.dp))
+                            }
+                            Spacer(Modifier.width(5.dp))
+                            Text(tr("library.local.scan"))
+                        }
+                    }
+                    if (controller.localLibraryRoots.isNotEmpty()) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            controller.localLibraryRoots.forEach { root ->
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        root,
+                                        modifier = Modifier.weight(1f),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    IconButton(
+                                        enabled = !controller.localLibraryScanning,
+                                        onClick = { controller.removeLocalLibraryRoot(root) },
+                                        modifier = Modifier.size(28.dp),
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.Close,
+                                            tr("library.local.remove_folder"),
+                                            Modifier.size(15.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (controller.localLibraryScanning) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                        Text(
+                            tr("library.local.scanning"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    controller.localLibraryScanError?.let { error ->
+                        Text(error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (!controller.localLibraryScanning && controller.localLibraryTracks.isEmpty()) {
+                        QuietEmptyState(tr("library.local.empty"), tr("library.local.empty.hint"))
+                    }
+                }
+            }
+            if (controller.localLibraryTracks.isNotEmpty()) {
+                itemsIndexed(controller.localLibraryTracks, key = { _, track -> track.id }) { index, track ->
+                    TrackRow(
+                        track,
+                        track.id == controller.nowPlaying?.id,
+                        { controller.playLocalLibraryTrack(track) },
+                        index + 1,
+                    )
+                }
+            }
+            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)) }
             when {
                 !controller.isSignedIn -> {
                     item { PageHeading(tr("library.title"), tr("library.sub.desktop.anon")) }
@@ -1753,7 +2031,7 @@ private fun LibraryPage(controller: DesktopPlayerController, modifier: Modifier 
                     item { QuietEmptyState(tr("library.no_playlists"), tr("library.no_playlists.hint")) }
                 }
                 active != null && (active.isLikedCollection.not()) -> {
-                    item { PlaylistDetailHeader(active, onPlayAll = { active.let { controller.activePlaylistTracks.firstOrNull()?.let(controller::playTrack) } }) }
+                    item { PlaylistDetailHeader(active, onPlayAll = { active.let { controller.activePlaylistTracks.firstOrNull()?.let(controller::playTrack) } }, onShuffleAll = { controller.shufflePlay(controller.activePlaylistTracks) }) }
                     if (controller.activePlaylistTracks.isEmpty()) {
                         item {
                             QuietEmptyState(
@@ -1844,6 +2122,7 @@ private fun LikedPage(controller: DesktopPlayerController, modifier: Modifier = 
                                 coverUrl = playlist.coverUrl ?: tracks.firstOrNull()?.coverUrl,
                             ),
                             onPlayAll = { tracks.firstOrNull()?.let(controller::playTrack) },
+                            onShuffleAll = { controller.shufflePlay(tracks) },
                         )
                     }
                     if (tracks.isEmpty()) {
@@ -1888,7 +2167,7 @@ private fun NowPlayingLocatorButton(onClick: () -> Unit, modifier: Modifier = Mo
 }
 
 @Composable
-private fun PlaylistDetailHeader(playlist: PlaylistItem, onPlayAll: () -> Unit) {
+private fun PlaylistDetailHeader(playlist: PlaylistItem, onPlayAll: () -> Unit, onShuffleAll: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
@@ -1944,14 +2223,25 @@ private fun PlaylistDetailHeader(playlist: PlaylistItem, onPlayAll: () -> Unit) 
                 color = colors.onSurfaceVariant,
             )
             Spacer(Modifier.height(4.dp))
-            Button(
-                onClick = onPlayAll,
-                shape = RoundedCornerShape(12.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            ) {
-                Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(tr("playlist.play_all"))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onPlayAll,
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(tr("playlist.play_all"))
+                }
+                OutlinedButton(
+                    onClick = onShuffleAll,
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Icon(Icons.Outlined.Shuffle, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(tr("player.shuffle"))
+                }
             }
         }
     }
@@ -1986,6 +2276,1736 @@ private fun PageHeading(title: String, subtitle: String) {
         Text(title, style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(5.dp))
         Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun DesktopHiFiSection(controller: DesktopPlayerController) {
+    val colors = MaterialTheme.colorScheme
+    val available = controller.hifiEngineAvailable
+    val bitPerfectAvailable = available && supportsDesktopBitPerfectOutput()
+    var pcmTestSampleRate by remember { mutableIntStateOf(48_000) }
+    var pcmTestBitDepth by remember { mutableIntStateOf(16) }
+    LaunchedEffect(available) {
+        if (available) controller.refreshHifiOutputDevices()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(enabled = available, role = androidx.compose.ui.semantics.Role.Switch) {
+                controller.updateHifiEngine(!controller.hifiEngineEnabled)
+            }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(tr("settings.hifi.engine"), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                when {
+                    !available -> tr("settings.hifi.engine.unavailable")
+                    controller.hifiEngineEnabled -> tr("settings.hifi.engine.on")
+                    controller.nowPlaying?.isLocalFile == true -> tr("settings.hifi.engine.local_file")
+                    else -> tr("settings.hifi.engine.off")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (available) colors.onSurfaceVariant else colors.error,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        LazerSwitch(
+            engine = controller.themeEngine,
+            checked = controller.hifiEngineEnabled,
+            onCheckedChange = if (available) {
+                ({ enabled -> controller.updateHifiEngine(enabled) })
+            } else {
+                null
+            },
+            enabled = available,
+        )
+    }
+    if (isMacOSDesktop()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(enabled = available, role = androidx.compose.ui.semantics.Role.Switch) {
+                    controller.updateExclusiveAudio(!controller.exclusiveAudio)
+                }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.hog_mode.title"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("settings.hifi.hog_mode.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            LazerSwitch(
+                engine = controller.themeEngine,
+                checked = controller.exclusiveAudio,
+                onCheckedChange = null,
+                enabled = available,
+            )
+        }
+    }
+    if (controller.hifiEngineEnabled || controller.nowPlaying?.isLocalFile == true) {
+        Text(
+            tr("settings.hifi.engine.hint"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 14.dp),
+        )
+        val selectedDevice = controller.selectedHifiOutputDevice
+        val endpointVolumeDevice = controller.selectedHifiEndpointVolumeDevice
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.device.title"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    when {
+                        controller.hifiOutputDeviceUnavailable -> tr("settings.hifi.device.unavailable")
+                        selectedDevice == null -> tr(controller.hifiDefaultOutputLabelKey)
+                        selectedDevice.isDefault ->
+                            "${selectedDevice.displayName} · ${tr("settings.hifi.device.default_tag")}"
+                        else -> selectedDevice.displayName
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (controller.hifiOutputDeviceUnavailable) colors.error else colors.onSurfaceVariant,
+                )
+                if (selectedDevice != null && !selectedDevice.stableIdentity) {
+                    Text(
+                        tr("settings.hifi.device.weak_identity"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                endpointVolumeDevice?.let { device ->
+                    val supportText = when {
+                        !device.endpointVolumeQuerySucceeded -> "settings.hifi.device.volume.unknown"
+                        device.reportsHardwareEndpointVolume -> "settings.hifi.device.volume.hardware"
+                        else -> "settings.hifi.device.volume.not_reported"
+                    }
+                    Text(
+                        tr(supportText),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                controller.hifiOutputDevicesError?.let { error ->
+                    Text(
+                        "${tr("settings.hifi.device.list_fail")}: $error",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.error,
+                    )
+                }
+            }
+            if (controller.hifiOutputDevicesLoading) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
+            DesktopSettingsDropdown(
+                options = listOf<DesktopAudioOutputDevice?>(null) + controller.hifiOutputDevices.filter {
+                    it.active
+                },
+                selected = controller.selectedHifiOutputDevice,
+                label = { device ->
+                    when {
+                        device == null && controller.hifiOutputDeviceUnavailable -> tr("settings.hifi.device.unavailable")
+                        device == null -> tr(controller.hifiDefaultOutputLabelKey)
+                        else -> device.displayName
+                    }
+                },
+                onSelected = controller::selectHifiOutputDevice,
+            )
+            TextButton(onClick = controller::refreshHifiOutputDevices) {
+                Text(tr("settings.hifi.device.refresh"))
+            }
+        }
+        if (endpointVolumeDevice?.reportsHardwareEndpointVolume == true) {
+            val scalar = controller.hifiEndpointVolumeScalar
+            var localVolume by remember(endpointVolumeDevice.identityKey, scalar) {
+                mutableFloatStateOf(scalar ?: 0f)
+            }
+            Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.hifi.device.volume.control"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            tr("settings.hifi.device.volume.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    if (controller.hifiEndpointVolumeLoading) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else if (scalar != null) {
+                        Text(
+                            "${(localVolume * 100f).toInt()}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = colors.primary,
+                        )
+                    }
+                }
+                if (scalar != null) {
+                    LazerSlider(
+                        engine = controller.themeEngine,
+                        value = localVolume,
+                        onValueChange = { localVolume = it },
+                        enabled = !controller.hifiEndpointVolumeLoading,
+                        valueRange = 0f..1f,
+                        onValueChangeFinished = { controller.setHifiEndpointVolume(localVolume) },
+                    )
+                } else if (controller.hifiEndpointVolumeError) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            tr("settings.hifi.device.volume.read_error"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.error,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            onClick = controller::refreshHifiEndpointVolume,
+                            enabled = !controller.hifiEndpointVolumeLoading,
+                        ) {
+                            Text(tr("settings.hifi.device.refresh"))
+                        }
+                    }
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(tr("settings.hifi.formats.title"), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        tr("settings.hifi.formats.hint"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                if (controller.hifiPcmFormatProbeLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                }
+                TextButton(
+                    onClick = controller::probeHifiOutputFormats,
+                    enabled = controller.hifiPcmFormatProbeDevice != null &&
+                        !controller.hifiOutputDeviceUnavailable &&
+                        !controller.hifiOutputDevicesLoading &&
+                        !controller.hifiPcmFormatProbeLoading &&
+                        !controller.hifiPcmSessionProbeLoading,
+                ) {
+                    Text(
+                        if (controller.hifiPcmFormatProbeLoading) {
+                            tr("settings.hifi.formats.loading")
+                        } else {
+                            tr("settings.hifi.formats.probe")
+                        },
+                    )
+                }
+            }
+            controller.hifiPcmFormatProbeError?.let { error ->
+                Text(
+                    error,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.error,
+                )
+            }
+            val results = controller.hifiPcmFormatProbeResults
+            val target = controller.hifiPcmFormatProbeTarget
+            if (results.isNotEmpty() && target?.identityKey == controller.hifiPcmFormatProbeDevice?.identityKey) {
+                Column(Modifier.padding(top = 4.dp)) {
+                    results.groupBy { it.candidate.sampleRateHz }.toSortedMap().forEach { (rate, candidates) ->
+                        val supported = candidates.filter {
+                            it.status == DesktopWasapiPcmFormatProbeStatus.Supported
+                        }
+                        val hasErrors = candidates.any { it.status == DesktopWasapiPcmFormatProbeStatus.Error }
+                        val formatLabels = supported.map { result ->
+                            val candidate = result.candidate
+                            if (candidate.validBits == candidate.containerBits) {
+                                "${candidate.validBits} bit"
+                            } else {
+                                tr(
+                                    "settings.hifi.formats.valid_in_container",
+                                    candidate.validBits,
+                                    candidate.containerBits,
+                                )
+                            }
+                        } + if (hasErrors) listOf(tr("settings.hifi.formats.unknown")) else emptyList()
+                        val formats = formatLabels.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                            ?: tr("settings.hifi.formats.none")
+                        Text(
+                            "${wasapiPcmRateLabel(rate)} kHz · $formats",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(tr("settings.hifi.session_probe.title"), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        tr("settings.hifi.session_probe.hint"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                if (controller.hifiPcmSessionProbeLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                }
+                TextButton(
+                    onClick = controller::probeHifiOutputSessions,
+                    enabled = controller.hifiPcmFormatProbeDevice != null &&
+                        !controller.hifiOutputDeviceUnavailable &&
+                        !controller.hifiOutputDevicesLoading &&
+                        !controller.hifiPcmSessionProbeLoading &&
+                        !controller.hifiPcmFormatProbeLoading,
+                ) {
+                    Text(
+                        if (controller.hifiPcmSessionProbeLoading) {
+                            tr("settings.hifi.session_probe.loading")
+                        } else {
+                            tr("settings.hifi.session_probe.probe")
+                        },
+                    )
+                }
+            }
+            controller.hifiPcmSessionProbeError?.let { error ->
+                Text(error, style = MaterialTheme.typography.bodySmall, color = colors.error)
+            }
+            val sessionResults = controller.hifiPcmSessionProbeResults
+            val sessionTarget = controller.hifiPcmSessionProbeTarget
+            if (sessionResults.isNotEmpty() &&
+                sessionTarget?.identityKey == controller.hifiPcmFormatProbeDevice?.identityKey
+            ) {
+                Column(Modifier.padding(top = 4.dp)) {
+                    sessionResults.groupBy { it.candidate.sampleRateHz }.toSortedMap().forEach { (rate, candidates) ->
+                        Text(
+                            "${wasapiPcmRateLabel(rate)} kHz",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        candidates.forEach { result ->
+                            val candidate = result.candidate
+                            val format = if (candidate.validBits == candidate.containerBits) {
+                                "${candidate.validBits} bit"
+                            } else {
+                                tr(
+                                    "settings.hifi.formats.valid_in_container",
+                                    candidate.validBits,
+                                    candidate.containerBits,
+                                )
+                            }
+                            val status = when (result.status) {
+                                DesktopWasapiPcmSessionProbeStatus.Initialized -> tr("settings.hifi.session_probe.initialized")
+                                DesktopWasapiPcmSessionProbeStatus.Unsupported -> tr("settings.hifi.session_probe.unsupported")
+                                DesktopWasapiPcmSessionProbeStatus.Error -> tr("settings.hifi.session_probe.error")
+                            }
+                            val actual = result.actualSessionFormat?.let {
+                                tr(
+                                    "settings.hifi.session_probe.actual_format",
+                                    wasapiPcmRateLabel(it.sampleRateHz),
+                                    it.channels,
+                                    it.validBits,
+                                    it.containerBits,
+                                    if (it.isFloat) tr("settings.hifi.session_probe.float_pcm") else tr("settings.hifi.session_probe.integer_pcm"),
+                                    if (it.exclusive) tr("settings.hifi.session_probe.exclusive") else tr("settings.hifi.session_probe.shared"),
+                                )
+                            }
+                            val failure = result.failure?.let { tr(it.messageKey) }
+                            Text(
+                                buildString {
+                                    append("$format: $status")
+                                    if (actual != null) append(" · $actual")
+                                    if (failure != null && result.status == DesktopWasapiPcmSessionProbeStatus.Error) {
+                                        append(" · $failure")
+                                    }
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (result.status == DesktopWasapiPcmSessionProbeStatus.Error) {
+                                    colors.error
+                                } else {
+                                    colors.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.buffer"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("settings.hifi.buffer.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            DesktopSettingsDropdown(
+                options = HiFiBufferOptions,
+                selected = nearestHiFiBufferOption(controller.hifiBufferMillis),
+                label = { option -> "$option ms" },
+                onSelected = controller::updateHifiBufferMillis,
+            )
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.replaygain"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("settings.hifi.replaygain.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            DesktopSettingsDropdown(
+                options = DesktopReplayGainMode.entries,
+                selected = controller.replayGainMode,
+                label = { mode ->
+                    tr(
+                        when (mode) {
+                            DesktopReplayGainMode.Off -> "settings.hifi.replaygain.off"
+                            DesktopReplayGainMode.Track -> "settings.hifi.replaygain.track"
+                            DesktopReplayGainMode.Album -> "settings.hifi.replaygain.album"
+                        },
+                    )
+                },
+                onSelected = controller::updateReplayGainMode,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(enabled = bitPerfectAvailable, role = androidx.compose.ui.semantics.Role.Switch) {
+                    controller.updateHifiBitPerfect(!controller.hifiBitPerfect)
+                }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.bit_perfect"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("settings.hifi.bit_perfect.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            LazerSwitch(
+                engine = controller.themeEngine,
+                checked = controller.hifiBitPerfect,
+                onCheckedChange = null,
+                enabled = bitPerfectAvailable,
+            )
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(enabled = available, role = androidx.compose.ui.semantics.Role.Switch) {
+                    controller.updateHifiDoPOutput(!controller.hifiDoPOutput)
+                }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.dop"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("settings.hifi.dop.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            LazerSwitch(
+                engine = controller.themeEngine,
+                checked = controller.hifiDoPOutput,
+                onCheckedChange = null,
+                enabled = available,
+            )
+        }
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
+            Text(
+                tr("settings.hifi.stream"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+            )
+            val info = controller.hifiStreamInfo
+            val negotiatedDoP = info?.let {
+                (it.signalPath.negotiation.negotiatedFormat as? AudioFormat.DoP)
+                    ?.takeIf { format ->
+                        it.isDoPOutput && it.outputFormatInitialized &&
+                            it.signalPath.negotiation.status == OutputNegotiationStatus.Accepted
+                    }
+            }
+            Text(
+                if (info == null) {
+                    tr("settings.hifi.stream.none")
+                } else {
+                    buildString {
+                        if (negotiatedDoP != null) {
+                            append(
+                                tr(
+                                    "settings.hifi.stream.format.dop",
+                                    info.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }
+                                        ?.toString() ?: "?",
+                                    negotiatedDoP.rate.multiplier,
+                                    negotiatedDoP.carrierSampleRateHz,
+                                ),
+                            )
+                        } else if (info.isDoPOutput) {
+                            append(
+                                tr(
+                                    "settings.hifi.stream.format.dop_unknown",
+                                    info.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }
+                                        ?.toString() ?: "?",
+                                ),
+                            )
+                        } else if (info.hasDsdSource) {
+                            append(tr(
+                                "settings.hifi.stream.format.dsd",
+                                info.sourceDsdRateMultiplier.takeIf { it > 0 }?.toString() ?: "?",
+                                info.sampleRate,
+                                info.bitsPerSample,
+                            ))
+                        } else {
+                            append(tr("settings.hifi.stream.format", info.codec, info.sampleRate, info.bitsPerSample))
+                        }
+                        if (info.lossless) append(" · ").append(tr("settings.hifi.stream.lossless"))
+                        if (isMacOSDesktop()) {
+                            append(" · ").append(
+                                tr(if (info.exclusive) "settings.hifi.hog_mode.active" else "settings.hifi.hog_mode.shared"),
+                            )
+                        }
+                        if (info.bitPerfectActive) append(" · ").append(tr("settings.hifi.stream.direct"))
+                        if (info.signalPath.verification.status == BitPerfectVerificationStatus.NotRun &&
+                            info.bitPerfectActive
+                        ) {
+                            append(" · ").append(tr("settings.hifi.stream.verification_pending"))
+                        }
+                    }
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.primary,
+            )
+            controller.activeReplayGainResolution?.let { resolution ->
+                val sourceLabel = tr(
+                    when (resolution.source) {
+                        DesktopReplayGainSource.None -> "settings.hifi.replaygain.source.none"
+                        DesktopReplayGainSource.Track -> "settings.hifi.replaygain.source.track"
+                        DesktopReplayGainSource.Album -> "settings.hifi.replaygain.source.album"
+                        DesktopReplayGainSource.TrackFallback -> "settings.hifi.replaygain.source.track_fallback"
+                    },
+                )
+                val gain = formatTelemetryDecibels(resolution.appliedGainDb)
+                Text(
+                    if (resolution.source == DesktopReplayGainSource.None) {
+                        tr("settings.hifi.replaygain.no_tag")
+                    } else {
+                        tr("settings.hifi.replaygain.applied", if (resolution.appliedGainDb > 0.0) "+$gain" else gain, sourceLabel)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                if (resolution.boostLimited) {
+                    Text(
+                        tr("settings.hifi.replaygain.boost_limited"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                if (resolution.appliedGainDb != 0.0 && controller.hifiBitPerfect) {
+                    Text(
+                        tr("settings.hifi.replaygain.bit_perfect_disabled"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.error,
+                    )
+                }
+            }
+            info?.takeIf { it.underrunActive || it.underrunFrames > 0L }?.let { stream ->
+                val estimatedMillis = stream.estimatedUnderrunMillis
+                Text(
+                    if (stream.underrunActive) {
+                        tr(
+                            "settings.hifi.stream.underrun.active",
+                            stream.underrunFrames,
+                            estimatedMillis?.toString() ?: "?",
+                        )
+                    } else {
+                        tr(
+                            "settings.hifi.stream.underrun.history",
+                            stream.underrunFrames,
+                            estimatedMillis?.toString() ?: "?",
+                        )
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (stream.underrunActive) colors.error else colors.onSurfaceVariant,
+                )
+                Text(
+                    tr("settings.hifi.stream.underrun.note"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            info?.signalPath?.outputTelemetry?.let { telemetry ->
+                val telemetryColor = if (
+                    telemetry.samplePeakDbfs > 0.0 || (telemetry.clippedIntegerSampleCount ?: 0L) > 0L
+                ) {
+                    colors.error
+                } else {
+                    colors.onSurfaceVariant
+                }
+                Text(
+                    buildString {
+                        append(
+                            tr(
+                                "settings.hifi.telemetry.summary",
+                                formatTelemetryDecibels(telemetry.samplePeakDbfs),
+                                formatTelemetryDecibels(telemetry.limiterGainReductionDb),
+                            ),
+                        )
+                        telemetry.clippedIntegerSampleCount?.let { count ->
+                            append(" · ").append(tr("settings.hifi.telemetry.clipped", count))
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = telemetryColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    tr("settings.hifi.telemetry.note"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            info?.let {
+                Text(
+                    if (negotiatedDoP != null) {
+                        tr(
+                            "settings.hifi.stream.path.dop",
+                            it.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }
+                                ?.toString() ?: "?",
+                            negotiatedDoP.rate.multiplier,
+                            it.sourceChannels,
+                            negotiatedDoP.carrierSampleRateHz,
+                            negotiatedDoP.channelLayout.channelCount,
+                            if (it.exclusive) tr("settings.hifi.stream.exclusive") else tr("settings.hifi.stream.shared"),
+                        )
+                    } else if (it.isDoPOutput) {
+                        tr("settings.hifi.stream.path.dop_unknown")
+                    } else if (it.hasDsdSource) {
+                        tr(
+                            "settings.hifi.stream.path.dsd",
+                            it.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }?.toString() ?: "?",
+                            it.sourceChannels,
+                            it.sampleRate,
+                            it.bitsPerSample,
+                            it.channels,
+                            if (it.exclusive) tr("settings.hifi.stream.exclusive") else tr("settings.hifi.stream.shared"),
+                        )
+                    } else {
+                        tr(
+                            "settings.hifi.stream.path",
+                            it.sourceSampleRate.takeIf { rate -> rate > 0 }?.toString() ?: "?",
+                            it.sourceBitsPerSample.takeIf { bits -> bits > 0 }?.toString() ?: "?",
+                            it.sourceChannels,
+                            it.sampleRate,
+                            it.bitsPerSample,
+                            it.channels,
+                            if (it.exclusive) tr("settings.hifi.stream.exclusive") else tr("settings.hifi.stream.shared"),
+                        )
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                if (negotiatedDoP != null) {
+                    Text(
+                        tr(
+                            "settings.hifi.stream.session.dop",
+                            negotiatedDoP.carrierSampleRateHz,
+                            negotiatedDoP.channelLayout.channelCount,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else if (it.isDoPOutput) {
+                    Text(
+                        tr("settings.hifi.stream.session.dop_unknown"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else if (it.signalPath.negotiation.status == OutputNegotiationStatus.Unknown) {
+                    Text(
+                        tr("settings.hifi.stream.session_unknown"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else {
+                    val encoding = when {
+                        it.outputIsFloat -> tr("settings.hifi.stream.session.float", it.bitsPerSample)
+                        it.bitsPerSample != it.outputContainerBitsPerSample -> tr(
+                            "settings.hifi.stream.session.integer_container",
+                            it.bitsPerSample,
+                            it.outputContainerBitsPerSample,
+                        )
+                        else -> tr("settings.hifi.stream.session.integer", it.bitsPerSample)
+                    }
+                    Text(
+                        tr("settings.hifi.stream.session_initialized", encoding),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                val selectionKey = when (it.formatSelection) {
+                    OutputFormatSelection.SharedMix -> "settings.hifi.stream.selection.shared_mix"
+                    OutputFormatSelection.ExclusiveSource -> "settings.hifi.stream.selection.exclusive_source"
+                    OutputFormatSelection.ExclusiveSameRateAlternate ->
+                        "settings.hifi.stream.selection.same_rate_alternate"
+                    OutputFormatSelection.ExclusiveMonoToStereo ->
+                        "settings.hifi.stream.selection.mono_to_stereo"
+                    OutputFormatSelection.ExclusiveMixFallback ->
+                        "settings.hifi.stream.selection.mix_fallback"
+                    OutputFormatSelection.ExclusiveCommonRateFallback ->
+                        "settings.hifi.stream.selection.common_rate_fallback"
+                    OutputFormatSelection.DoPCarrier -> "settings.hifi.stream.selection.dop_carrier"
+                    OutputFormatSelection.Unknown -> null
+                }
+                selectionKey?.let { key ->
+                    Text(
+                        tr(key),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
+        HorizontalDivider()
+        Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(tr("settings.hifi.test_tone.title"), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        when (controller.hifiPcmTestToneStatus) {
+                            DesktopHiFiTestToneStatus.Idle -> tr("settings.hifi.test_tone.hint")
+                            DesktopHiFiTestToneStatus.Preparing -> tr("settings.hifi.test_tone.preparing")
+                            DesktopHiFiTestToneStatus.Playing -> tr("settings.hifi.test_tone.playing")
+                            DesktopHiFiTestToneStatus.Completed -> tr("settings.hifi.test_tone.completed")
+                            DesktopHiFiTestToneStatus.Failed -> tr("settings.hifi.test_tone.failed")
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (controller.hifiPcmTestToneStatus == DesktopHiFiTestToneStatus.Failed) {
+                            colors.error
+                        } else {
+                            colors.onSurfaceVariant
+                        },
+                    )
+                }
+                DesktopSettingsDropdown(
+                    options = DesktopPcmTestWave.supportedSampleRatesHz,
+                    selected = pcmTestSampleRate,
+                    label = { "${wasapiPcmRateLabel(it)} kHz" },
+                    onSelected = { pcmTestSampleRate = it },
+                )
+                DesktopSettingsDropdown(
+                    options = DesktopPcmTestWave.supportedBitDepths,
+                    selected = pcmTestBitDepth,
+                    label = { "$it bit" },
+                    onSelected = { pcmTestBitDepth = it },
+                )
+                val testToneBusy = controller.hifiPcmTestToneStatus == DesktopHiFiTestToneStatus.Preparing ||
+                    controller.hifiPcmTestToneStatus == DesktopHiFiTestToneStatus.Playing
+                TextButton(
+                    onClick = if (testToneBusy) {
+                        ({ controller.stopHiFiPcmTestTone(restorePlayback = true) })
+                    } else {
+                        ({ controller.playHiFiPcmTestTone(pcmTestSampleRate, pcmTestBitDepth) })
+                    },
+                    enabled = testToneBusy || (available && controller.hifiEngineEnabled &&
+                        !controller.hifiOutputDeviceUnavailable),
+                ) {
+                    Text(
+                        if (testToneBusy) tr("settings.hifi.test_tone.stop")
+                        else tr("settings.hifi.test_tone.play"),
+                    )
+                }
+            }
+        }
+    }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
+        HorizontalDivider()
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(tr("settings.hifi.diagnostics.title"), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    tr("settings.hifi.diagnostics.privacy_note"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+            TextButton(
+                onClick = {
+                    chooseHiFiDiagnosticsDestination()?.let(controller::exportHifiDiagnostics)
+                },
+                enabled = controller.hifiDiagnosticsExportStatus != DesktopHiFiDiagnosticsExportStatus.Exporting,
+            ) {
+                Text(
+                    if (controller.hifiDiagnosticsExportStatus == DesktopHiFiDiagnosticsExportStatus.Exporting) {
+                        tr("settings.hifi.diagnostics.exporting")
+                    } else {
+                        tr("settings.hifi.diagnostics.export")
+                    },
+                )
+            }
+        }
+        when (controller.hifiDiagnosticsExportStatus) {
+            DesktopHiFiDiagnosticsExportStatus.Saved -> Text(
+                tr("settings.hifi.diagnostics.saved"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+            )
+            DesktopHiFiDiagnosticsExportStatus.Failed -> Text(
+                tr("settings.hifi.diagnostics.failed"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.error,
+            )
+            DesktopHiFiDiagnosticsExportStatus.Idle,
+            DesktopHiFiDiagnosticsExportStatus.Exporting -> Unit
+        }
+    }
+    DesktopNetworkRendererSection(controller)
+    DesktopMpdSection(controller)
+}
+
+private val HiFiBufferOptions = listOf(60, 120, 240, 480)
+
+@Composable
+private fun DesktopMpdSection(controller: DesktopPlayerController) {
+    val colors = MaterialTheme.colorScheme
+    val status = controller.mpdStatus
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(tr("settings.mpd.title"), style = MaterialTheme.typography.bodyMedium)
+        Text(
+            tr("settings.mpd.hint"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = controller.mpdHost,
+                onValueChange = controller::updateMpdHost,
+                modifier = Modifier.weight(1f),
+                label = { Text(tr("settings.mpd.host")) },
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = controller.mpdPort,
+                onValueChange = controller::updateMpdPort,
+                modifier = Modifier.width(110.dp),
+                label = { Text(tr("settings.mpd.port")) },
+                singleLine = true,
+            )
+        }
+        OutlinedTextField(
+            value = controller.mpdPassword,
+            onValueChange = controller::updateMpdPassword,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(tr("settings.mpd.password")) },
+            visualTransformation = PasswordVisualTransformation(),
+            singleLine = true,
+        )
+        Text(
+            tr("settings.mpd.password.hint"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = controller::connectMpd, enabled = !controller.mpdLoading) {
+                Text(tr(if (controller.mpdLoading) "settings.mpd.connecting" else "settings.mpd.connect"))
+            }
+            if (controller.mpdLoading) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
+        }
+        controller.mpdError?.let { error ->
+            Text(
+                tr("settings.mpd.failed", error),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.error,
+            )
+        }
+        status?.let { playback ->
+            Text(tr("settings.mpd.status.state", playback.state), style = MaterialTheme.typography.bodySmall)
+            Text(
+                playback.title ?: tr("settings.mpd.status.no_track"),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            val details = listOfNotNull(
+                playback.artists.takeIf(List<String>::isNotEmpty)?.joinToString(", "),
+                playback.album,
+            ).joinToString(" · ")
+            if (details.isNotBlank()) {
+                Text(details, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            }
+            val duration = playback.durationSeconds?.takeIf { it > 0.0 }
+            val elapsed = playback.elapsedSeconds?.coerceAtLeast(0.0) ?: 0.0
+            if (duration != null) {
+                var seekPosition by remember(playback.durationSeconds) {
+                    mutableFloatStateOf(elapsed.toFloat().coerceIn(0f, duration.toFloat()))
+                }
+                var isSeeking by remember(playback.durationSeconds) { mutableStateOf(false) }
+                LaunchedEffect(playback.elapsedSeconds, playback.durationSeconds) {
+                    if (!isSeeking) {
+                        seekPosition = (playback.elapsedSeconds ?: 0.0)
+                            .toFloat()
+                            .coerceIn(0f, duration.toFloat())
+                    }
+                }
+                Slider(
+                    value = seekPosition,
+                    onValueChange = {
+                        seekPosition = it
+                        isSeeking = true
+                    },
+                    valueRange = 0f..duration.toFloat().coerceAtLeast(0.001f),
+                    enabled = !controller.mpdLoading,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        tr(
+                            "settings.mpd.status.position",
+                            formatDuration((seekPosition * 1000.0).toLong()),
+                            formatDuration((duration * 1000.0).toLong()),
+                        ),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                    TextButton(
+                        onClick = {
+                            controller.seekMpd(seekPosition.toDouble())
+                            isSeeking = false
+                        },
+                        enabled = !controller.mpdLoading,
+                    ) { Text(tr("settings.mpd.seek")) }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    playback.volumePercent?.let { tr("settings.mpd.volume.current", it) }
+                        ?: tr("settings.mpd.volume.unknown"),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = { controller.adjustMpdVolume(-5) },
+                    enabled = !controller.mpdLoading && (playback.volumePercent ?: 0) >= 5,
+                ) { Text(tr("settings.mpd.volume.down")) }
+                TextButton(
+                    onClick = { controller.adjustMpdVolume(5) },
+                    enabled = !controller.mpdLoading && (playback.volumePercent ?: 100) <= 95,
+                ) { Text(tr("settings.mpd.volume.up")) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = controller::playMpd, enabled = !controller.mpdLoading) {
+                    Text(tr("settings.network_renderer.transport.play"))
+                }
+                TextButton(onClick = controller::pauseMpd, enabled = !controller.mpdLoading) {
+                    Text(tr("settings.network_renderer.transport.pause"))
+                }
+                TextButton(onClick = controller::stopMpd, enabled = !controller.mpdLoading) {
+                    Text(tr("settings.network_renderer.transport.stop"))
+                }
+            }
+        }
+        HorizontalDivider()
+        Text(tr("settings.mpd.library.title"), style = MaterialTheme.typography.bodyMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = controller.mpdSearchQuery,
+                onValueChange = controller::updateMpdSearchQuery,
+                modifier = Modifier.weight(1f),
+                label = { Text(tr("settings.mpd.search.label")) },
+                singleLine = true,
+            )
+            TextButton(onClick = controller::searchMpdLibrary, enabled = !controller.mpdLoading) {
+                Text(tr("settings.mpd.search.action"))
+            }
+        }
+        if (controller.mpdSearchHasSearched && controller.mpdSearchResults.isEmpty() && !controller.mpdLoading) {
+            Text(tr("settings.mpd.search.empty"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        }
+        Column(
+            modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            controller.mpdSearchResults.forEach { track ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(vertical = 3.dp)) {
+                        Text(
+                            track.title ?: track.uri.substringAfterLast('/'),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        val detail = listOfNotNull(track.artists.joinToString(", ").takeIf(String::isNotBlank), track.album)
+                            .joinToString(" · ")
+                        if (detail.isNotBlank()) {
+                            Text(detail, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        }
+                    }
+                    TextButton(
+                        onClick = { controller.addMpdTrackToQueue(track) },
+                        enabled = !controller.mpdLoading,
+                    ) { Text(tr("settings.mpd.queue.add")) }
+                    TextButton(
+                        onClick = { controller.playMpdTrackNow(track) },
+                        enabled = !controller.mpdLoading,
+                    ) { Text(tr("settings.mpd.track.play_now")) }
+                }
+            }
+        }
+        if (controller.mpdSearchTotalCount > 0) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (controller.mpdSearchResults.isEmpty()) tr("settings.mpd.search.empty")
+                    else tr(
+                        "settings.mpd.search.page",
+                        controller.mpdSearchOffset + 1,
+                        controller.mpdSearchOffset + controller.mpdSearchResults.size,
+                        controller.mpdSearchTotalCount,
+                    ),
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                TextButton(
+                    onClick = { controller.searchMpdLibrary(controller.mpdSearchOffset - DESKTOP_MPD_PAGE_SIZE) },
+                    enabled = !controller.mpdLoading && controller.mpdSearchOffset > 0,
+                ) { Text(tr("settings.mpd.queue.previous")) }
+                TextButton(
+                    onClick = { controller.searchMpdLibrary(controller.mpdSearchOffset + DESKTOP_MPD_PAGE_SIZE) },
+                    enabled = !controller.mpdLoading && controller.mpdSearchHasMore,
+                ) { Text(tr("settings.mpd.queue.next")) }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                tr("settings.mpd.queue.title", controller.mpdQueuePage?.totalCount ?: 0),
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(onClick = { controller.refreshMpdQueue(0) }, enabled = !controller.mpdLoading) {
+                Text(tr("settings.mpd.queue.refresh"))
+            }
+        }
+        controller.mpdQueuePage?.let { queue ->
+            if (queue.totalCount == 0) {
+                Text(tr("settings.mpd.queue.empty"), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        tr("settings.mpd.queue.page", queue.offset + 1, queue.offset + queue.entries.size, queue.totalCount),
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                    TextButton(
+                        onClick = { controller.refreshMpdQueue((queue.offset - DESKTOP_MPD_PAGE_SIZE).coerceAtLeast(0)) },
+                        enabled = !controller.mpdLoading && queue.offset > 0,
+                    ) { Text(tr("settings.mpd.queue.previous")) }
+                    TextButton(
+                        onClick = { controller.refreshMpdQueue(queue.offset + DESKTOP_MPD_PAGE_SIZE) },
+                        enabled = !controller.mpdLoading && queue.offset + queue.entries.size < queue.totalCount,
+                    ) { Text(tr("settings.mpd.queue.next")) }
+                }
+            }
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                queue.entries.forEach { track ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(vertical = 3.dp)) {
+                            val title = track.title ?: track.uri.substringAfterLast('/')
+                            val current = track.queueId != null && track.queueId == status?.currentSongId
+                            Text(
+                                (if (current) "▶ " else "") + title,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                listOfNotNull(track.artists.joinToString(", ").takeIf(String::isNotBlank), track.album)
+                                    .joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = colors.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        track.queueId?.let { id ->
+                            TextButton(onClick = { controller.playMpdQueueItem(id) }, enabled = !controller.mpdLoading) {
+                                Text(tr("settings.mpd.track.play_now"))
+                            }
+                            TextButton(onClick = { controller.removeMpdQueueItem(id) }, enabled = !controller.mpdLoading) {
+                                Text(tr("settings.mpd.queue.remove"))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DesktopNetworkRendererSection(controller: DesktopPlayerController) {
+    val colors = MaterialTheme.colorScheme
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(tr("settings.network_renderer.title"), style = MaterialTheme.typography.bodyMedium)
+        Text(
+            tr("settings.network_renderer.hint"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(
+                onClick = controller::discoverNetworkRenderers,
+                enabled = !controller.networkRendererDiscoveryLoading,
+            ) {
+                Text(
+                    tr(
+                        if (controller.networkRendererDiscoveryLoading) {
+                            "settings.network_renderer.discovering"
+                        } else {
+                            "settings.network_renderer.discover"
+                        },
+                    ),
+                )
+            }
+            if (controller.networkRendererDiscoveryLoading) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
+        }
+        controller.networkRendererDiscoveryError?.let { error ->
+            Text(
+                tr("settings.network_renderer.failed", error),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.error,
+            )
+        }
+        if (controller.networkRendererDiscoveryHasSearched &&
+            !controller.networkRendererDiscoveryLoading &&
+            controller.networkRendererDiscoveryError == null &&
+            controller.networkRendererDevices.isEmpty()
+        ) {
+            Text(
+                tr("settings.network_renderer.empty"),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+            )
+        }
+        controller.networkRendererDevices.forEach { device ->
+            val rendererStatus = controller.networkRendererStatusByIdentity[device.identity]
+            val useOpenHomePlaylistControls = controller.usesOpenHomePlaylistForControls(device)
+            val description = listOfNotNull(device.manufacturer, device.modelName, device.modelNumber)
+                .distinct()
+                .joinToString(" · ")
+            val port = device.descriptionUri.port.takeIf { it >= 0 }
+                ?: if (device.descriptionUri.scheme.equals("https", ignoreCase = true)) 443 else 80
+            val services = buildList {
+                if (device.supportsAvTransport) add(tr("settings.network_renderer.service.transport"))
+                if (device.hasOpenHomePlaylist) add(tr("settings.network_renderer.service.openhome_playlist"))
+                if (DesktopUpnpRendererServiceKind.RENDERING_CONTROL in device.services) {
+                    add(tr("settings.network_renderer.service.rendering"))
+                }
+                if (DesktopUpnpRendererServiceKind.CONNECTION_MANAGER in device.services) {
+                    add(tr("settings.network_renderer.service.connection"))
+                }
+            }.joinToString(" · ")
+            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Text(device.friendlyName, style = MaterialTheme.typography.bodyMedium)
+                if (description.isNotBlank()) {
+                    Text(description, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                }
+                Text(
+                    listOfNotNull(
+                        "${device.descriptionUri.host}:$port",
+                        services.takeIf(String::isNotBlank),
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                val busy = controller.networkRendererOperationLoadingIdentity == device.identity
+                val anyRendererOperationBusy = controller.networkRendererOperationLoadingIdentity != null
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        onClick = { controller.refreshNetworkRendererStatus(device) },
+                        enabled = !anyRendererOperationBusy,
+                    ) { Text(tr(if (busy) "settings.network_renderer.working" else "settings.network_renderer.status.refresh")) }
+                    TextButton(
+                        onClick = { controller.controlNetworkRenderer(device, DesktopUpnpTransportCommand.PLAY) },
+                        enabled = !anyRendererOperationBusy && (useOpenHomePlaylistControls ||
+                            (device.supportsAvTransport && desktopUpnpActionEnabled(rendererStatus, "Play"))),
+                    ) { Text(tr("settings.network_renderer.transport.play")) }
+                    TextButton(
+                        onClick = { controller.controlNetworkRenderer(device, DesktopUpnpTransportCommand.PAUSE) },
+                        enabled = !anyRendererOperationBusy && (useOpenHomePlaylistControls ||
+                            (device.supportsAvTransport && desktopUpnpActionEnabled(rendererStatus, "Pause"))),
+                    ) { Text(tr("settings.network_renderer.transport.pause")) }
+                    TextButton(
+                        onClick = { controller.controlNetworkRenderer(device, DesktopUpnpTransportCommand.STOP) },
+                        enabled = !anyRendererOperationBusy && (useOpenHomePlaylistControls ||
+                            (device.supportsAvTransport && desktopUpnpActionEnabled(rendererStatus, "Stop"))),
+                    ) { Text(tr("settings.network_renderer.transport.stop")) }
+                }
+                if (useOpenHomePlaylistControls) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(
+                            onClick = { controller.skipNetworkRendererPlaylist(device, previous = true) },
+                            enabled = !anyRendererOperationBusy,
+                        ) { Text(tr("settings.network_renderer.playlist.previous")) }
+                        TextButton(
+                            onClick = { controller.skipNetworkRendererPlaylist(device, previous = false) },
+                            enabled = !anyRendererOperationBusy,
+                        ) { Text(tr("settings.network_renderer.playlist.next")) }
+                    }
+                }
+                if (DesktopUpnpRendererServiceKind.RENDERING_CONTROL in device.services) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(tr("settings.network_renderer.volume.title"), style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            tr("settings.network_renderer.volume.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        val volumeActions = rendererStatus?.renderingControlActions
+                        val currentRendererVolume = rendererStatus?.rendererVolume
+                        val currentRendererVolumeMaximum = rendererStatus?.rendererVolumeMaximum
+                        when {
+                            volumeActions == null -> Text(
+                                tr("settings.network_renderer.volume.unknown"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            "GetVolume" !in volumeActions -> Text(
+                                tr("settings.network_renderer.volume.unsupported"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            currentRendererVolume == null -> Text(
+                                tr("settings.network_renderer.volume.read_failed"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            else -> {
+                                val rendererVolume = currentRendererVolume
+                                val rendererVolumeMaximum = currentRendererVolumeMaximum
+                                if (rendererVolumeMaximum != null) {
+                                    Text(
+                                        tr("settings.network_renderer.volume.current", rendererVolume, rendererVolumeMaximum),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                } else {
+                                    Text(
+                                        tr("settings.network_renderer.volume.current_unknown_scale", rendererVolume),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                }
+                                when {
+                                    "SetVolume" !in volumeActions -> Text(
+                                        tr("settings.network_renderer.volume.read_only"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                    rendererVolumeMaximum != null && rendererVolumeMaximum > 0 -> {
+                                        var sliderVolume by remember(
+                                            device.identity,
+                                            rendererVolume,
+                                            rendererVolumeMaximum,
+                                            controller.networkRendererOperationErrors[device.identity],
+                                        ) { mutableFloatStateOf(rendererVolume.toFloat()) }
+                                        Slider(
+                                            value = sliderVolume.coerceIn(0f, rendererVolumeMaximum.toFloat()),
+                                            onValueChange = { sliderVolume = it },
+                                            onValueChangeFinished = {
+                                                controller.setNetworkRendererVolume(
+                                                    device,
+                                                    sliderVolume.roundToInt().coerceIn(0, rendererVolumeMaximum),
+                                                )
+                                            },
+                                            enabled = !anyRendererOperationBusy &&
+                                                desktopUpnpRendererVolumeSliderEnabled(rendererStatus),
+                                        )
+                                    }
+                                    rendererVolumeMaximum == null -> {
+                                        Text(
+                                            tr("settings.network_renderer.volume.scale_unknown"),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            TextButton(
+                                                onClick = { controller.adjustNetworkRendererVolume(device, -1) },
+                                                enabled = !anyRendererOperationBusy &&
+                                                    desktopUpnpRendererVolumeStepEnabled(rendererStatus, -1),
+                                            ) { Text(tr("settings.network_renderer.volume.down")) }
+                                            TextButton(
+                                                onClick = { controller.adjustNetworkRendererVolume(device, 1) },
+                                                enabled = !anyRendererOperationBusy &&
+                                                    desktopUpnpRendererVolumeStepEnabled(rendererStatus, 1),
+                                            ) { Text(tr("settings.network_renderer.volume.up")) }
+                                        }
+                                    }
+                                    else -> Text(
+                                        tr("settings.network_renderer.volume.fixed"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                val canSendLocalQueue = device.hasOpenHomePlaylist ||
+                    (device.supportsAvTransport &&
+                        desktopUpnpActionAdvertised(rendererStatus, "SetAVTransportURI") &&
+                        desktopUpnpActionAdvertised(rendererStatus, "Play"))
+                if (device.supportsAvTransport || device.hasOpenHomePlaylist) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = { controller.sendCurrentLocalTrackToNetworkRenderer(device) },
+                            enabled = !anyRendererOperationBusy && controller.canSendCurrentLocalTrackToNetworkRenderer &&
+                                canSendLocalQueue,
+                        ) { Text(tr("settings.network_renderer.local.send_current")) }
+                        if (busy) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        }
+                    }
+                    if (controller.currentLocalTrackIsCue) {
+                        Text(
+                            tr("settings.network_renderer.local.cue_unsupported"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    if (controller.networkRendererPlayingIdentity == device.identity) {
+                        controller.networkRendererPlayingTrackTitle?.let { title ->
+                            Text(
+                                tr("settings.network_renderer.local.current_track", title),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        controller.networkRendererQueuePosition?.takeIf {
+                            controller.networkRendererQueueIdentity == device.identity
+                        }?.let { position ->
+                            Text(
+                                tr("settings.network_renderer.local.queue_position", position),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        if (controller.networkRendererQueueIdentity == device.identity) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(
+                                    onClick = controller::playPrevious,
+                                    enabled = !anyRendererOperationBusy,
+                                ) { Text(tr("player.previous")) }
+                                TextButton(
+                                    onClick = controller::playNext,
+                                    enabled = !anyRendererOperationBusy,
+                                ) { Text(tr("player.next")) }
+                            }
+                            if (controller.networkRendererQueueExcludedItems > 0) {
+                                Text(
+                                    tr(
+                                        "settings.network_renderer.local.queue_partial",
+                                        controller.networkRendererQueueExcludedItems,
+                                    ),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (controller.networkRendererQueueIsLocal) {
+                            Text(
+                                tr("settings.network_renderer.local.streaming_hint"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                rendererStatus?.let { status ->
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        if (status.connectionState == DesktopUpnpConnectionState.DISCONNECTED) {
+                            Text(
+                                tr("settings.network_renderer.status.disconnected"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        } else {
+                            status.transportState?.let { state ->
+                                Text(
+                                    tr("settings.network_renderer.status.state", state),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            status.transportStatus?.let { state ->
+                                Text(
+                                    tr("settings.network_renderer.status.transport", state),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        val supportedActions = status.avTransportActions
+                        Text(
+                            if (supportedActions == null) {
+                                tr("settings.network_renderer.status.actions_unknown")
+                            } else {
+                                tr(
+                                    "settings.network_renderer.status.actions",
+                                    supportedActions.sorted().joinToString(", ").ifBlank { "—" },
+                                )
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        status.sinkProtocolInfo?.let { protocolInfo ->
+                            val formats = summarizeDesktopUpnpSinkFormats(protocolInfo)
+                            if (formats.isNotEmpty()) {
+                                Text(
+                                    tr("settings.network_renderer.status.formats", formats),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (status.positionMillis != null || status.durationMillis != null) {
+                            Text(
+                                tr(
+                                    "settings.network_renderer.status.position",
+                                    status.positionMillis?.let(::formatDuration) ?: "—",
+                                    status.durationMillis?.let(::formatDuration) ?: "—",
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        val seekDuration = status.durationMillis?.takeIf { it > 0L }
+                        if (seekDuration != null && desktopUpnpRelativeTimeSeekEnabled(status)) {
+                            var seekProgress by remember(device.identity, status.positionMillis, seekDuration) {
+                                mutableFloatStateOf(
+                                    ((status.positionMillis ?: 0L).toDouble() / seekDuration)
+                                        .toFloat()
+                                        .coerceIn(0f, 1f),
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    formatDuration((seekProgress * seekDuration).roundToLong()),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                                Slider(
+                                    value = seekProgress,
+                                    onValueChange = { seekProgress = it },
+                                    onValueChangeFinished = {
+                                        controller.seekNetworkRenderer(
+                                            device,
+                                            (seekProgress * seekDuration).roundToLong().coerceIn(0L, seekDuration),
+                                        )
+                                    },
+                                    enabled = !anyRendererOperationBusy,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    formatDuration(seekDuration),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        status.supplementalErrors.forEach { error ->
+                            Text(
+                                tr("settings.network_renderer.status.detail_failed", error),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.error,
+                            )
+                        }
+                    }
+                }
+                controller.networkRendererOperationErrors[device.identity]?.let { error ->
+                    Text(
+                        tr("settings.network_renderer.action_failed", error),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.error,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun summarizeDesktopUpnpSinkFormats(sinkProtocolInfo: String): String =
+    sinkProtocolInfo.split(',')
+        .mapNotNull { entry -> entry.trim().split(':', limit = 4).getOrNull(2)?.takeIf(String::isNotBlank) }
+        .distinct()
+        .take(8)
+        .joinToString(", ")
+
+private fun formatTelemetryDecibels(value: Double): String =
+    if (value == Double.NEGATIVE_INFINITY) "−∞" else String.format(Locale.ROOT, "%.1f", value)
+
+private fun nearestHiFiBufferOption(value: Int): Int =
+    HiFiBufferOptions.minByOrNull { kotlin.math.abs(it - value) } ?: 120
+
+private fun wasapiPcmRateLabel(sampleRateHz: Int): String =
+    if (sampleRateHz % 1_000 == 0) {
+        (sampleRateHz / 1_000).toString()
+    } else {
+        "${sampleRateHz / 1_000}.${(sampleRateHz % 1_000) / 100}"
+    }
+
+@Composable
+private fun DesktopEqualizerSection(controller: DesktopPlayerController) {
+    val equalizer = controller.equalizer
+    val colors = MaterialTheme.colorScheme
+    var editorOpen by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(role = androidx.compose.ui.semantics.Role.Switch) {
+                controller.updateEqualizer(equalizer.copy(enabled = !equalizer.enabled))
+            }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(tr("settings.equalizer.enable"), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                when {
+                    equalizer.enabled && controller.hifiStreamInfo?.bitPerfectActive == true ->
+                        tr("settings.equalizer.bypassed_bit_perfect")
+                    equalizer.enabled -> tr("settings.equalizer.on")
+                    else -> tr("settings.equalizer.off")
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        LazerSwitch(engine = controller.themeEngine, checked = equalizer.enabled, onCheckedChange = null)
+    }
+    HorizontalDivider()
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            tr("settings.equalizer.preset"),
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        DesktopSettingsDropdown(
+            options = listOf<String?>(null) + LazerEqualizerPresets.map { it.id },
+            selected = equalizer.matchingPresetId(),
+            label = ::equalizerPresetLabel,
+            onSelected = { id ->
+                LazerEqualizerPresets.firstOrNull { it.id == id }?.let { preset ->
+                    controller.updateEqualizer(equalizer.withPreset(preset))
+                }
+            },
+        )
+        TextButton(onClick = { editorOpen = true }) { Text(tr("settings.equalizer.edit")) }
+    }
+    if (editorOpen) {
+        DesktopEqualizerDialog(controller = controller, onDismiss = { editorOpen = false })
+    }
+}
+
+private fun equalizerPresetLabel(id: String?): String = when (id) {
+    "flat" -> tr("settings.equalizer.preset.flat")
+    "pop" -> tr("settings.equalizer.preset.pop")
+    "rock" -> tr("settings.equalizer.preset.rock")
+    "classical" -> tr("settings.equalizer.preset.classical")
+    "jazz" -> tr("settings.equalizer.preset.jazz")
+    "bass" -> tr("settings.equalizer.preset.bass")
+    "vocal" -> tr("settings.equalizer.preset.vocal")
+    "treble" -> tr("settings.equalizer.preset.treble")
+    else -> tr("settings.equalizer.custom")
+}
+
+private fun eqFrequencyLabel(frequencyHz: Double): String =
+    if (frequencyHz >= 1000.0) {
+        val kHz = frequencyHz / 1000.0
+        if (kHz % 1.0 == 0.0) "${kHz.toInt()} kHz" else "$kHz kHz"
+    } else {
+        "${frequencyHz.toInt()} Hz"
+    }
+
+private fun formatEqGain(gainDb: Double): String {
+    val rounded = (gainDb * 10).roundToInt() / 10.0
+    val sign = if (rounded > 0) "+" else ""
+    return "$sign$rounded dB"
+}
+
+@Composable
+private fun DesktopEqualizerDialog(controller: DesktopPlayerController, onDismiss: () -> Unit) {
+    val equalizer = controller.equalizer
+    val colors = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(tr("settings.equalizer.title")) },
+        text = {
+            Column(
+                modifier = Modifier.width(440.dp).heightIn(max = 540.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    tr("settings.equalizer.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                EqSliderRow(
+                    label = tr("settings.equalizer.preamp"),
+                    gainDb = equalizer.preampDb,
+                    range = MIN_LAZER_EQ_PREAMP_DB.toFloat()..MAX_LAZER_EQ_PREAMP_DB.toFloat(),
+                    engine = controller.themeEngine,
+                    onPreview = { controller.previewEqualizer(equalizer.copy(preampDb = clampLazerEqPreampDb(it))) },
+                    onCommit = { controller.updateEqualizer(equalizer.copy(preampDb = clampLazerEqPreampDb(it))) },
+                )
+                HorizontalDivider()
+                equalizer.bands.forEachIndexed { index, band ->
+                    EqSliderRow(
+                        label = eqFrequencyLabel(band.frequencyHz),
+                        gainDb = band.gainDb,
+                        range = MIN_LAZER_EQ_GAIN_DB.toFloat()..MAX_LAZER_EQ_GAIN_DB.toFloat(),
+                        engine = controller.themeEngine,
+                        onPreview = { gain ->
+                            val bands = equalizer.bands.toMutableList()
+                            bands[index] = band.copy(gainDb = clampLazerEqGainDb(gain))
+                            controller.previewEqualizer(equalizer.copy(bands = bands))
+                        },
+                        onCommit = { gain ->
+                            val bands = equalizer.bands.toMutableList()
+                            bands[index] = band.copy(gainDb = clampLazerEqGainDb(gain))
+                            controller.updateEqualizer(equalizer.copy(bands = bands))
+                        },
+                    )
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable(role = androidx.compose.ui.semantics.Role.Switch) {
+                            controller.updateEqualizer(equalizer.copy(limiterEnabled = !equalizer.limiterEnabled))
+                        }
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.equalizer.limiter"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            tr("settings.equalizer.limiter_hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = equalizer.limiterEnabled,
+                        onCheckedChange = null,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(tr("settings.equalizer.close")) }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    controller.updateEqualizer(LazerEqualizerState(enabled = equalizer.enabled))
+                },
+            ) { Text(tr("settings.equalizer.reset")) }
+        },
+    )
+}
+
+@Composable
+private fun EqSliderRow(
+    label: String,
+    gainDb: Double,
+    range: ClosedFloatingPointRange<Float>,
+    engine: LazerThemeEngine,
+    onPreview: (Double) -> Unit,
+    onCommit: (Double) -> Unit,
+) {
+    var local by remember(gainDb) { mutableFloatStateOf(gainDb.toFloat()) }
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(72.dp),
+        )
+        LazerSlider(
+            engine = engine,
+            value = local,
+            onValueChange = {
+                local = it
+                onPreview(it.toDouble())
+            },
+            onValueChangeFinished = { onCommit(local.toDouble()) },
+            valueRange = range,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            formatEqGain(local.toDouble()),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.primary,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(64.dp),
+        )
     }
 }
 
@@ -2058,6 +4078,58 @@ private fun pickBackgroundImage(controller: DesktopPlayerController) {
     if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) {
         chooser.selectedFile?.let(controller::setBackgroundImage)
     }
+}
+
+private fun chooseDesktopAudioFiles(): List<java.io.File>? {
+    val chooser = javax.swing.JFileChooser().apply {
+        dialogTitle = tr("player.open_audio_files")
+        fileSelectionMode = javax.swing.JFileChooser.FILES_ONLY
+        isMultiSelectionEnabled = true
+        fileFilter = javax.swing.filechooser.FileNameExtensionFilter(
+            "FLAC / WAV / DSF / DFF audio",
+            "flac",
+            "wav",
+            "dsf",
+            "dff",
+        )
+    }
+    if (chooser.showOpenDialog(null) != javax.swing.JFileChooser.APPROVE_OPTION) return null
+    return chooser.selectedFiles.takeIf { it.isNotEmpty() }?.toList()
+        ?: chooser.selectedFile?.let(::listOf)
+}
+
+private fun chooseDesktopAudioDirectory(): java.io.File? {
+    val chooser = javax.swing.JFileChooser().apply {
+        dialogTitle = tr("library.local.add_folder")
+        fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+    }
+    if (chooser.showOpenDialog(null) != javax.swing.JFileChooser.APPROVE_OPTION) return null
+    return chooser.selectedFile
+}
+
+private fun chooseHiFiDiagnosticsDestination(): java.io.File? {
+    val chooser = javax.swing.JFileChooser().apply {
+        dialogTitle = tr("settings.hifi.diagnostics.choose_file")
+        selectedFile = java.io.File("lazer-hifi-diagnostics.json")
+        fileFilter = javax.swing.filechooser.FileNameExtensionFilter(
+            tr("settings.hifi.diagnostics.file_type"),
+            "json",
+        )
+    }
+    if (chooser.showSaveDialog(null) != javax.swing.JFileChooser.APPROVE_OPTION) return null
+
+    val selected = chooser.selectedFile
+    val jsonFile = if (selected.extension.equals("json", ignoreCase = true)) {
+        selected
+    } else {
+        java.io.File(selected.parentFile, "${selected.nameWithoutExtension.ifBlank { selected.name }}.json")
+    }
+    if (!jsonFile.exists()) return jsonFile
+
+    val baseName = jsonFile.nameWithoutExtension
+    return generateSequence(1) { it + 1 }
+        .map { suffix -> java.io.File(jsonFile.parentFile, "$baseName ($suffix).json") }
+        .first { !it.exists() }
 }
 
 @Composable
@@ -2326,6 +4398,7 @@ private val ArtworkRequestSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOp
 internal fun String.toArtworkUrl(requestSizePixels: Int = 256): String {
     val trimmed = trim()
     if (trimmed.isEmpty()) return trimmed
+    if (trimmed.startsWith("file:", ignoreCase = true)) return trimmed
     val withScheme = when {
         trimmed.startsWith("//") -> "https:$trimmed"
         trimmed.startsWith("http://") -> "https://" + trimmed.removePrefix("http://")
@@ -2527,6 +4600,13 @@ private fun DesktopNowPlayingPage(
                                 MaterialTheme.typography.bodyLarge,
                                 colors.onSurfaceVariant,
                             )
+                            if (track.isLocalFile) {
+                                Text(
+                                    tr("player.local_file"),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                     Box(
@@ -2562,6 +4642,17 @@ private fun DesktopNowPlayingPage(
                             horizontalArrangement = Arrangement.SpaceEvenly,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            IconButton(
+                                onClick = controller::toggleLiked,
+                                enabled = !track.isLocalFile,
+                                modifier = Modifier.size(44.dp),
+                            ) {
+                                Icon(
+                                    if (controller.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                    tr(if (controller.isLiked) "player.like.remove" else "player.like.add"),
+                                    tint = if (controller.isLiked) colors.primary else colors.onSurfaceVariant,
+                                )
+                            }
                             IconButton(onClick = controller::playPrevious, modifier = Modifier.size(44.dp)) {
                                 Icon(Icons.Filled.SkipPrevious, tr("player.previous"), Modifier.size(27.dp))
                             }
@@ -2571,11 +4662,12 @@ private fun DesktopNowPlayingPage(
                             IconButton(onClick = controller::playNext, modifier = Modifier.size(44.dp)) {
                                 Icon(Icons.Filled.SkipNext, tr("player.next"), Modifier.size(27.dp))
                             }
-                            IconButton(onClick = controller::toggleLiked, modifier = Modifier.size(44.dp)) {
+                            val playMode = controller.playMode
+                            IconButton(onClick = controller::cyclePlayMode, modifier = Modifier.size(44.dp)) {
                                 Icon(
-                                    if (controller.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                                    tr(if (controller.isLiked) "player.like.remove" else "player.like.add"),
-                                    tint = if (controller.isLiked) colors.primary else colors.onSurfaceVariant,
+                                    imageVector = desktopPlayModeIcon(playMode),
+                                    contentDescription = tr(playMode.labelKey),
+                                    tint = if (playMode == DesktopPlayMode.Sequential) colors.onSurfaceVariant else colors.primary,
                                 )
                             }
                         }
@@ -2616,7 +4708,11 @@ private fun TranslatedTrackTitle(
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () -> Unit = {}) {
+private fun PlayerBar(
+    controller: DesktopPlayerController,
+    queueListHeight: Dp = DesktopPanelListHeight,
+    onOpenNowPlaying: () -> Unit = {},
+) {
     val colors = MaterialTheme.colorScheme
     val displayProgress by animateFloatAsState(
         targetValue = controller.progress.coerceIn(0f, 1f),
@@ -2679,25 +4775,24 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                         )
                         ArtistNames(
                             artists = controller.nowPlaying?.artists.orEmpty(),
-                            fallback = controller.nowPlaying?.artist ?: "Lazer",
+                            fallback = controller.nowPlaying?.artist?.takeIf(String::isNotBlank)
+                                ?: if (controller.nowPlaying?.isLocalFile == true) tr("player.local_file") else "Lazer",
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant,
                         )
                     }
                 }
-                IconButton(onClick = controller::toggleLiked, modifier = Modifier.size(30.dp)) {
-                    Icon(
-                        if (controller.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                        tr("player.like"),
-                        Modifier.size(17.dp),
-                        tint = if (controller.isLiked) colors.tertiary else colors.onSurfaceVariant,
-                    )
-                }
             }
 
             Column(Modifier.weight(1f).padding(horizontal = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    CompactIconButton(Icons.Outlined.Shuffle, controller::toggleShuffle, tr("player.shuffle"), controller.shuffle)
+                    CompactIconButton(
+                        if (controller.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                        controller::toggleLiked,
+                        tr("player.like"),
+                        controller.isLiked,
+                        enabled = controller.nowPlaying?.isLocalFile != true,
+                    )
                     CompactIconButton(Icons.Filled.SkipPrevious, controller::playPrevious, tr("player.previous"))
                     IconButton(
                         onClick = controller::togglePlayPause,
@@ -2707,7 +4802,13 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                         Icon(if (controller.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, if (controller.isPlaying) tr("player.pause") else tr("player.play"), Modifier.size(21.dp))
                     }
                     CompactIconButton(Icons.Filled.SkipNext, controller::playNext, tr("player.next"))
-                    CompactIconButton(Icons.Outlined.Repeat, controller::toggleRepeat, tr("player.repeat"), controller.repeat)
+                    val playMode = controller.playMode
+                    CompactIconButton(
+                        desktopPlayModeIcon(playMode),
+                        controller::cyclePlayMode,
+                        tr(playMode.labelKey),
+                        playMode != DesktopPlayMode.Sequential,
+                    )
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     val total = controller.nowPlaying?.durationLabel ?: "00:00"
@@ -2731,7 +4832,11 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.End,
             ) {
-                VolumePanelControl(controller.volume, controller::updateVolume)
+                VolumePanelControl(
+                    volume = controller.volume,
+                    onVolumeChange = controller::updateVolume,
+                    enabled = !controller.hifiDigitalVolumeBypassed,
+                )
                 Spacer(Modifier.width(2.dp))
                 QualityControl(
                     quality = controller.audioQuality,
@@ -2749,7 +4854,7 @@ private fun PlayerBar(controller: DesktopPlayerController, onOpenNowPlaying: () 
                 PlayerPanelControl(
                     icon = Icons.AutoMirrored.Outlined.QueueMusic,
                     label = tr("player.queue"),
-                ) { PlayQueuePanel(controller) }
+                ) { PlayQueuePanel(controller, queueListHeight) }
                 Spacer(Modifier.width(2.dp))
                 CompactIconButton(
                     Icons.Outlined.ModeComment,
@@ -2839,9 +4944,20 @@ private fun ThinSeekBar(
 }
 
 @Composable
-private fun CompactIconButton(icon: ImageVector, onClick: () -> Unit, description: String, selected: Boolean = false) {
-    IconButton(onClick = onClick, modifier = Modifier.size(30.dp)) {
-        Icon(icon, description, Modifier.size(18.dp), tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+private fun CompactIconButton(
+    icon: ImageVector,
+    onClick: () -> Unit,
+    description: String,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+) {
+    IconButton(onClick = onClick, enabled = enabled, modifier = Modifier.size(30.dp)) {
+        Icon(
+            icon,
+            description,
+            Modifier.size(18.dp),
+            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
@@ -2850,6 +4966,7 @@ private fun CompactIconButton(icon: ImageVector, onClick: () -> Unit, descriptio
 private fun VolumePanelControl(
     volume: Float,
     onVolumeChange: (Float) -> Unit,
+    enabled: Boolean,
 ) {
     val colors = MaterialTheme.colorScheme
     var iconHovered by remember { mutableStateOf(false) }
@@ -2893,18 +5010,26 @@ private fun VolumePanelControl(
                     border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.85f)),
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-                        Text(
-                            tr("player.volume.pct", (volume * 100).roundToInt()),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = colors.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        ThinSeekBar(
-                            progress = volume,
-                            onSeek = onVolumeChange,
-                            onSeekFinished = {},
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                        if (enabled) {
+                            Text(
+                                tr("player.volume.pct", (volume * 100).roundToInt()),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = colors.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            ThinSeekBar(
+                                progress = volume,
+                                onSeek = onVolumeChange,
+                                onSeekFinished = {},
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            Text(
+                                tr("player.volume.external"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
@@ -2939,61 +5064,48 @@ private fun QualityControl(
                 onDismissRequest = { menuOpen = false },
                 properties = PopupProperties(focusable = true),
             ) {
-                Surface(
-                    modifier = Modifier.width(168.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    color = colors.surface,
-                    shadowElevation = 8.dp,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
-                ) {
-                    Column(Modifier.padding(vertical = 8.dp, horizontal = 6.dp)) {
+                PaperMenuCard(width = 168.dp, cornerRadius = 16.dp) {
+                    PaperMenuTitle(tr("player.quality"))
+                    listOf(
+                        AudioQuality.STANDARD,
+                        AudioQuality.HIGHER,
+                        AudioQuality.EXHIGH,
+                        AudioQuality.LOSSLESS,
+                        AudioQuality.HI_RES,
+                        AudioQuality.JYMASTER,
+                    ).forEach { option ->
+                        val selected = option == quality
+                        TextButton(
+                            onClick = {
+                                onQualityChange(option)
+                                menuOpen = false
+                            },
+                            modifier = Modifier.fillMaxWidth().height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp),
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = if (selected) colors.primary else colors.onSurfaceVariant,
+                                containerColor = if (selected) colors.primaryContainer else Color.Transparent,
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text(
+                                option.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.weight(1f),
+                                textAlign = TextAlign.Start,
+                            )
+                            if (selected) {
+                                Icon(Icons.Outlined.CheckCircle, null, Modifier.size(14.dp), tint = colors.primary)
+                            }
+                        }
+                    }
+                    bitrate?.let {
                         Text(
-                            tr("player.quality"),
-                            style = MaterialTheme.typography.labelMedium,
+                            tr("player.quality.current", it / 1000),
+                            style = MaterialTheme.typography.labelSmall,
                             color = colors.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                         )
-                        listOf(
-                            AudioQuality.STANDARD,
-                            AudioQuality.HIGHER,
-                            AudioQuality.EXHIGH,
-                            AudioQuality.LOSSLESS,
-                            AudioQuality.HI_RES,
-                            AudioQuality.JYMASTER,
-                        ).forEach { option ->
-                            val selected = option == quality
-                            TextButton(
-                                onClick = {
-                                    onQualityChange(option)
-                                    menuOpen = false
-                                },
-                                modifier = Modifier.fillMaxWidth().height(32.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp),
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = if (selected) colors.primary else colors.onSurfaceVariant,
-                                    containerColor = if (selected) colors.primaryContainer else Color.Transparent,
-                                ),
-                                shape = RoundedCornerShape(8.dp),
-                            ) {
-                                Text(
-                                    option.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    modifier = Modifier.weight(1f),
-                                    textAlign = TextAlign.Start,
-                                )
-                                if (selected) {
-                                    Icon(Icons.Outlined.CheckCircle, null, Modifier.size(14.dp), tint = colors.primary)
-                                }
-                            }
-                        }
-                        bitrate?.let {
-                            Text(
-                                tr("player.quality.current", it / 1000),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = colors.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            )
-                        }
                     }
                 }
             }
@@ -3005,12 +5117,8 @@ private val DesktopQueueRowHeight = 46.dp
 private val DesktopPanelWidth = 400.dp
 private val DesktopPanelListHeight = 336.dp
 
-private val DesktopPlayMode.labelKey: String
-    get() = when (this) {
-        DesktopPlayMode.ListLoop -> "player.mode.list_loop"
-        DesktopPlayMode.SingleLoop -> "player.mode.single_loop"
-        DesktopPlayMode.Shuffle -> "player.shuffle"
-    }
+/** What the queue card wears around its list: header, the mode row, and their paddings. */
+private val DesktopPanelChromeHeight = 170.dp
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -3088,7 +5196,7 @@ private fun PlayerPanelHeader(
 }
 
 @Composable
-private fun PlayQueuePanel(controller: DesktopPlayerController) {
+private fun PlayQueuePanel(controller: DesktopPlayerController, listHeight: Dp) {
     val inRoom = controller.listenTogether != null
     val tracks = if (inRoom) controller.roomQueue else controller.queue
     val currentIndex = tracks.indexOfFirst { it.id == controller.nowPlaying?.id }
@@ -3142,7 +5250,7 @@ private fun PlayQueuePanel(controller: DesktopPlayerController) {
             )
         } else if (inRoom) {
             LazyColumn(
-                Modifier.fillMaxWidth().height(DesktopPanelListHeight).padding(horizontal = 8.dp),
+                Modifier.fillMaxWidth().height(listHeight).padding(horizontal = 8.dp),
                 contentPadding = PaddingValues(vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
@@ -3162,6 +5270,7 @@ private fun PlayQueuePanel(controller: DesktopPlayerController) {
                 tracks = tracks,
                 currentIndex = currentIndex,
                 isPlaying = controller.isPlaying,
+                listHeight = listHeight,
                 onPlayAt = controller::playQueueAt,
                 onRemoveAt = controller::removeFromQueue,
                 onMove = controller::moveInQueue,
@@ -3175,6 +5284,7 @@ private fun ReorderableDesktopQueue(
     tracks: List<TrackItem>,
     currentIndex: Int,
     isPlaying: Boolean,
+    listHeight: Dp,
     onPlayAt: (Int) -> Unit,
     onRemoveAt: (Int) -> Unit,
     onMove: (Int, Int) -> Unit,
@@ -3196,7 +5306,7 @@ private fun ReorderableDesktopQueue(
     }
 
     LazyColumn(
-        Modifier.fillMaxWidth().height(DesktopPanelListHeight).padding(horizontal = 8.dp),
+        Modifier.fillMaxWidth().height(listHeight).padding(horizontal = 8.dp),
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {

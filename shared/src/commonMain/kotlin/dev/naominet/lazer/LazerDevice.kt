@@ -89,6 +89,13 @@ interface LazerPlayer {
     /** Whether the platform should keep feeding the app the captured spectrum. */
     fun updateAudioLevels(enabled: Boolean)
 
+    /**
+     * Applies the listener's equalizer to the output. Platforms whose engine has no DSP inherit the
+     * no-op default, which keeps the preference harmless there instead of an unsupported call.
+     */
+    fun updateEqualizer(state: LazerEqualizerState) {
+    }
+
     fun stopAndClearSession()
 }
 

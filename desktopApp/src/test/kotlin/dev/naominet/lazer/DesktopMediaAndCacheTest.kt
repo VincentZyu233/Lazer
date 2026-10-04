@@ -537,6 +537,9 @@ class DesktopMediaAndCacheTest {
             "https://p1.music.126.net/cover.jpg?param=96y96",
             "http://p1.music.126.net/cover.jpg?param=360y360".toPaletteArtworkUrl(),
         )
+        val localArtwork = "file:///C:/Users/test/Music/cover art.jpg"
+        assertEquals(localArtwork, localArtwork.toPaletteArtworkUrl())
+        assertEquals(localArtwork, localArtwork.toArtworkUrl(96))
     }
 
     @Test

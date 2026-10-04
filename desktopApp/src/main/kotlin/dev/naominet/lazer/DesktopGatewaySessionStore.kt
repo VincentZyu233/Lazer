@@ -121,14 +121,76 @@ internal object DesktopSettings {
         get() = DesktopStateFile.get("lyrics.show_full_lines")?.toBooleanStrictOrNull() ?: false
         set(value) = DesktopStateFile.set("lyrics.show_full_lines", value.toString())
 
+    /** Backend-exclusive request: WASAPI Exclusive on Windows or CoreAudio Hog Mode on macOS. */
     var exclusiveAudio: Boolean
         get() = DesktopStateFile.get("playback.exclusive_audio")?.toBooleanStrictOrNull() ?: false
         set(value) = DesktopStateFile.set("playback.exclusive_audio", value.toString())
+
+    var equalizer: LazerEqualizerState
+        get() = parseLazerEqualizer(DesktopStateFile.get("playback.equalizer"))
+        set(value) = DesktopStateFile.set("playback.equalizer", value.serialize())
+
+    /** ReplayGain normalization mode for local files with supported metadata. */
+    var replayGainMode: DesktopReplayGainMode
+        get() = DesktopStateFile.get("playback.replaygain_mode")
+            ?.let { stored -> DesktopReplayGainMode.entries.firstOrNull { it.name.equals(stored, ignoreCase = true) } }
+            ?: DesktopReplayGainMode.Off
+        set(value) = DesktopStateFile.set("playback.replaygain_mode", value.name)
+
+    /** Whether the native FFmpeg/WASAPI engine is the one playing. Off falls back to Java Sound. */
+    var hifiEngine: Boolean
+        get() = DesktopStateFile.get("playback.hifi_engine")?.toBooleanStrictOrNull() ?: false
+        set(value) = DesktopStateFile.set("playback.hifi_engine", value.toString())
+
+    /** Output buffer length in milliseconds for the native engine. */
+    var hifiBufferMillis: Int
+        get() = DesktopStateFile.get("playback.hifi_buffer_millis")?.toIntOrNull()?.coerceIn(30, 1_000) ?: 120
+        set(value) = DesktopStateFile.set("playback.hifi_buffer_millis", value.coerceIn(30, 1_000).toString())
+
+    /** Bit-perfect exclusive output, which bypasses the engine's own volume and EQ. */
+    var hifiBitPerfect: Boolean
+        get() = DesktopStateFile.get("playback.hifi_bit_perfect")?.toBooleanStrictOrNull() ?: false
+        set(value) = DesktopStateFile.set("playback.hifi_bit_perfect", value.toString())
+
+    /** Require raw DSD to open only as an exact DoP carrier; unsupported paths fail explicitly. */
+    var hifiDoPOutput: Boolean
+        get() = DesktopStateFile.get("playback.hifi_dop_output")?.toBooleanStrictOrNull() ?: false
+        set(value) = DesktopStateFile.set("playback.hifi_dop_output", value.toString())
+
+    /** Opaque stable identity for the selected Windows WASAPI render endpoint; null means default. */
+    var hifiDeviceIdentity: String?
+        get() = DesktopStateFile.get("playback.hifi_device_identity")?.takeIf(String::isNotBlank)
+        set(value) = DesktopStateFile.set("playback.hifi_device_identity", value?.takeIf(String::isNotBlank))
+
+    /** Address of the last MPD control server. No credentials are persisted. */
+    var mpdHost: String
+        get() = DesktopStateFile.get("network.mpd.host")?.takeIf(String::isNotBlank) ?: "127.0.0.1"
+        set(value) = DesktopStateFile.set("network.mpd.host", value.trim().takeIf(String::isNotBlank))
+
+    var mpdPort: Int
+        get() = DesktopStateFile.get("network.mpd.port")?.toIntOrNull()?.takeIf { it in 1..65535 } ?: 6600
+        set(value) {
+            if (value in 1..65535) DesktopStateFile.set("network.mpd.port", value.toString())
+        }
 
     var volume: Float
         get() = DesktopStateFile.get("playback.volume")?.toFloatOrNull()?.coerceIn(0f, 1f)
             ?: DEFAULT_DESKTOP_VOLUME
         set(value) = DesktopStateFile.set("playback.volume", value.coerceIn(0f, 1f).toString())
+
+    var localLibraryRoots: List<String>
+        get() = DesktopStateFile.get("library.local.roots")
+            ?.split(',')
+            ?.mapNotNull { encoded ->
+                runCatching { String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8) }.getOrNull()
+            }
+            ?.filter(String::isNotBlank)
+            .orEmpty()
+        set(value) = DesktopStateFile.set(
+            "library.local.roots",
+            value.map { Base64.getUrlEncoder().withoutPadding().encodeToString(it.toByteArray(Charsets.UTF_8)) }
+                .joinToString(","),
+        )
 }
 
 private object DesktopStateFile {

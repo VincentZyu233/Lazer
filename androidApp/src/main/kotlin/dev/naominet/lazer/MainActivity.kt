@@ -12,14 +12,17 @@ import androidx.compose.runtime.mutableStateOf
 
 class MainActivity : ComponentActivity() {
     private val listenTogetherInvitation = mutableStateOf<String?>(null)
+    private var screenHost: AndroidScreenHost? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         listenTogetherInvitation.value = intent?.dataString
 
+        AndroidPlaybackConnection.restorePersistedQueue(this)
         val controller = LazerGatewayController(androidDevice(this))
         val screen = AndroidScreenHost(this)
+        screenHost = screen
         setContent {
             LazerApp(
                 controller = controller,
@@ -41,6 +44,18 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         listenTogetherInvitation.value = intent.dataString
+    }
+
+    override fun onResume() {
+        super.onResume()
+        screenHost?.refreshPcmTestToneCapabilities()
+        screenHost?.refreshUsbUacDevices()
+    }
+
+    override fun onDestroy() {
+        screenHost?.close()
+        screenHost = null
+        super.onDestroy()
     }
 
     private companion object {

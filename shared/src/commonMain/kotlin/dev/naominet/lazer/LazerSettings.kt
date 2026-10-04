@@ -161,6 +161,11 @@ class LazerSettingsStore(
         get() = preferences.getBoolean(KEY_EXCLUSIVE_AUDIO, defaultsExclusiveAudio)
         set(value) = preferences.putBoolean(KEY_EXCLUSIVE_AUDIO, value)
 
+    /** The listener's equalizer curve. Stored as one encoded string so every platform reads it. */
+    var equalizer: LazerEqualizerState
+        get() = parseLazerEqualizer(preferences.getString(KEY_EQUALIZER, null))
+        set(value) = preferences.putString(KEY_EQUALIZER, value.serialize())
+
     var playbackInterface: LazerPlaybackInterface
         get() = parseLazerPlaybackInterface(preferences.getString(KEY_PLAYBACK_INTERFACE, null))
         set(value) = preferences.putString(KEY_PLAYBACK_INTERFACE, value.name)
@@ -205,6 +210,7 @@ class LazerSettingsStore(
         const val KEY_AUDIO_QUALITY = "playback.audio_quality"
         const val KEY_PLAY_MODE = "playback.mode"
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
+        const val KEY_EQUALIZER = "playback.equalizer"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"
         const val KEY_HAPTICS_ENABLED = "interaction.haptics_enabled"

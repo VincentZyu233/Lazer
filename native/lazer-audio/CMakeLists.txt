@@ -1,0 +1,407 @@
+cmake_minimum_required(VERSION 3.21)
+project(lazer_audio LANGUAGES CXX)
+
+# FFmpeg stays outside the repository. Windows consumes the supplied import-library bundle;
+# Linux/macOS use system pkg-config unless -DLAZER_FFMPEG_ROOT=<dir> or FFMPEG_ROOT points to a
+# shared development package with lib/pkgconfig metadata.
+set(LAZER_FFMPEG_ROOT "" CACHE PATH "Directory holding the prebuilt FFmpeg include/ lib/ bin/")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+find_package(LazerFFmpeg REQUIRED)
+option(LAZER_AUDIO_BUILD_PROBE "Build the lazer-audio-probe console harness" OFF)
+option(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL
+    "Allow the test-only ALSA null PCM route (requires a Linux probe build)" OFF)
+
+set(LAZER_AUDIO_PLATFORM_SOURCES "")
+set(LAZER_AUDIO_PLATFORM_LIBRARIES "")
+if(WIN32)
+    list(APPEND LAZER_AUDIO_PLATFORM_SOURCES
+        src/output_wasapi.cpp
+        src/device_catalog_wasapi.cpp
+        src/endpoint_volume_wasapi.cpp
+        src/pcm_format_probe_wasapi.cpp)
+    list(APPEND LAZER_AUDIO_PLATFORM_LIBRARIES ole32 mmdevapi user32 advapi32)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(ALSA REQUIRED IMPORTED_TARGET alsa)
+    list(APPEND LAZER_AUDIO_PLATFORM_SOURCES
+        src/output_alsa.cpp
+        src/device_catalog_alsa.cpp)
+    list(APPEND LAZER_AUDIO_PLATFORM_LIBRARIES PkgConfig::ALSA)
+elseif(APPLE)
+    find_library(COREAUDIO_FRAMEWORK CoreAudio REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+    list(APPEND LAZER_AUDIO_PLATFORM_SOURCES
+        src/output_coreaudio.cpp
+        src/device_catalog_coreaudio.cpp
+        src/coreaudio_format_policy.cpp)
+    list(APPEND LAZER_AUDIO_PLATFORM_LIBRARIES
+        ${COREAUDIO_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK}
+        ${AUDIOTOOLBOX_FRAMEWORK})
+else()
+    message(FATAL_ERROR "No local audio output backend is implemented for ${CMAKE_SYSTEM_NAME}")
+endif()
+
+add_library(lazer-audio SHARED
+    src/common.cpp
+    src/dff_dsf_reader.cpp
+    src/engine.cpp
+    src/source.cpp
+    src/dop_packer.cpp
+    src/dsp_chain.cpp
+    src/ring_buffer.cpp
+    src/pcm_output.cpp
+    src/api.cpp
+    ${LAZER_AUDIO_PLATFORM_SOURCES}
+)
+
+target_include_directories(lazer-audio PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${LAZER_FFMPEG_INCLUDE_DIR}")
+target_link_libraries(lazer-audio PRIVATE ${LAZER_FFMPEG_LIBRARIES}
+    ${LAZER_AUDIO_PLATFORM_LIBRARIES})
+target_compile_features(lazer-audio PRIVATE cxx_std_20)
+target_compile_definitions(lazer-audio PRIVATE LAZER_AUDIO_EXPORTS)
+if(WIN32)
+    target_compile_definitions(lazer-audio PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+if(MSVC)
+    target_link_options(lazer-audio PRIVATE "/EXPORT:lazer_audio_abi_version")
+endif()
+set_target_properties(lazer-audio PROPERTIES CXX_EXTENSIONS OFF)
+if(APPLE)
+    set_target_properties(lazer-audio PROPERTIES BUILD_RPATH "@loader_path" INSTALL_RPATH "@loader_path")
+elseif(UNIX)
+    set_target_properties(lazer-audio PROPERTIES BUILD_RPATH "\$ORIGIN" INSTALL_RPATH "\$ORIGIN")
+endif()
+
+# Same rule as the taskbar bridge: the app ships without a Visual C++ redistributable, so the CRT
+# is linked statically. FFmpeg objects never cross that boundary; only the C ABI does.
+if(MSVC)
+    set_property(TARGET lazer-audio PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_compile_options(lazer-audio PRIVATE /W4 /permissive- /EHsc)
+endif()
+
+# JNA loads the DLL by absolute path, but FFmpeg's DLLs must sit beside it or be found by the
+# loader, so copy them into the build directory for local runs and jpackage staging.
+if(LAZER_FFMPEG_RUNTIME_FILES)
+    add_custom_command(TARGET lazer-audio POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                "$<TARGET_FILE_DIR:lazer-audio>"
+        VERBATIM)
+endif()
+
+# Offline decode/render self test, built on demand with -DLAZER_AUDIO_BUILD_PROBE=ON.
+if(LAZER_AUDIO_BUILD_PROBE)
+    # Exercise the complete native playback session without a physical endpoint. The test links the
+    # Engine sources directly and supplies its own fake platform-output factory.
+    add_executable(lazer-audio-engine-gapless-probe
+        tools/lazer_audio_engine_gapless_probe.cpp
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/engine.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+        src/dsp_chain.cpp
+        src/ring_buffer.cpp
+        src/pcm_output.cpp)
+    target_include_directories(lazer-audio-engine-gapless-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(lazer-audio-engine-gapless-probe PRIVATE ${LAZER_FFMPEG_LIBRARIES})
+    target_compile_features(lazer-audio-engine-gapless-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-engine-gapless-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-engine-gapless-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-engine-gapless-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(LAZER_FFMPEG_RUNTIME_FILES)
+        add_custom_command(TARGET lazer-audio-engine-gapless-probe POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                    "$<TARGET_FILE_DIR:lazer-audio-engine-gapless-probe>"
+            VERBATIM)
+    endif()
+    enable_testing()
+    add_test(NAME lazer-audio-engine-gapless
+        COMMAND $<TARGET_FILE:lazer-audio-engine-gapless-probe>)
+
+    # Validate the Engine's global RequireDoP policy against PCM and raw stereo DSD using a
+    # variable-write fake endpoint; no physical audio device is opened.
+    add_executable(lazer-audio-engine-dop-probe
+        tools/lazer_audio_engine_dop_probe.cpp
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/engine.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+        src/dsp_chain.cpp
+        src/ring_buffer.cpp
+        src/pcm_output.cpp)
+    target_include_directories(lazer-audio-engine-dop-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(lazer-audio-engine-dop-probe PRIVATE ${LAZER_FFMPEG_LIBRARIES})
+    target_compile_features(lazer-audio-engine-dop-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-engine-dop-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-engine-dop-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-engine-dop-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(LAZER_FFMPEG_RUNTIME_FILES)
+        add_custom_command(TARGET lazer-audio-engine-dop-probe POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                    "$<TARGET_FILE_DIR:lazer-audio-engine-dop-probe>"
+            VERBATIM)
+    endif()
+    add_test(NAME lazer-audio-engine-dop
+        COMMAND $<TARGET_FILE:lazer-audio-engine-dop-probe>)
+    set_tests_properties(lazer-audio-engine-dop PROPERTIES TIMEOUT 30)
+
+    # Keep ALSA recovery state semantics executable without an ALSA device or alsa-lib runtime.
+    add_executable(lazer-audio-alsa-recovery-probe tools/lazer_audio_alsa_recovery_probe.cpp)
+    target_include_directories(lazer-audio-alsa-recovery-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_features(lazer-audio-alsa-recovery-probe PRIVATE cxx_std_20)
+    if(MSVC)
+        set_property(TARGET lazer-audio-alsa-recovery-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-alsa-recovery-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-alsa-recovery
+        COMMAND $<TARGET_FILE:lazer-audio-alsa-recovery-probe>)
+    set_tests_properties(lazer-audio-alsa-recovery PROPERTIES TIMEOUT 15)
+
+    # Verify ALSA's final PCM byte-layout conversions without requiring alsa-lib or a device.
+    add_executable(lazer-audio-alsa-pcm-packing-probe
+        tools/lazer_audio_alsa_pcm_packing_probe.cpp)
+    target_include_directories(lazer-audio-alsa-pcm-packing-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_features(lazer-audio-alsa-pcm-packing-probe PRIVATE cxx_std_20)
+    if(MSVC)
+        set_property(TARGET lazer-audio-alsa-pcm-packing-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-alsa-pcm-packing-probe PRIVATE /W4 /WX /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-alsa-pcm-packing
+        COMMAND $<TARGET_FILE:lazer-audio-alsa-pcm-packing-probe>)
+    set_tests_properties(lazer-audio-alsa-pcm-packing PROPERTIES TIMEOUT 15)
+
+    # Keep CoreAudio's target-vs-HAL PCM format policy executable on non-Apple build hosts.
+    # This validates negotiation decisions only; the HAL output adapter itself is Apple-only.
+    add_executable(lazer-audio-coreaudio-policy-probe
+        tools/lazer_audio_coreaudio_policy_probe.cpp
+        src/coreaudio_format_policy.cpp)
+    target_include_directories(lazer-audio-coreaudio-policy-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_compile_features(lazer-audio-coreaudio-policy-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-coreaudio-policy-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-coreaudio-policy-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-coreaudio-policy-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-coreaudio-policy
+        COMMAND $<TARGET_FILE:lazer-audio-coreaudio-policy-probe>)
+    set_tests_properties(lazer-audio-coreaudio-policy PROPERTIES TIMEOUT 15)
+
+    # Exercise the realtime callback's lock-free PCM queue, planar/interleaved layouts and byte
+    # order on every host; the actual HAL IOProc still requires the Apple SDK and a macOS runner.
+    add_executable(lazer-audio-coreaudio-queue-probe
+        tools/lazer_audio_coreaudio_queue_probe.cpp)
+    target_include_directories(lazer-audio-coreaudio-queue-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_features(lazer-audio-coreaudio-queue-probe PRIVATE cxx_std_20)
+    if(MSVC)
+        set_property(TARGET lazer-audio-coreaudio-queue-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-coreaudio-queue-probe PRIVATE /W4 /WX /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-coreaudio-queue
+        COMMAND $<TARGET_FILE:lazer-audio-coreaudio-queue-probe>)
+    set_tests_properties(lazer-audio-coreaudio-queue PROPERTIES TIMEOUT 15)
+
+    # Exercise the bounded queued-source PCM staging buffer without starting an Engine or audio
+    # backend; this remains safe to build while the engine integration is under development.
+    add_executable(lazer-audio-queued-pcm-buffer-probe
+        tools/lazer_audio_queued_pcm_buffer_probe.cpp)
+    target_include_directories(lazer-audio-queued-pcm-buffer-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_compile_features(lazer-audio-queued-pcm-buffer-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-queued-pcm-buffer-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-queued-pcm-buffer-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-queued-pcm-buffer-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-queued-pcm-buffer
+        COMMAND $<TARGET_FILE:lazer-audio-queued-pcm-buffer-probe>)
+    set_tests_properties(lazer-audio-queued-pcm-buffer PROPERTIES TIMEOUT 15)
+
+    # End-to-end exact integer PCM output and gapless capture over the advertised rate/depth grid.
+    add_executable(lazer-audio-engine-pcm-matrix-probe
+        tools/lazer_audio_engine_pcm_matrix_probe.cpp
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/engine.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+        src/dsp_chain.cpp
+        src/ring_buffer.cpp
+        src/pcm_output.cpp)
+    target_include_directories(lazer-audio-engine-pcm-matrix-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(lazer-audio-engine-pcm-matrix-probe PRIVATE ${LAZER_FFMPEG_LIBRARIES})
+    target_compile_features(lazer-audio-engine-pcm-matrix-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-engine-pcm-matrix-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-engine-pcm-matrix-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-engine-pcm-matrix-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(LAZER_FFMPEG_RUNTIME_FILES)
+        add_custom_command(TARGET lazer-audio-engine-pcm-matrix-probe POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                    "$<TARGET_FILE_DIR:lazer-audio-engine-pcm-matrix-probe>"
+            VERBATIM)
+    endif()
+    add_test(NAME lazer-audio-engine-pcm-matrix
+        COMMAND $<TARGET_FILE:lazer-audio-engine-pcm-matrix-probe>)
+    add_test(NAME lazer-audio-engine-pcm-reopen
+        COMMAND $<TARGET_FILE:lazer-audio-engine-pcm-matrix-probe> --pcm-format-reopen)
+    add_test(NAME lazer-audio-engine-cue-gapless
+        COMMAND $<TARGET_FILE:lazer-audio-engine-pcm-matrix-probe> --cue-gapless)
+    add_test(NAME lazer-audio-engine-replaygain-gapless
+        COMMAND $<TARGET_FILE:lazer-audio-engine-pcm-matrix-probe> --replaygain-gapless)
+    set_tests_properties(lazer-audio-engine-cue-gapless PROPERTIES TIMEOUT 10)
+    set_tests_properties(lazer-audio-engine-replaygain-gapless PROPERTIES TIMEOUT 15)
+    set_tests_properties(lazer-audio-engine-pcm-reopen PROPERTIES TIMEOUT 15)
+
+    if(WIN32)
+        add_executable(lazer-audio-probe tools/lazer_audio_probe.cpp)
+        target_include_directories(lazer-audio-probe PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
+        target_link_libraries(lazer-audio-probe PRIVATE lazer-audio)
+        target_compile_features(lazer-audio-probe PRIVATE cxx_std_20)
+        target_compile_definitions(lazer-audio-probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+        if(MSVC)
+            set_property(TARGET lazer-audio-probe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        endif()
+    endif()
+
+    # Hardware-free regression checks for the float DSP chain and its sample-peak limiter.
+    add_executable(lazer-audio-dsp-probe
+        tools/lazer_audio_dsp_probe.cpp
+        src/dsp_chain.cpp
+        src/pcm_output.cpp
+    )
+    target_include_directories(lazer-audio-dsp-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_compile_features(lazer-audio-dsp-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-dsp-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-dsp-probe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-dsp-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-dsp
+        COMMAND $<TARGET_FILE:lazer-audio-dsp-probe>)
+
+    # Verify DoP framing independently of FFmpeg, the engine and physical audio endpoints.
+    add_executable(lazer-audio-dop-packer-probe
+        tools/lazer_audio_dop_packer_probe.cpp
+        src/dop_packer.cpp)
+    target_include_directories(lazer-audio-dop-packer-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_features(lazer-audio-dop-packer-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-dop-packer-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-dop-packer-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-dop-packer-probe PRIVATE /W4 /WX /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-dop-packer
+        COMMAND $<TARGET_FILE:lazer-audio-dop-packer-probe>)
+    set_tests_properties(lazer-audio-dop-packer PROPERTIES TIMEOUT 15)
+
+    # Source-only verification bypasses WASAPI completely and consumes decoded PCM in memory.
+    add_executable(lazer-audio-source-probe
+        tools/lazer_audio_source_probe.cpp
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+    )
+    target_include_directories(lazer-audio-source-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(lazer-audio-source-probe PRIVATE ${LAZER_FFMPEG_LIBRARIES})
+    target_compile_features(lazer-audio-source-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-source-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-source-probe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-source-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(LAZER_FFMPEG_RUNTIME_FILES)
+        add_custom_command(TARGET lazer-audio-source-probe POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                    "$<TARGET_FILE_DIR:lazer-audio-source-probe>"
+            VERBATIM)
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
+        # This probe opens a test-only ALSA null PCM through the real AlsaOutput implementation.
+        # It checks PCM queue lifecycle and the exact DoP carrier tuple/byte path without a sound card.
+        target_compile_definitions(lazer-audio PRIVATE LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
+        add_executable(lazer-audio-alsa-output-probe tools/lazer_audio_alsa_output_probe.cpp)
+        target_include_directories(lazer-audio-alsa-output-probe PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/include"
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${LAZER_FFMPEG_INCLUDE_DIR}")
+        target_link_libraries(lazer-audio-alsa-output-probe PRIVATE lazer-audio)
+        target_compile_features(lazer-audio-alsa-output-probe PRIVATE cxx_std_20)
+        add_test(NAME lazer-audio-alsa-output
+            COMMAND $<TARGET_FILE:lazer-audio-alsa-output-probe>)
+        set_tests_properties(lazer-audio-alsa-output PROPERTIES TIMEOUT 60)
+    endif()
+endif()
+
+if(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL AND
+    (NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT LAZER_AUDIO_BUILD_PROBE))
+    message(FATAL_ERROR "LAZER_AUDIO_TEST_ALLOW_ALSA_NULL requires a Linux build with LAZER_AUDIO_BUILD_PROBE=ON")
+endif()

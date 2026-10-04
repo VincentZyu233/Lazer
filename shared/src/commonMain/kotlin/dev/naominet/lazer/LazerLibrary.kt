@@ -16,8 +16,48 @@ data class LazerTrack(
     val coverUrl: String? = null,
     val artists: List<Artist> = emptyList(),
     val translatedTitle: String? = null,
+    val source: LazerTrackSource = LazerTrackSource.GatewaySong,
 ) {
     val durationLabel: String get() = formatPlaybackTime(durationMillis)
+}
+
+/** Describes where audio bytes come from; track IDs remain queue tokens, not source locators. */
+sealed interface LazerTrackSource {
+    data object GatewaySong : LazerTrackSource
+
+    data class LocalFile(val uri: String) : LazerTrackSource
+}
+
+/** Basic metadata returned by a platform audio picker before a queue entry is created. */
+data class LazerPickedAudioFile(
+    val uri: String,
+    val title: String,
+    val artist: String = "",
+    val album: String = "",
+    val durationMillis: Long = 0L,
+)
+
+data class LazerLocalAudioPickerResult(
+    val files: List<LazerPickedAudioFile> = emptyList(),
+    val unsupportedFileCount: Int = 0,
+    val failedFileCount: Int = 0,
+)
+
+/** Allocates IDs outside the positive Gateway song-ID space for local queue entries. */
+object LazerLocalTrackIdentity {
+    private var nextId = Long.MIN_VALUE
+
+    fun nextId(): Long {
+        check(nextId < 0L) { "Local track identity space exhausted" }
+        return nextId++
+    }
+
+    /** Keeps newly picked local tracks unique after queue IDs have been restored from disk. */
+    fun reserve(ids: Collection<Long>) {
+        val highestUsedId = ids.asSequence().filter { it < 0L }.maxOrNull() ?: return
+        val firstFreeId = if (highestUsedId == -1L) 0L else highestUsedId + 1L
+        if (nextId < firstFreeId) nextId = firstFreeId
+    }
 }
 
 data class LazerPlaylist(

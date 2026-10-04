@@ -44,6 +44,8 @@ private interface DwmApi : Library {
 private const val DWMWA_SYSTEMBACKDROP_TYPE = 38
 private const val DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 private const val DWMWA_WINDOW_CORNER_PREFERENCE = 33
+private const val DWMWA_BORDER_COLOR = 34
+private const val DWMWA_COLOR_NONE = 0xFFFFFFFE.toInt()
 private const val DWMSBT_NONE = 1
 
 private val dwmApi: DwmApi? by lazy {
@@ -93,6 +95,20 @@ private val user32Accent: User32Accent? by lazy {
 /** Keeps part of DWM visible while app-rendered imagery is composited above native acrylic. */
 internal fun windowsVisualBackgroundAlpha(osGlassActive: Boolean, uiAlpha: Float): Float =
     if (osGlassActive) (1f - uiAlpha.coerceIn(0f, 1f)) * 0.88f else 1f
+
+/**
+ * Removes the Windows 11 frame treatment (rounded corners and the thin border) from an undecorated
+ * popup. On a transparent window that frame is composited by DWM and reads as a white outline around
+ * the card, which the app cannot paint over.
+ */
+internal fun windowsClearPopupFrame(window: Window) {
+    if (!isWindowsDesktop()) return
+    runCatching {
+        val hwnd: Pointer = Native.getWindowPointer(window) ?: return
+        hwnd.putInt(DWMWA_WINDOW_CORNER_PREFERENCE, 1)  // DWMWCP_DONOTROUND
+        hwnd.putInt(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE)
+    }
+}
 
 /** Returns true only when the requested native policy was applied successfully. */
 internal fun applyWindowsAcrylic(
