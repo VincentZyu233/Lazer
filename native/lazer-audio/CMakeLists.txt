@@ -412,15 +412,15 @@ if(LAZER_AUDIO_BUILD_PROBE)
     endif()
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
-        # This probe opens a test-only ALSA null PCM through the real AlsaOutput implementation.
-        # It checks PCM queue lifecycle and the exact DoP carrier tuple/byte path without a sound card.
+        # This probe opens a test-only ALSA null PCM through the real AlsaOutput implementation
+        # and has an explicit --loopback mode for a real snd-aloop digital capture test.
         target_compile_definitions(lazer-audio PRIVATE LAZER_AUDIO_TEST_ALLOW_ALSA_NULL)
         add_executable(lazer-audio-alsa-output-probe tools/lazer_audio_alsa_output_probe.cpp)
         target_include_directories(lazer-audio-alsa-output-probe PRIVATE
             "${CMAKE_CURRENT_LIST_DIR}/include"
             "${CMAKE_CURRENT_LIST_DIR}/src"
             "${LAZER_FFMPEG_INCLUDE_DIR}")
-        target_link_libraries(lazer-audio-alsa-output-probe PRIVATE lazer-audio)
+        target_link_libraries(lazer-audio-alsa-output-probe PRIVATE lazer-audio PkgConfig::ALSA)
         target_compile_features(lazer-audio-alsa-output-probe PRIVATE cxx_std_20)
         add_test(NAME lazer-audio-alsa-output
             COMMAND $<TARGET_FILE:lazer-audio-alsa-output-probe>)

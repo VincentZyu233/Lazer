@@ -1,11 +1,17 @@
 /* Hardware-free checks for ALSA output negotiation and queue lifecycle. The `null` PCM is enabled
  * only when both explicit CMake test options are on; release builds accept direct hw: names only. */
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <alsa/asoundlib.h>
 
 #include "output_alsa.h"
 #include "output_alsa_recovery.h"
@@ -23,6 +29,314 @@ namespace {
 bool fail(const std::string &message) {
     std::fprintf(stderr, "FAIL: %s\n", message.c_str());
     return false;
+}
+
+std::string alsaError(const char *operation, int error) {
+    return std::string(operation) + ": " + snd_strerror(error);
+}
+
+snd_pcm_format_t loopbackFormat(const lazer::audio::TargetFormat &format) {
+    if (format.bitsPerSample == 16 && format.containerBitsPerSample == 16) {
+        return SND_PCM_FORMAT_S16_LE;
+    }
+    if (format.bitsPerSample == 24 && format.containerBitsPerSample == 24) {
+        return SND_PCM_FORMAT_S24_3LE;
+    }
+    if (format.bitsPerSample == 24 && format.containerBitsPerSample == 32) {
+        return SND_PCM_FORMAT_S24_LE;
+    }
+    if (format.bitsPerSample == 32 && format.containerBitsPerSample == 32) {
+        return SND_PCM_FORMAT_S32_LE;
+    }
+    return SND_PCM_FORMAT_UNKNOWN;
+}
+
+bool configureLoopbackCapture(const std::string &device,
+    const lazer::audio::AudioOutputSession &outputSession, snd_pcm_t **capture,
+    std::string &error) {
+    const int opened = snd_pcm_open(capture, device.c_str(), SND_PCM_STREAM_CAPTURE,
+        SND_PCM_NONBLOCK);
+    if (opened < 0) {
+        error = alsaError("could not open snd-aloop capture PCM", opened);
+        return false;
+    }
+
+    snd_pcm_hw_params_t *hardware = nullptr;
+    const int hardwareAllocated = snd_pcm_hw_params_malloc(&hardware);
+    if (hardwareAllocated < 0 || hardware == nullptr) {
+        error = hardwareAllocated < 0
+            ? alsaError("could not allocate snd-aloop capture hardware parameters", hardwareAllocated)
+            : "could not allocate snd-aloop capture hardware parameters";
+        snd_pcm_close(*capture);
+        *capture = nullptr;
+        return false;
+    }
+
+    snd_pcm_format_t expectedFormat = loopbackFormat(outputSession.target);
+    int result = expectedFormat == SND_PCM_FORMAT_UNKNOWN
+        ? -EINVAL : snd_pcm_hw_params_any(*capture, hardware);
+    if (result >= 0) result = snd_pcm_hw_params_set_access(*capture, hardware,
+        SND_PCM_ACCESS_RW_INTERLEAVED);
+    if (result >= 0) result = snd_pcm_hw_params_set_rate_resample(*capture, hardware, 0);
+    if (result >= 0) result = snd_pcm_hw_params_set_format(*capture, hardware, expectedFormat);
+    if (result >= 0) result = snd_pcm_hw_params_set_channels(*capture, hardware,
+        static_cast<unsigned int>(outputSession.target.channels));
+    if (result >= 0) result = snd_pcm_hw_params_set_rate(*capture, hardware,
+        static_cast<unsigned int>(outputSession.target.sampleRate), 0);
+    snd_pcm_uframes_t period = static_cast<snd_pcm_uframes_t>(outputSession.periodFrames);
+    int direction = 0;
+    if (result >= 0) result = snd_pcm_hw_params_set_period_size_near(
+        *capture, hardware, &period, &direction);
+    snd_pcm_uframes_t buffer = static_cast<snd_pcm_uframes_t>(outputSession.bufferFrames);
+    if (result >= 0) result = snd_pcm_hw_params_set_buffer_size_near(*capture, hardware, &buffer);
+    if (result >= 0) result = snd_pcm_hw_params(*capture, hardware);
+
+    if (result >= 0) {
+        snd_pcm_format_t actualFormat = SND_PCM_FORMAT_UNKNOWN;
+        unsigned int actualRate = 0;
+        unsigned int actualChannels = 0;
+        snd_pcm_uframes_t actualPeriod = 0;
+        snd_pcm_uframes_t actualBuffer = 0;
+        result = snd_pcm_hw_params_current(*capture, hardware);
+        if (result >= 0) result = snd_pcm_hw_params_get_format(hardware, &actualFormat);
+        if (result >= 0) result = snd_pcm_hw_params_get_rate(hardware, &actualRate, &direction);
+        if (result >= 0) result = snd_pcm_hw_params_get_channels(hardware, &actualChannels);
+        if (result >= 0) result = snd_pcm_hw_params_get_period_size(hardware, &actualPeriod, &direction);
+        if (result >= 0) result = snd_pcm_hw_params_get_buffer_size(hardware, &actualBuffer);
+        if (result >= 0 && (actualFormat != expectedFormat ||
+                actualRate != static_cast<unsigned int>(outputSession.target.sampleRate) ||
+                actualChannels != static_cast<unsigned int>(outputSession.target.channels) ||
+                actualPeriod != static_cast<snd_pcm_uframes_t>(outputSession.periodFrames) ||
+                actualBuffer != static_cast<snd_pcm_uframes_t>(outputSession.bufferFrames))) {
+            error = "snd-aloop capture readback did not match the direct output PCM parameters";
+            result = -EINVAL;
+        }
+    }
+    snd_pcm_hw_params_free(hardware);
+    if (result < 0) {
+        if (error.empty()) error = alsaError("could not configure exact snd-aloop capture PCM", result);
+        snd_pcm_close(*capture);
+        *capture = nullptr;
+        return false;
+    }
+
+    snd_pcm_sw_params_t *software = nullptr;
+    const int softwareAllocated = snd_pcm_sw_params_malloc(&software);
+    if (softwareAllocated < 0 || software == nullptr) {
+        error = softwareAllocated < 0
+            ? alsaError("could not allocate snd-aloop capture software parameters", softwareAllocated)
+            : "could not allocate snd-aloop capture software parameters";
+        snd_pcm_close(*capture);
+        *capture = nullptr;
+        return false;
+    }
+    result = snd_pcm_sw_params_current(*capture, software);
+    if (result >= 0) result = snd_pcm_sw_params_set_avail_min(*capture, software, 1);
+    if (result >= 0) result = snd_pcm_sw_params_set_start_threshold(*capture, software, 1);
+    if (result >= 0) result = snd_pcm_sw_params(*capture, software);
+    snd_pcm_sw_params_free(software);
+    if (result >= 0) result = snd_pcm_prepare(*capture);
+    if (result < 0) {
+        error = alsaError("could not prepare snd-aloop capture PCM", result);
+        snd_pcm_close(*capture);
+        *capture = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void appendLittleEndian(std::vector<uint8_t> &destination, int32_t value, int byteCount) {
+    const uint32_t bits = static_cast<uint32_t>(value);
+    for (int byte = 0; byte < byteCount; ++byte) {
+        destination.push_back(static_cast<uint8_t>((bits >> (byte * 8)) & 0xffU));
+    }
+}
+
+int32_t deterministicSample24(int32_t frame, int32_t channel) {
+    const int64_t ramp = static_cast<int64_t>(frame) * 7'919 +
+        static_cast<int64_t>(channel) * 104'729;
+    return static_cast<int32_t>(ramp % 0x1000000LL - 0x800000LL);
+}
+
+void makeLoopbackSignal(int32_t bitsPerSample, int32_t containerBits, int32_t channels,
+    int32_t frames, std::vector<uint8_t> &engineBytes, std::vector<uint8_t> &wireBytes) {
+    const int engineBytesPerSample = containerBits / 8;
+    const int wireBytesPerSample = containerBits / 8;
+    engineBytes.reserve(static_cast<size_t>(frames) * static_cast<size_t>(channels) *
+        static_cast<size_t>(engineBytesPerSample));
+    wireBytes.reserve(engineBytes.capacity());
+    for (int32_t frame = 0; frame < frames; ++frame) {
+        for (int32_t channel = 0; channel < channels; ++channel) {
+            const int32_t sample24 = deterministicSample24(frame, channel);
+            if (bitsPerSample == 16) {
+                const int32_t sample16 = sample24 / 256;
+                appendLittleEndian(engineBytes, sample16, 2);
+                appendLittleEndian(wireBytes, sample16, 2);
+            } else if (bitsPerSample == 24 && containerBits == 24) {
+                appendLittleEndian(engineBytes, sample24, 3);
+                appendLittleEndian(wireBytes, sample24, 3);
+            } else if (bitsPerSample == 24 && containerBits == 32) {
+                /* The engine ABI stores 24 valid bits left-aligned; ALSA S24_LE requires the
+                 * same signed sample low-aligned and sign-extended in its 32-bit container. */
+                appendLittleEndian(engineBytes, sample24 * 256, 4);
+                appendLittleEndian(wireBytes, sample24, 4);
+            } else {
+                const int32_t sample32 = sample24 * 256;
+                appendLittleEndian(engineBytes, sample32, 4);
+                appendLittleEndian(wireBytes, sample32, 4);
+            }
+        }
+    }
+}
+
+bool writeFrames(lazer::audio::AlsaOutput &output, const std::vector<uint8_t> &bytes,
+    int32_t frames, int32_t frameBytes, int32_t periodFrames, std::string &error) {
+    int32_t offset = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (offset < frames && std::chrono::steady_clock::now() < deadline) {
+        const int32_t writable = output.writableFrames(error);
+        if (writable < 0) return false;
+        if (writable == 0) {
+            if (output.waitForReady(20, error) == lazer::audio::OutputWaitResult::Error) return false;
+            continue;
+        }
+        const int32_t count = std::min({frames - offset, writable,
+            std::max(periodFrames, 1)});
+        const int32_t written = output.write(bytes.data() +
+            static_cast<size_t>(offset) * static_cast<size_t>(frameBytes), count, error);
+        if (written != count) return false;
+        offset += written;
+    }
+    if (offset != frames) {
+        if (error.empty()) error = "snd-aloop playback write timed out before the test block was complete";
+        return false;
+    }
+    return true;
+}
+
+bool drainOutput(lazer::audio::AlsaOutput &output, std::string &error) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (output.waitForReady(20, error) == lazer::audio::OutputWaitResult::Error) return false;
+        const auto result = output.drain(error);
+        if (result == lazer::audio::OutputDrainResult::Drained) return true;
+        if (result == lazer::audio::OutputDrainResult::Error) return false;
+    }
+    error = "snd-aloop playback did not drain before the probe timeout";
+    return false;
+}
+
+bool exerciseLoopbackFormat(int32_t bitsPerSample, int32_t sampleRate) {
+    constexpr const char *playbackDevice = "hw:Loopback,0,0";
+    constexpr const char *captureDevice = "hw:Loopback,1,0";
+    lazer::audio::AudioOutputRequest request;
+    request.deviceId = playbackDevice;
+    request.exclusive = true;
+    request.bufferMillis = 120;
+    request.bitPerfect = true;
+    request.desired.sampleRate = sampleRate;
+    request.desired.channels = 2;
+
+    lazer::audio::StreamDescription source;
+    source.sampleRate = sampleRate;
+    source.channels = 2;
+    source.bitsPerSample = bitsPerSample;
+    source.lossless = true;
+    source.integerPcm = true;
+    source.canonicalChannelLayout = true;
+    source.decoderFormatMatchesStream = true;
+
+    lazer::audio::AlsaOutput output;
+    lazer::audio::AudioOutputSession session;
+    std::string error;
+    if (output.open(request, source, session, error, nullptr) != LazerAudioOk) {
+        return fail("could not open direct snd-aloop output for " +
+            std::to_string(sampleRate) + " Hz / " + std::to_string(bitsPerSample) + " bit: " + error);
+    }
+    if (!session.exclusive || session.target.sampleRate != sampleRate ||
+        session.target.channels != 2 || session.target.bitsPerSample != bitsPerSample ||
+        (session.target.containerBitsPerSample != bitsPerSample &&
+            !(bitsPerSample == 24 && session.target.containerBitsPerSample == 32))) {
+        return fail("direct snd-aloop output readback did not preserve the requested exact PCM tuple");
+    }
+
+    snd_pcm_t *capture = nullptr;
+    if (!configureLoopbackCapture(captureDevice, session, &capture, error)) {
+        return fail("could not configure paired snd-aloop capture: " + error);
+    }
+
+    const int32_t frames = std::min(4'096, session.bufferFrames);
+    const int32_t frameBytes = session.target.frameBytes();
+    if (frames <= 0 || frameBytes <= 0) {
+        snd_pcm_close(capture);
+        return fail("snd-aloop output negotiated invalid PCM dimensions");
+    }
+    std::vector<uint8_t> engineBytes;
+    std::vector<uint8_t> expectedWireBytes;
+    makeLoopbackSignal(bitsPerSample, session.target.containerBitsPerSample,
+        session.target.channels, frames, engineBytes, expectedWireBytes);
+    std::vector<uint8_t> capturedBytes(expectedWireBytes.size());
+    std::atomic<bool> readerStarted{false};
+    std::atomic<bool> cancelReader{false};
+    std::string captureError;
+    std::thread reader([&]() {
+        readerStarted.store(true, std::memory_order_release);
+        size_t offsetFrames = 0;
+        const size_t totalFrames = static_cast<size_t>(frames);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        while (offsetFrames < totalFrames && !cancelReader.load(std::memory_order_acquire) &&
+            std::chrono::steady_clock::now() < deadline) {
+            auto *destination = capturedBytes.data() + offsetFrames * static_cast<size_t>(frameBytes);
+            const snd_pcm_uframes_t remaining = static_cast<snd_pcm_uframes_t>(
+                totalFrames - offsetFrames);
+            const snd_pcm_sframes_t received = snd_pcm_readi(capture, destination, remaining);
+            if (received > 0) {
+                offsetFrames += static_cast<size_t>(received);
+                continue;
+            }
+            if (received == -EAGAIN || received == -EINTR) {
+                const int ready = snd_pcm_wait(capture, 100);
+                if (ready < 0 && ready != -EINTR && ready != -EAGAIN) {
+                    captureError = alsaError("snd-aloop capture wait failed", ready);
+                    return;
+                }
+                continue;
+            }
+            captureError = received == 0
+                ? "snd-aloop capture returned no frames"
+                : alsaError("snd-aloop capture read failed", static_cast<int>(received));
+            return;
+        }
+        if (offsetFrames != totalFrames && !cancelReader.load(std::memory_order_acquire)) {
+            captureError = "snd-aloop capture timed out before the test block was complete";
+        }
+    });
+
+    while (!readerStarted.load(std::memory_order_acquire)) std::this_thread::yield();
+    bool playbackPassed = output.start(error) == LazerAudioOk;
+    if (playbackPassed) playbackPassed = writeFrames(output, engineBytes, frames,
+        frameBytes, session.periodFrames, error);
+    if (playbackPassed) playbackPassed = drainOutput(output, error);
+    if (!playbackPassed) cancelReader.store(true, std::memory_order_release);
+    reader.join();
+
+    if (snd_pcm_close(capture) < 0) {
+        playbackPassed = false;
+        if (error.empty()) error = "could not close snd-aloop capture PCM";
+    }
+    if (!playbackPassed) return fail("snd-aloop direct output failed: " + error);
+    if (!captureError.empty()) return fail("snd-aloop digital capture failed: " + captureError);
+    if (capturedBytes != expectedWireBytes) {
+        const auto mismatch = std::mismatch(capturedBytes.begin(), capturedBytes.end(),
+            expectedWireBytes.begin());
+        const size_t offset = static_cast<size_t>(std::distance(capturedBytes.begin(), mismatch.first));
+        return fail("snd-aloop digital capture differs from expected PCM at byte " +
+            std::to_string(offset));
+    }
+
+    std::printf("PASS: snd-aloop bit-perfect capture matched %d frames at %d Hz / %d-bit PCM\n",
+        frames, sampleRate, bitsPerSample);
+    return true;
 }
 
 bool exerciseFormat(int32_t bitsPerSample) {
@@ -218,7 +532,18 @@ bool exerciseDopRecoveryFailsWhenMarkerPhaseIsUnknown() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char **argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--loopback") == 0) {
+        for (const int32_t sampleRate : {44'100, 48'000, 96'000}) {
+            if (!exerciseLoopbackFormat(16, sampleRate) ||
+                !exerciseLoopbackFormat(24, sampleRate) ||
+                !exerciseLoopbackFormat(32, sampleRate)) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    if (argc != 1) return fail("usage: lazer-audio-alsa-output-probe [--loopback]") ? 0 : 2;
     bool passed = true;
     passed &= exerciseFormat(16);
     passed &= exerciseFormat(24);
