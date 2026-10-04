@@ -138,7 +138,11 @@ jobs:
       - name: Set the DSD FFmpeg SDK path
         run: echo "FFMPEG_ROOT=$RUNNER_TEMP/lazer-ffmpeg" >> "$GITHUB_ENV"
       - name: Install Linux packaging and HiFi build dependencies
-        run: sudo apt-get update && sudo apt-get install -y fakeroot rpm pkg-config cmake g++ nasm libasound2-dev
+        run: |
+          set -euo pipefail
+          kernel_modules="linux-modules-extra-$(uname -r)"
+          sudo apt-get update
+          sudo apt-get install -y fakeroot rpm pkg-config cmake g++ nasm libasound2-dev "$kernel_modules"
       - name: Build the pinned DSD-capable FFmpeg SDK
         run: bash native/lazer-audio/tools/build_dsd_ffmpeg.sh "$FFMPEG_ROOT"
       - name: Record Linux HiFi toolchain versions
@@ -185,6 +189,7 @@ jobs:
       - name: Verify direct ALSA output with snd-aloop digital capture
         run: |
           set -euo pipefail
+          modinfo snd-aloop
           sudo modprobe snd-aloop pcm_substreams=1
           cat /proc/asound/cards
           timeout 60s desktopApp/build/native/lazer-audio/linux-x64/lazer-audio-alsa-output-probe --loopback
