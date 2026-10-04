@@ -189,6 +189,11 @@ jobs:
       - name: Verify direct ALSA output with snd-aloop digital capture
         run: |
           set -euo pipefail
+          kernel_release="$(uname -r)"
+          sudo depmod -a "$kernel_release"
+          package="linux-modules-extra-${kernel_release}"
+          dpkg-query -L "$package" | grep -E '/snd-aloop\.ko(\.(xz|zst|gz))?$' || true
+          find "/lib/modules/${kernel_release}" -type f -iname 'snd-aloop.ko*' -print
           modinfo snd-aloop
           sudo modprobe snd-aloop pcm_substreams=1
           cat /proc/asound/cards
