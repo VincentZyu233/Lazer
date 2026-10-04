@@ -1,7 +1,6 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Exec
-import org.gradle.api.file.RelativePath
 import org.gradle.language.jvm.tasks.ProcessResources
 import org.gradle.api.tasks.testing.Test
 import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
@@ -152,14 +151,18 @@ val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") 
             "The native audio engine is not available for architecture '$desktopOsArch'"
         }
         dependsOn(buildLazerAudio)
-        if (!isWindowsHost) {
-            from(nativeAudioFile) { into("native/$nativeAudioPlatformId") }
-        }
+        from(nativeAudioFile) { into("$nativeAudioPlatformId/native/$nativeAudioPlatformId") }
         from(nativeAudioBuildDir) {
-            include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
-            if (!isWindowsHost) exclude(nativeAudioFile.get().asFile.name)
-            if (isWindowsHost) eachFile { relativePath = RelativePath(true, name) }
-            into("native/$nativeAudioPlatformId")
+            include("*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
+            exclude(nativeAudioFile.get().asFile.name)
+            into("$nativeAudioPlatformId/native/$nativeAudioPlatformId")
+        }
+        if (isWindowsHost) {
+            from(nativeAudioBuildDir.map { it.dir("Release") }) {
+                include("*.dll")
+                exclude(nativeAudioFile.get().asFile.name)
+                into("$nativeAudioPlatformId/native/$nativeAudioPlatformId")
+            }
         }
         if (!isWindowsHost) {
             require(ffmpegLicenseDir != null &&
@@ -170,7 +173,7 @@ val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") 
             }
             from(ffmpegLicenseDir!!) {
                 include("COPYING.LGPLv2.1", "BUILDINFO.txt")
-                into("legal/ffmpeg")
+                into("$nativeAudioPlatformId/legal/ffmpeg")
             }
         }
     }
