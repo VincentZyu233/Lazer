@@ -279,7 +279,19 @@ jobs:
           xcrun simctl launch --terminate-running-process --console \
             "$simulator_udid" "$bundle_id" > ios-simulator-console.log 2>&1 &
           console_pid=$!
-          sleep 15
+          # Wait for the first frame to announce itself rather than holding a fixed window: a cold
+          # simulator compiles its Metal shaders on the first draw, which on a slow runner has taken
+          # well past half a minute, while a launch that dies early is noticed immediately instead of
+          # after a long sleep. The route walk below waits the same way.
+          for attempt in $(seq 1 90); do
+            if grep -q 'LAZER_IOS_COMPOSE_READY' ios-simulator-console.log; then
+              break
+            fi
+            if ! kill -0 "$console_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
           if ! kill -0 "$console_pid" 2>/dev/null; then
             set +e
             wait "$console_pid"
@@ -308,8 +320,10 @@ jobs:
           xcrun simctl io "$simulator_udid" screenshot ios-simulator.png
           if ! grep -q 'LAZER_IOS_COMPOSE_READY' ios-simulator-console.log; then
             # A process that is alive but has drawn nothing is stalled, so ask the system where it
-            # is sitting before anything is torn down.
-            xcrun simctl spawn "$simulator_udid" sample Lazer 3 -f ios-simulator-sample.txt || true
+            # is sitting before anything is torn down. The simulator runs the app as an ordinary
+            # host process, so sample it from the host: `simctl spawn sample` writes its file inside
+            # the simulated filesystem, where the `head` below can never reach it.
+            sample Lazer 3 -file ios-simulator-sample.txt || true
             xcrun simctl spawn "$simulator_udid" log show \
               --last 2m --style compact --predicate "process == 'Lazer'" \
               > ios-simulator-runtime.log || true
