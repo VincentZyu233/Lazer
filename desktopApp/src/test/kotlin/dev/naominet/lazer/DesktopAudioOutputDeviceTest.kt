@@ -114,7 +114,10 @@ class DesktopAudioOutputDeviceTest {
     fun `optional Linux native library can enumerate ALSA output devices`() {
         assumeTrue("ALSA native smoke test requires Linux", System.getProperty("os.name").contains("Linux", true))
         assumeTrue("native library path was not supplied", !System.getProperty("lazer.audio.library").isNullOrBlank())
-        assertTrue("native audio ABI is unavailable", LazerAudioLoader.isAvailable)
+        assertTrue(
+            "native audio ABI is unavailable: ${LazerAudioLoader.unavailableReason}",
+            LazerAudioLoader.isAvailable,
+        )
 
         val devices = DesktopAlsaOutputDeviceCatalog.enumerate()
 
@@ -130,7 +133,10 @@ class DesktopAudioOutputDeviceTest {
     fun `optional macOS native library can enumerate CoreAudio output devices`() {
         assumeTrue("CoreAudio native smoke test requires macOS", isMacOSDesktop())
         assumeTrue("native library path was not supplied", !System.getProperty("lazer.audio.library").isNullOrBlank())
-        assertTrue("native audio ABI is unavailable", LazerAudioLoader.isAvailable)
+        assertTrue(
+            "native audio ABI is unavailable: ${LazerAudioLoader.unavailableReason}",
+            LazerAudioLoader.isAvailable,
+        )
 
         val devices = DesktopCoreAudioOutputDeviceCatalog.enumerate()
 

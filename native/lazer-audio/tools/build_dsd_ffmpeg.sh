@@ -59,6 +59,22 @@ printf 'FFmpeg revision: %s\nConfigure options: %s\n' \
 make -j"${FFMPEG_BUILD_JOBS:-2}"
 make install
 
+# The engine and FFmpeg dylibs ship side by side. Preserve their @rpath install IDs while giving
+# each FFmpeg image a relative runpath for its own transitive @rpath dependencies.
+if [[ "$(uname -s)" == Darwin ]]; then
+    shopt -s nullglob
+    runtime_dylibs=("$prefix"/lib/libav*.dylib "$prefix"/lib/libswresample*.dylib)
+    if ((${#runtime_dylibs[@]} == 0)); then
+        echo "The macOS FFmpeg SDK did not install its shared runtime dylibs." >&2
+        exit 1
+    fi
+    for dylib in "${runtime_dylibs[@]}"; do
+        if ! otool -l "$dylib" | grep -Fq 'path @loader_path ('; then
+            install_name_tool -add_rpath @loader_path "$dylib"
+        fi
+    done
+fi
+
 # Keep the LGPL notice and the precise corresponding source revision beside the installed SDK.
 license_dir="$prefix/share/lazer-ffmpeg"
 mkdir -p "$license_dir"

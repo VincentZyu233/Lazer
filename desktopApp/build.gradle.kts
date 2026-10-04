@@ -247,7 +247,8 @@ tasks.withType<AbstractJPackageTask>().configureEach {
     if (buildNativeAudio.get()) {
         when (targetFormat) {
             TargetFormat.Deb -> freeArgs.addAll(
-                listOf("--linux-package-deps", "libasound2 | libasound2t64"),
+                // Keep the alternative dependency as one token in Compose's jpackage args file.
+                listOf("--linux-package-deps", "libasound2|libasound2t64"),
             )
             TargetFormat.Rpm -> freeArgs.addAll(
                 listOf("--linux-package-deps", "alsa-lib"),

@@ -446,15 +446,20 @@ internal object LazerAudioLoader {
     @Volatile
     private var attempted = false
 
+    @Volatile
+    private var loadFailure: Throwable? = null
+
     val library: LazerAudioLibrary?
         get() {
             if (!attempted) {
                 synchronized(this) {
                     if (!attempted) {
-                        cached = runCatching {
+                        val loadResult = runCatching {
                             val file = libraryFile() ?: return@runCatching null
                             Native.load(file.absolutePath, LazerAudioLibrary::class.java)
-                        }.getOrNull()
+                        }
+                        cached = loadResult.getOrNull()
+                        loadFailure = loadResult.exceptionOrNull()
                         attempted = true
                     }
                 }
@@ -467,6 +472,10 @@ internal object LazerAudioLoader {
             val api = library ?: return false
             return runCatching { api.lazer_audio_abi_version() == LAZER_AUDIO_ABI_VERSION }.getOrDefault(false)
         }
+
+    val unavailableReason: String
+        get() = loadFailure?.let { "${it.javaClass.simpleName}: ${it.message}" }
+            ?: "the native library is missing or its ABI version does not match"
 
     private fun libraryFile(): File? {
         val resourcePath = artifact?.resourcePath ?: return null

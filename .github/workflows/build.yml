@@ -198,6 +198,16 @@ jobs:
             native_args=(-PlazerNativeAudio=false)
           fi
           ./gradlew :desktopApp:packageReleaseDeb :desktopApp:packageReleaseRpm "${native_args[@]}" --stacktrace
+      - name: Show jpackage diagnostics after package failure
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          for diagnostic_dir in desktopApp/build/compose/tmp desktopApp/build/compose/logs; do
+            if [[ -d "$diagnostic_dir" ]]; then
+              find "$diagnostic_dir" -type f \( -name 'packageRelease*.args.txt' -o \
+                -name 'jpackage-*-out.txt' -o -name 'jpackage-*-err.txt' \) -print -exec cat {} \;
+            fi
+          done
       - name: Build Linux app image
         run: |
           set -euo pipefail
@@ -423,6 +433,11 @@ jobs:
             install_id="$(otool -D "$dylib" | sed -n '2p')"
             if [[ "$install_id" != @rpath/* ]]; then
               echo "Bundled FFmpeg dylib $dylib has non-relocatable install ID: $install_id" >&2
+              exit 1
+            fi
+            load_commands="$(otool -l "$dylib")"
+            if ! grep -Fq 'path @loader_path (' <<<"$load_commands"; then
+              echo "Bundled FFmpeg dylib $dylib must resolve its own @rpath dependencies beside itself." >&2
               exit 1
             fi
           done
