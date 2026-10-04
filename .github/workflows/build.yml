@@ -264,6 +264,27 @@ jobs:
             rpm -qpl "$rpm_file" | grep -E '/app/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
             rpm -qpl "$rpm_file" | grep -E '/app/resources/legal/ffmpeg/BUILDINFO\.txt$'
           fi
+      - name: Diagnose Linux native package contents after verification failure
+        if: ${{ failure() }}
+        run: |
+          set +e
+          jar_file="desktopApp/build/compose/binaries/Lazer-linux-x64.jar"
+          if [[ -f "$jar_file" ]]; then
+            echo "Runnable JAR native and legal entries:"
+            jar tf "$jar_file" | grep -E '(^native/linux-x64/|^legal/ffmpeg/)' || true
+          fi
+          app_bundle="$(find desktopApp/build/compose/binaries/main-release/app -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)"
+          if [[ -n "$app_bundle" ]]; then
+            echo "App image native and legal resources:"
+            find "$app_bundle/app/resources" -maxdepth 4 -type f \( -path '*/native/linux-x64/*' -o -path '*/legal/ffmpeg/*' \) -print
+          fi
+          while IFS= read -r package; do
+            echo "Package contents: $package"
+            case "$package" in
+              *.deb) dpkg-deb -c "$package" | grep -E 'app/resources/(native/linux-x64|legal/ffmpeg)/' || true ;;
+              *.rpm) rpm -qpl "$package" | grep -E '/app/resources/(native/linux-x64|legal/ffmpeg)/' || true ;;
+            esac
+          done < <(find desktopApp/build/compose/binaries -type f \( -name '*.deb' -o -name '*.rpm' \) -print 2>/dev/null)
       - name: Verify Linux ALSA package dependencies and installed library loading
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: |
@@ -455,6 +476,22 @@ jobs:
         env:
           JAVA_TOOL_OPTIONS: -Dlazer.audio.library=${{ github.workspace }}/build/native/lazer-audio/macos-arm64/liblazer-audio.dylib
         run: ./gradlew :desktopApp:test -PlazerNativeAudio=false --stacktrace
+      - name: Print macOS desktop test failure details
+        if: ${{ failure() }}
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          for report in glob.glob("desktopApp/build/test-results/test/TEST-*.xml"):
+              root = ET.parse(report).getroot()
+              for case in root.iter("testcase"):
+                  for failure in (*case.findall("failure"), *case.findall("error")):
+                      print(f"{case.get('classname')} > {case.get('name')}")
+                      print(f"{failure.get('type')}: {failure.get('message')}")
+                      if failure.text:
+                          print(failure.text)
+          PY
 
   # Compile the Kotlin/Native framework, run shared iOS tests, then let Xcode compile and link the
   # real SwiftUI + Compose application. The macOS 26 image supplies Xcode 26 for Liquid Glass APIs.

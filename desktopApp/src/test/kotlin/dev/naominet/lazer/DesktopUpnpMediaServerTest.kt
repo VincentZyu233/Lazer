@@ -214,7 +214,6 @@ class DesktopUpnpMediaServerTest {
     @Test
     fun `reissues a live lease with a new token for the same snapshot and target TTL`() = withFixture { wav ->
         val clock = MutableClock(Instant.parse("2026-10-03T00:00:00Z"))
-        val replacementAddress = InetAddress.getByName("127.0.0.2")
         DesktopUpnpMediaServer(
             LOOPBACK,
             LOOPBACK,
@@ -226,7 +225,7 @@ class DesktopUpnpMediaServerTest {
             clock.advance(Duration.ofSeconds(4))
 
             DesktopUpnpMediaServer(
-                replacementAddress,
+                LOOPBACK,
                 LOOPBACK,
                 clock = clock,
                 leaseTtl = Duration.ofSeconds(10),
@@ -284,7 +283,7 @@ class DesktopUpnpMediaServerTest {
     fun `refuses reissue when target server is closed and leaves source lease valid`() = withFixture { wav ->
         DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { sourceServer ->
             val sourceLease = sourceServer.createLease(localSource(wav))
-            val closedTargetServer = DesktopUpnpMediaServer(InetAddress.getByName("127.0.0.2"), LOOPBACK)
+            val closedTargetServer = DesktopUpnpMediaServer(LOOPBACK, LOOPBACK)
             closedTargetServer.close()
 
             assertNull(closedTargetServer.reissueLease(sourceLease))
@@ -296,7 +295,7 @@ class DesktopUpnpMediaServerTest {
     fun `refuses to reissue a snapshot under an incompatible MIME type`() = withFixture { wav ->
         DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { sourceServer ->
             val sourceLease = sourceServer.createLease(localSource(wav))
-            DesktopUpnpMediaServer(InetAddress.getByName("127.0.0.2"), LOOPBACK).use { targetServer ->
+            DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { targetServer ->
                 assertNull(targetServer.reissueLease(sourceLease, mimeType = "audio/flac"))
                 assertEquals(200, request(sourceLease.mediaUri).status)
             }
@@ -310,7 +309,7 @@ class DesktopUpnpMediaServerTest {
         Files.copy(wav, changed)
         Files.copy(wav, replaced)
         DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { sourceServer ->
-            DesktopUpnpMediaServer(InetAddress.getByName("127.0.0.2"), LOOPBACK).use { targetServer ->
+            DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { targetServer ->
                 val changedLease = sourceServer.createLease(localSource(changed))
                 val changedAttributes = Files.readAttributes(
                     changed,
@@ -345,7 +344,7 @@ class DesktopUpnpMediaServerTest {
         val linkTarget = wav.resolveSibling("link-target.wav")
         Files.write(linkTarget, wavBytes())
         DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { sourceServer ->
-            DesktopUpnpMediaServer(InetAddress.getByName("127.0.0.2"), LOOPBACK).use { targetServer ->
+            DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { targetServer ->
                 val sourceLease = sourceServer.createLease(localSource(wav))
                 Files.delete(wav)
                 try {
@@ -366,12 +365,11 @@ class DesktopUpnpMediaServerTest {
 
     @Test
     fun `staged media server keeps replacement lease available while old route is retired`() = withFixture { wav ->
-        val replacementAddress = InetAddress.getByName("127.0.0.2")
         DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { oldServer ->
             val oldLease = oldServer.createLease(localSource(wav))
             assertEquals(200, request(oldLease.mediaUri).status)
 
-            DesktopUpnpMediaServer(replacementAddress, LOOPBACK).use { replacementServer ->
+            DesktopUpnpMediaServer(LOOPBACK, LOOPBACK).use { replacementServer ->
                 val replacementLease = replacementServer.createLease(localSource(wav))
                 assertEquals(200, request(replacementLease.mediaUri).status)
 
@@ -496,7 +494,10 @@ class DesktopUpnpMediaServerTest {
     private fun isWindows(): Boolean = System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)
 
     private fun withFixture(test: (Path) -> Unit) {
-        val directory = Files.createTempDirectory("lazer-upnp-media-")
+        // macOS exposes java.io.tmpdir through /var, a system symlink to /private/var.
+        // Give the server the physical path so its deliberate symlink rejection tests the
+        // user-selected file path, not the operating system's temporary-directory alias.
+        val directory = Files.createTempDirectory("lazer-upnp-media-").toRealPath()
         try {
             val wav = directory.resolve("track.wav")
             Files.write(wav, wavBytes())
