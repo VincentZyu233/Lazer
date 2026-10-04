@@ -492,15 +492,25 @@ internal object LazerAudioLoader {
 
     val unavailableReason: String
         get() = (loadFailure ?: availabilityFailure)?.let { "${it.javaClass.simpleName}: ${it.message}" }
-            ?: "the native library is missing or its ABI version does not match"
+            ?: missingLibraryReason()
 
     private fun libraryFile(): File? {
-        val resourcePath = artifact?.resourcePath ?: return null
         System.getProperty(OVERRIDE_PROPERTY)
             ?.let(::File)
             ?.takeIf(File::isFile)
             ?.let { return it }
+        val resourcePath = artifact?.resourcePath ?: return null
         return WindowsMediaControlIcons.appResourceFile(resourcePath)
             ?: WindowsMediaControlIcons.classpathResourceFile(resourcePath)
+    }
+
+    private fun missingLibraryReason(): String {
+        val overridePath = System.getProperty(OVERRIDE_PROPERTY)
+        if (!overridePath.isNullOrBlank() && !File(overridePath).isFile) {
+            return "native library override path does not exist: $overridePath"
+        }
+        val nativeArtifact = artifact
+            ?: return "no native library artifact for ${System.getProperty("os.name")}/${System.getProperty("os.arch")}"
+        return "native library resource '${nativeArtifact.resourcePath}' was not found"
     }
 }

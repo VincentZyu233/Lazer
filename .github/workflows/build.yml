@@ -243,9 +243,9 @@ jobs:
           test -n "$rpm_file"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             ! jar tf "$jar_file" | grep -Fx 'native/linux-x64/liblazer-audio.so'
-            test ! -e "$app_bundle/app/resources/native/linux-x64/liblazer-audio.so"
-            ! dpkg-deb -c "$deb_file" | grep -E 'app/resources/native/linux-x64/liblazer-audio\.so$'
-            ! rpm -qpl "$rpm_file" | grep -E '/app/resources/native/linux-x64/liblazer-audio\.so$'
+            test ! -e "$app_bundle/lib/resources/native/linux-x64/liblazer-audio.so"
+            ! dpkg-deb -c "$deb_file" | grep -E '/lib/resources/native/linux-x64/liblazer-audio\.so$'
+            ! rpm -qpl "$rpm_file" | grep -E '/lib/resources/native/linux-x64/liblazer-audio\.so$'
           else
             jar tf "$jar_file" | grep -Fx 'native/linux-x64/liblazer-audio.so'
             jar tf "$jar_file" | grep -Fx 'legal/ffmpeg/COPYING.LGPLv2.1'
@@ -254,15 +254,20 @@ jobs:
             jar tf "$jar_file" | grep -E '^native/linux-x64/libavcodec\.so(\..*)?$'
             jar tf "$jar_file" | grep -E '^native/linux-x64/libavutil\.so(\..*)?$'
             jar tf "$jar_file" | grep -E '^native/linux-x64/libswresample\.so(\..*)?$'
-            test -f "$app_bundle/app/resources/native/linux-x64/liblazer-audio.so"
-            test -f "$app_bundle/app/resources/legal/ffmpeg/COPYING.LGPLv2.1"
-            test -f "$app_bundle/app/resources/legal/ffmpeg/BUILDINFO.txt"
-            dpkg-deb -c "$deb_file" | grep -E 'app/resources/native/linux-x64/liblazer-audio\.so$'
-            dpkg-deb -c "$deb_file" | grep -E 'app/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
-            dpkg-deb -c "$deb_file" | grep -E 'app/resources/legal/ffmpeg/BUILDINFO\.txt$'
-            rpm -qpl "$rpm_file" | grep -E '/app/resources/native/linux-x64/liblazer-audio\.so$'
-            rpm -qpl "$rpm_file" | grep -E '/app/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
-            rpm -qpl "$rpm_file" | grep -E '/app/resources/legal/ffmpeg/BUILDINFO\.txt$'
+            test -f "$app_bundle/lib/resources/native/linux-x64/liblazer-audio.so"
+            test -f "$app_bundle/lib/resources/legal/ffmpeg/COPYING.LGPLv2.1"
+            test -f "$app_bundle/lib/resources/legal/ffmpeg/BUILDINFO.txt"
+            dpkg-deb -c "$deb_file" | grep -E '/lib/resources/native/linux-x64/liblazer-audio\.so$'
+            dpkg-deb -c "$deb_file" | grep -E '/lib/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
+            dpkg-deb -c "$deb_file" | grep -E '/lib/resources/legal/ffmpeg/BUILDINFO\.txt$'
+            rpm -qpl "$rpm_file" | grep -E '/lib/resources/native/linux-x64/liblazer-audio\.so$'
+            rpm -qpl "$rpm_file" | grep -E '/lib/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
+            rpm -qpl "$rpm_file" | grep -E '/lib/resources/legal/ffmpeg/BUILDINFO\.txt$'
+            for component in avformat avcodec avutil swresample; do
+              test -n "$(find "$app_bundle/lib/resources/native/linux-x64" -maxdepth 1 -name "lib$component.so*" -print -quit)"
+              dpkg-deb -c "$deb_file" | grep -E "/lib/resources/native/linux-x64/lib$component\.so"
+              rpm -qpl "$rpm_file" | grep -E "/lib/resources/native/linux-x64/lib$component\.so"
+            done
           fi
       - name: Diagnose Linux native package contents after verification failure
         if: ${{ failure() }}
@@ -276,13 +281,14 @@ jobs:
           app_bundle="$(find desktopApp/build/compose/binaries/main-release/app -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)"
           if [[ -n "$app_bundle" ]]; then
             echo "App image native and legal resources:"
-            find "$app_bundle/app/resources" -maxdepth 4 -type f \( -path '*/native/linux-x64/*' -o -path '*/legal/ffmpeg/*' \) -print
+            find desktopApp/build/generated/jpackage-resources -maxdepth 4 -type f -print 2>/dev/null
+            find "$app_bundle" -type f \( -path '*/native/linux-x64/*' -o -path '*/legal/ffmpeg/*' \) -print
           fi
           while IFS= read -r package; do
             echo "Package contents: $package"
             case "$package" in
-              *.deb) dpkg-deb -c "$package" | grep -E 'app/resources/(native/linux-x64|legal/ffmpeg)/' || true ;;
-              *.rpm) rpm -qpl "$package" | grep -E '/app/resources/(native/linux-x64|legal/ffmpeg)/' || true ;;
+              *.deb) dpkg-deb -c "$package" | grep -E '/(native/linux-x64|legal/ffmpeg)/' || true ;;
+              *.rpm) rpm -qpl "$package" | grep -E '/(native/linux-x64|legal/ffmpeg)/' || true ;;
             esac
           done < <(find desktopApp/build/compose/binaries -type f \( -name '*.deb' -o -name '*.rpm' \) -print 2>/dev/null)
       - name: Verify Linux ALSA package dependencies and installed library loading
@@ -302,7 +308,7 @@ jobs:
           grep -Eq '^alsa-lib([[:space:](:]|$)' "$RUNNER_TEMP/lazer-rpm-requires.txt"
 
           sudo apt-get install -y "$deb_file"
-          installed_native="$(dpkg -L dev.naominet.lazer | grep -E '/app/resources/native/linux-x64/liblazer-audio\.so$' | head -n 1)"
+          installed_native="$(dpkg -L dev.naominet.lazer | grep -E '/lib/resources/native/linux-x64/liblazer-audio\.so$' | head -n 1)"
           test -n "$installed_native"
           test -f "$installed_native"
           relocated_sdk="$RUNNER_TEMP/lazer-ffmpeg-build-sdk"
@@ -360,9 +366,9 @@ jobs:
           )
           appimage_root="$appimage_check_dir/squashfs-root"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            test ! -e "$appimage_root/usr/lib/lazer/app/resources/native/linux-x64/liblazer-audio.so"
+            test ! -e "$appimage_root/usr/lib/lazer/lib/resources/native/linux-x64/liblazer-audio.so"
           else
-            test -f "$appimage_root/usr/lib/lazer/app/resources/native/linux-x64/liblazer-audio.so"
+            test -f "$appimage_root/usr/lib/lazer/lib/resources/native/linux-x64/liblazer-audio.so"
           fi
       - uses: actions/upload-artifact@v7
         with:

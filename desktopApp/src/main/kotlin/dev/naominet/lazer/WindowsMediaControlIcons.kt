@@ -16,8 +16,8 @@ internal fun windowsAppTheme(appsUseLightTheme: Int?): WindowsAppTheme =
 /**
  * Resolves media-control ICO files for both Windows taskbar integrations.
  *
- * Packaged applications use jpackage's stable `app/resources` path so Shell links remain valid.
- * Development runs extract the same classpath resource once because LoadImage and IShellLinkW
+ * Packaged applications use jpackage's executable-relative resource path so Shell links remain
+ * valid. Development runs extract the same classpath resource once because LoadImage and IShellLinkW
  * both require a filesystem path.
  */
 internal object WindowsMediaControlIcons {
@@ -52,6 +52,7 @@ internal object WindowsMediaControlIcons {
             listOf(
                 File(directory, "app/resources/$resourcePath"),
                 File(directory, "resources/$resourcePath"),
+                File(directory, "lib/resources/$resourcePath"),
                 File(directory, "lib/app/resources/$resourcePath"),
             ).firstOrNull(File::isFile)?.let { return it }
             directory = directory.parentFile ?: return null

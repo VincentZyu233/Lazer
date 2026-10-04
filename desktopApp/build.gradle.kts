@@ -151,8 +151,12 @@ val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") 
             "The native audio engine is not available for architecture '$desktopOsArch'"
         }
         dependsOn(buildLazerAudio)
+        if (!isWindowsHost) {
+            from(nativeAudioFile) { into("native/$nativeAudioPlatformId") }
+        }
         from(nativeAudioBuildDir) {
             include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
+            if (!isWindowsHost) exclude(nativeAudioFile.get().asFile.name)
             eachFile { relativePath = RelativePath(true, name) }
             into("native/$nativeAudioPlatformId")
         }
@@ -195,8 +199,10 @@ if (buildNativeAudio.get() && (isLinuxHost || isMacOSHost)) {
     }
     tasks.named<ProcessResources>("processResources") {
         dependsOn(buildLazerAudio)
+        from(nativeAudioFile) { into("native/$nativeAudioPlatformId") }
         from(nativeAudioBuildDir) {
             include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
+            exclude(nativeAudioFile.get().asFile.name)
             eachFile { relativePath = RelativePath(true, name) }
             into("native/$nativeAudioPlatformId")
         }
