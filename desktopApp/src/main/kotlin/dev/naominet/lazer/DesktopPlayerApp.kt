@@ -2284,6 +2284,7 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
     val colors = MaterialTheme.colorScheme
     val available = controller.hifiEngineAvailable
     val bitPerfectAvailable = available && supportsDesktopBitPerfectOutput()
+    val nativeDsdAvailable = available && supportsDesktopNativeDsdOutput()
     var pcmTestSampleRate by remember { mutableIntStateOf(48_000) }
     var pcmTestBitDepth by remember { mutableIntStateOf(16) }
     LaunchedEffect(available) {
@@ -2735,6 +2736,33 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
                 enabled = available,
             )
         }
+        if (nativeDsdAvailable) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .clickable(enabled = nativeDsdAvailable, role = androidx.compose.ui.semantics.Role.Switch) {
+                        controller.updateHifiNativeDsdOutput(!controller.hifiNativeDsdOutput)
+                    }
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(tr("settings.hifi.native_dsd"), style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        tr("settings.hifi.native_dsd.hint"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                LazerSwitch(
+                    engine = controller.themeEngine,
+                    checked = controller.hifiNativeDsdOutput,
+                    onCheckedChange = null,
+                    enabled = nativeDsdAvailable,
+                )
+            }
+        }
         Column(Modifier.padding(horizontal = 14.dp, vertical = 6.dp)) {
             Text(
                 tr("settings.hifi.stream"),
@@ -2746,6 +2774,13 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
                 (it.signalPath.negotiation.negotiatedFormat as? AudioFormat.DoP)
                     ?.takeIf { format ->
                         it.isDoPOutput && it.outputFormatInitialized &&
+                            it.signalPath.negotiation.status == OutputNegotiationStatus.Accepted
+                    }
+            }
+            val negotiatedNativeDsd = info?.let {
+                (it.signalPath.negotiation.negotiatedFormat as? AudioFormat.Dsd)
+                    ?.takeIf { format ->
+                        it.isNativeDsdOutput && it.outputFormatInitialized &&
                             it.signalPath.negotiation.status == OutputNegotiationStatus.Accepted
                     }
             }
@@ -2762,6 +2797,24 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
                                         ?.toString() ?: "?",
                                     negotiatedDoP.rate.multiplier,
                                     negotiatedDoP.carrierSampleRateHz,
+                                ),
+                            )
+                        } else if (negotiatedNativeDsd != null) {
+                            append(
+                                tr(
+                                    "settings.hifi.stream.format.native_dsd",
+                                    info.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }
+                                        ?.toString() ?: "?",
+                                    info.nativeDsdAlsaFormat ?: "ALSA Native DSD",
+                                    info.sampleRate,
+                                ),
+                            )
+                        } else if (info.isNativeDsdOutput) {
+                            append(
+                                tr(
+                                    "settings.hifi.stream.format.native_dsd_unknown",
+                                    info.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }
+                                        ?.toString() ?: "?",
                                 ),
                             )
                         } else if (info.isDoPOutput) {
@@ -2892,7 +2945,18 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
             }
             info?.let {
                 Text(
-                    if (negotiatedDoP != null) {
+                    if (negotiatedNativeDsd != null) {
+                        tr(
+                            "settings.hifi.stream.path.native_dsd",
+                            it.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }?.toString() ?: "?",
+                            it.sourceChannels,
+                            it.nativeDsdAlsaFormat ?: "ALSA Native DSD",
+                            it.sampleRate,
+                            it.channels,
+                        )
+                    } else if (it.isNativeDsdOutput) {
+                        tr("settings.hifi.stream.path.native_dsd_unknown")
+                    } else if (negotiatedDoP != null) {
                         tr(
                             "settings.hifi.stream.path.dop",
                             it.sourceDsdRateMultiplier.takeIf { multiplier -> multiplier > 0 }
@@ -2930,7 +2994,24 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                 )
-                if (negotiatedDoP != null) {
+                if (negotiatedNativeDsd != null) {
+                    Text(
+                        tr(
+                            "settings.hifi.stream.session.native_dsd",
+                            it.nativeDsdAlsaFormat ?: "ALSA Native DSD",
+                            it.sampleRate,
+                            it.channels,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else if (it.isNativeDsdOutput) {
+                    Text(
+                        tr("settings.hifi.stream.session.native_dsd_unknown"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                } else if (negotiatedDoP != null) {
                     Text(
                         tr(
                             "settings.hifi.stream.session.dop",
@@ -2980,11 +3061,20 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
                     OutputFormatSelection.ExclusiveCommonRateFallback ->
                         "settings.hifi.stream.selection.common_rate_fallback"
                     OutputFormatSelection.DoPCarrier -> "settings.hifi.stream.selection.dop_carrier"
+                    OutputFormatSelection.NativeDsdU8,
+                    OutputFormatSelection.NativeDsdU16Le,
+                    OutputFormatSelection.NativeDsdU16Be,
+                    OutputFormatSelection.NativeDsdU32Le,
+                    OutputFormatSelection.NativeDsdU32Be -> "settings.hifi.stream.selection.native_dsd_format"
                     OutputFormatSelection.Unknown -> null
                 }
                 selectionKey?.let { key ->
                     Text(
-                        tr(key),
+                        if (key == "settings.hifi.stream.selection.native_dsd_format") {
+                            tr(key, it.nativeDsdAlsaFormat ?: "ALSA Native DSD")
+                        } else {
+                            tr(key)
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.onSurfaceVariant,
                     )

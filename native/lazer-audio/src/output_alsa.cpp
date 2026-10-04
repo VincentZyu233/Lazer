@@ -22,6 +22,7 @@ struct FormatChoice {
     snd_pcm_format_t alsaFormat;
     int32_t validBits;
     int32_t containerBits;
+    int32_t formatSelection = LazerAudioFormatSelectionUnknown;
 };
 
 std::string alsaErrorText(const char *operation, int result) {
@@ -142,6 +143,16 @@ FormatChoice dopCarrierFormat() {
     return {SND_PCM_FORMAT_S24_3LE, 24, 24};
 }
 
+std::vector<FormatChoice> nativeDsdFormats() {
+    return {
+        {SND_PCM_FORMAT_DSD_U32_BE, 32, 32, LazerAudioFormatSelectionNativeDsdU32Be},
+        {SND_PCM_FORMAT_DSD_U32_LE, 32, 32, LazerAudioFormatSelectionNativeDsdU32Le},
+        {SND_PCM_FORMAT_DSD_U16_BE, 16, 16, LazerAudioFormatSelectionNativeDsdU16Be},
+        {SND_PCM_FORMAT_DSD_U16_LE, 16, 16, LazerAudioFormatSelectionNativeDsdU16Le},
+        {SND_PCM_FORMAT_DSD_U8, 8, 8, LazerAudioFormatSelectionNativeDsdU8},
+    };
+}
+
 bool validDopRequest(const AudioOutputRequest &request, const StreamDescription &source,
     std::string &failure) {
     if (!source.dsd || !source.rawDsd) {
@@ -178,6 +189,35 @@ bool validDopRequest(const AudioOutputRequest &request, const StreamDescription 
     return true;
 }
 
+bool validNativeDsdRequest(const AudioOutputRequest &request,
+    const StreamDescription &source, std::string &failure) {
+    if (!request.exclusive || request.bitPerfect || !request.desired.nativeDsd ||
+        request.desired.doP) {
+        failure = "ALSA Native DSD requires a direct DSD-only output request";
+        return false;
+    }
+    if (!source.dsd || !source.rawDsd) {
+        failure = "ALSA Native DSD requires a raw DSD source; DST-decoded PCM cannot use Native DSD";
+        return false;
+    }
+    constexpr int32_t supportedMultipliers[] = {64, 128, 256, 512, 1024};
+    if (source.sampleRate <= 0 ||
+        std::find(std::begin(supportedMultipliers), std::end(supportedMultipliers),
+            source.dsdRateMultiplier) == std::end(supportedMultipliers) ||
+        static_cast<int64_t>(source.sampleRate) * 8 !=
+            static_cast<int64_t>(44'100) * source.dsdRateMultiplier) {
+        failure = "ALSA Native DSD requires a supported, internally consistent DSD rate";
+        return false;
+    }
+    if ((source.channels != 1 && source.channels != 2) ||
+        request.desired.channels != source.channels) {
+        failure = "ALSA Native DSD requires the exact mono or stereo source channel count";
+        return false;
+    }
+    failure.clear();
+    return true;
+}
+
 bool validBitPerfectSource(const StreamDescription &source) {
     return !source.dsd && source.lossless && source.integerPcm &&
         source.canonicalChannelLayout && source.decoderFormatMatchesStream &&
@@ -191,6 +231,7 @@ struct ConfiguredPcm {
     snd_pcm_format_t format = SND_PCM_FORMAT_UNKNOWN;
     unsigned int rate = 0;
     unsigned int channels = 0;
+    int32_t formatSelection = LazerAudioFormatSelectionUnknown;
     snd_pcm_uframes_t periodFrames = 0;
     snd_pcm_uframes_t bufferFrames = 0;
     bool canPause = false;
@@ -226,7 +267,7 @@ bool tryOpenConfigured(const std::string &device, unsigned int rate, unsigned in
     result = snd_pcm_hw_params_set_access(pcm, parameters, SND_PCM_ACCESS_RW_INTERLEAVED);
     if (result < 0) return reject("ALSA device does not support interleaved PCM", result);
     result = snd_pcm_hw_params_set_format(pcm, parameters, format.alsaFormat);
-    if (result < 0) return reject("ALSA device rejected the requested PCM format", result);
+    if (result < 0) return reject("ALSA device rejected the requested sample format", result);
     result = snd_pcm_hw_params_set_channels(pcm, parameters, channels);
     if (result < 0) return reject("ALSA device rejected the requested channel count", result);
     result = snd_pcm_hw_params_set_rate(pcm, parameters, rate, 0);
@@ -326,6 +367,7 @@ bool tryOpenConfigured(const std::string &device, unsigned int rate, unsigned in
     configured.format = actualFormat;
     configured.rate = actualRate;
     configured.channels = actualChannels;
+    configured.formatSelection = format.formatSelection;
     configured.periodFrames = periodFrames;
     configured.bufferFrames = bufferFrames;
     configured.canPause = canPause;
@@ -427,20 +469,28 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     AudioOutputSession &session, std::string &error, LogProxy *log) {
     close();
 
-    if (request.bitPerfect && !request.requireDoP && !validBitPerfectSource(source)) {
+    if (request.requireDoP && request.requireNativeDsd) {
+        error = "DoP and Native DSD are separate output modes";
+        return LazerAudioErrorInvalidArgument;
+    }
+    if (request.bitPerfect && !request.requireDoP && !request.requireNativeDsd &&
+        !validBitPerfectSource(source)) {
         error = source.dsd
             ? "ALSA bit-perfect output accepts exact PCM only; convert DSD to PCM first"
             : "ALSA bit-perfect output needs mono/stereo lossless integer PCM at 16/24/32 bit";
         return LazerAudioErrorUnsupported;
     }
-    if (!request.requireDoP && request.desired.channels <= 0 && source.channels <= 0) {
+    if (!request.requireDoP && !request.requireNativeDsd &&
+        request.desired.channels <= 0 && source.channels <= 0) {
         error = "the source has no usable channel count";
         return LazerAudioErrorUnsupported;
     }
 
     const std::string device = request.deviceId.empty() ? "hw:0,0" : request.deviceId;
-    if (request.requireDoP && !isHwDeviceName(device)) {
-        error = "ALSA DoP output requires a direct hw: device; ALSA plugins and the test null PCM are not accepted";
+    if ((request.requireDoP || request.requireNativeDsd) && !isHwDeviceName(device)) {
+        error = request.requireDoP
+            ? "ALSA DoP output requires a direct hw: device; ALSA plugins and the test null PCM are not accepted"
+            : "ALSA Native DSD requires a direct hw: device; ALSA plugins are not accepted";
         return LazerAudioErrorInvalidArgument;
     }
     if (!isAllowedOutputDeviceName(device)) {
@@ -455,20 +505,25 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     if (request.requireDoP && !validDopRequest(request, source, error)) {
         return LazerAudioErrorUnsupported;
     }
+    if (request.requireNativeDsd && !validNativeDsdRequest(request, source, error)) {
+        return LazerAudioErrorUnsupported;
+    }
 
     const std::vector<unsigned int> rates = request.requireDoP
         ? std::vector<unsigned int>{static_cast<unsigned int>(request.desired.sampleRate)}
-        : candidateRates(source, request);
+        : request.requireNativeDsd ? std::vector<unsigned int>{} : candidateRates(source, request);
     const std::vector<FormatChoice> formats = request.requireDoP
         ? std::vector<FormatChoice>{dopCarrierFormat()}
+        : request.requireNativeDsd ? nativeDsdFormats()
         : candidateFormats(source, request.bitPerfect);
     std::vector<unsigned int> channels;
     const unsigned int sourceChannels = static_cast<unsigned int>(
         request.desired.channels > 0 ? request.desired.channels : source.channels);
     if (sourceChannels > 0) channels.push_back(sourceChannels);
-    if (!request.requireDoP && !request.bitPerfect && sourceChannels == 1) channels.push_back(2);
+    if (!request.requireDoP && !request.requireNativeDsd && !request.bitPerfect &&
+        sourceChannels == 1) channels.push_back(2);
 
-    if (rates.empty() || formats.empty() || channels.empty()) {
+    if ((!request.requireNativeDsd && rates.empty()) || formats.empty() || channels.empty()) {
         error = "no ALSA PCM formats are available for this stream";
         return LazerAudioErrorUnsupported;
     }
@@ -476,22 +531,37 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     ConfiguredPcm configured;
     std::string lastFailure;
     bool found = false;
-    for (const unsigned int rate : rates) {
-        for (const unsigned int channelCount : channels) {
-            for (const FormatChoice &format : formats) {
-                if (tryOpenConfigured(device, rate, channelCount, format,
-                    request.bufferMillis, configured, lastFailure)) {
-                    found = true;
-                    break;
+    if (request.requireNativeDsd) {
+        for (const FormatChoice &format : formats) {
+            const unsigned int wordBytes = static_cast<unsigned int>(format.containerBits / 8);
+            if (wordBytes == 0 || source.sampleRate % static_cast<int32_t>(wordBytes) != 0) continue;
+            const unsigned int rate = static_cast<unsigned int>(source.sampleRate) / wordBytes;
+            if (tryOpenConfigured(device, rate, sourceChannels, format,
+                request.bufferMillis, configured, lastFailure)) {
+                found = true;
+                break;
+            }
+        }
+    } else {
+        for (const unsigned int rate : rates) {
+            for (const unsigned int channelCount : channels) {
+                for (const FormatChoice &format : formats) {
+                    if (tryOpenConfigured(device, rate, channelCount, format,
+                        request.bufferMillis, configured, lastFailure)) {
+                        found = true;
+                        break;
+                    }
                 }
+                if (found) break;
             }
             if (found) break;
         }
-        if (found) break;
     }
     if (!found) {
         error = request.requireDoP
             ? "the ALSA hw device does not accept the exact DoP carrier rate, channels and packed S24_3LE format"
+            : request.requireNativeDsd
+            ? "the ALSA hw device does not accept a supported exact Native DSD rate, channel count and DSD_U8/U16/U32 format"
             : request.bitPerfect
             ? "the ALSA hw device does not accept the exact source PCM rate, channels and precision"
             : "the ALSA hw device accepts none of the tried direct PCM formats";
@@ -525,7 +595,8 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     frameBytes_ = static_cast<int32_t>(configured.channels) * (containerBits / 8);
     pollDescriptorCount_ = snd_pcm_poll_descriptors_count(configured.pcm);
     pauseSupported_ = configured.canPause;
-    shift24ToLow_ = !request.requireDoP && configured.format == SND_PCM_FORMAT_S24_LE;
+    shift24ToLow_ = !request.requireDoP && !request.requireNativeDsd &&
+        configured.format == SND_PCM_FORMAT_S24_LE;
     running_ = false;
     hardwarePaused_ = false;
     stagedBytes_.clear();
@@ -539,17 +610,26 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     target.bitsPerSample = validBits;
     target.containerBitsPerSample = containerBits;
     target.doP = request.requireDoP;
+    target.nativeDsd = request.requireNativeDsd;
+    target.nativeDsdBigEndian = configured.format == SND_PCM_FORMAT_DSD_U8 ||
+        configured.format == SND_PCM_FORMAT_DSD_U16_BE ||
+        configured.format == SND_PCM_FORMAT_DSD_U32_BE;
     session.target = target;
     session.engineFormat = PcmFormat{target.sampleRate, target.channels};
     session.formatSelection = request.requireDoP
-        ? LazerAudioFormatSelectionDoPCarrier : LazerAudioFormatSelectionUnknown;
+        ? LazerAudioFormatSelectionDoPCarrier : configured.formatSelection;
     session.periodFrames = periodFrames_;
     session.bufferFrames = bufferFrames_;
     session.description = "ALSA " + deviceName_ + " / " +
         std::to_string(target.sampleRate) + " Hz / " +
         std::to_string(target.bitsPerSample == 0 ? 32 : target.bitsPerSample) + " bit / " +
-        std::to_string(target.channels) + " 声道" +
-        (request.requireDoP ? " / DoP carrier" : "");
+        std::to_string(target.channels) + " 声道";
+    if (request.requireDoP) session.description += " / DoP carrier";
+    if (request.requireNativeDsd) {
+        const char *formatName = snd_pcm_format_name(configured.format);
+        session.description += " / Native ";
+        session.description += formatName != nullptr ? formatName : "DSD";
+    }
     /* hw: bypasses ALSA conversion/mix plugins. This reports direct PCM ownership to the engine;
      * it does not certify the DAC's internal clock or downstream DSP. */
     session.exclusive = isHwDeviceName(deviceName_);
@@ -557,6 +637,7 @@ int32_t AlsaOutput::open(const AudioOutputRequest &request, const StreamDescript
     session.primeBeforeStart = false;
     session.queueDepthAvailable = true;
     session.doP = request.requireDoP;
+    session.nativeDsd = request.requireNativeDsd;
     session_ = session;
     error.clear();
     if (log_ != nullptr) log_->write(LazerAudioLogInfo, session.description);
@@ -609,9 +690,9 @@ int32_t AlsaOutput::start(std::string &error) {
             running_ = true;
             return flushStaged(error);
         }
-        if (session_.doP) {
+        if (session_.doP || session_.nativeDsd) {
             error = alsaErrorText(
-                "DoP output stopped after pause resume failure because carrier marker phase is unknown",
+                "direct DSD output stopped after pause resume failure because stream continuity is unknown",
                 result);
             return LazerAudioErrorDevice;
         }
@@ -852,9 +933,11 @@ int32_t AlsaOutput::normalizeAlsaState(std::string &error) {
 int32_t AlsaOutput::recover(std::string &error, int alsaError) {
     if (pcm_ == nullptr) return LazerAudioErrorState;
     auto *pcm = static_cast<snd_pcm_t *>(pcm_);
-    if (session_.doP) {
+    if (session_.doP || session_.nativeDsd) {
         if (alsaError == -EPIPE) {
-            error = "DoP output stopped after ALSA XRUN because carrier frame loss makes marker phase unknown";
+            error = session_.doP
+                ? "DoP output stopped after ALSA XRUN because carrier frame loss makes marker phase unknown"
+                : "Native DSD output stopped after ALSA XRUN because DSD word loss breaks stream continuity";
             return LazerAudioErrorDevice;
         }
 
@@ -865,16 +948,18 @@ int32_t AlsaOutput::recover(std::string &error, int alsaError) {
         const bool resumed = result.outcome == AlsaRecoveryOutcome::SuspendResumed;
         if (!resumed) {
             if (alsaError == -ESTRPIPE) {
-                error = alsaErrorText(
-                    "DoP output stopped because ALSA suspend could not resume without resetting the carrier queue",
+                error = alsaErrorText(session_.doP
+                    ? "DoP output stopped because ALSA suspend could not resume without resetting the carrier queue"
+                    : "Native DSD output stopped because ALSA suspend could not resume without resetting the DSD queue",
                     resumeError);
                 if (resumeError == -EAGAIN) {
                     error += "; ALSA suspend resume retry limit was exhausted";
                 }
-                error += "; marker phase is unknown";
+                error += session_.doP ? "; marker phase is unknown" : "; DSD stream continuity is unknown";
             } else {
-                error = alsaErrorText(
-                    "DoP output stopped because ALSA recovery cannot guarantee carrier marker phase",
+                error = alsaErrorText(session_.doP
+                    ? "DoP output stopped because ALSA recovery cannot guarantee carrier marker phase"
+                    : "Native DSD output stopped because ALSA recovery cannot guarantee word continuity",
                     alsaError);
             }
             return LazerAudioErrorDevice;

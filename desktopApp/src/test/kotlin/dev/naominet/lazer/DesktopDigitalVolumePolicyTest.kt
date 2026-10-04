@@ -31,6 +31,17 @@ class DesktopDigitalVolumePolicyTest {
     }
 
     @Test
+    fun `active and opening Native DSD bypass software volume`() {
+        assertTrue(shouldBypass(nativeDsdActive = true))
+        assertTrue(shouldBypass(nativeDsdOpening = true))
+    }
+
+    @Test
+    fun `Native DSD preference alone does not lock software volume for PCM`() {
+        assertFalse(shouldBypass())
+    }
+
+    @Test
     fun `standard player ignores native signal flags`() {
         assertFalse(shouldBypassDesktopDigitalVolume(
             nativePlayback = false,
@@ -38,6 +49,8 @@ class DesktopDigitalVolumePolicyTest {
             doPActive = true,
             bitPerfectOpening = true,
             doPOpening = true,
+            nativeDsdActive = true,
+            nativeDsdOpening = true,
         ))
     }
 
@@ -46,11 +59,15 @@ class DesktopDigitalVolumePolicyTest {
         doPActive: Boolean = false,
         bitPerfectOpening: Boolean = false,
         doPOpening: Boolean = false,
+        nativeDsdActive: Boolean = false,
+        nativeDsdOpening: Boolean = false,
     ) = shouldBypassDesktopDigitalVolume(
         nativePlayback = true,
         bitPerfectActive = bitPerfectActive,
         doPActive = doPActive,
         bitPerfectOpening = bitPerfectOpening,
         doPOpening = doPOpening,
+        nativeDsdActive = nativeDsdActive,
+        nativeDsdOpening = nativeDsdOpening,
     )
 }

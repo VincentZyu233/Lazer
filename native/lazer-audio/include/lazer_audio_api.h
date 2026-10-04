@@ -30,7 +30,7 @@
 #define LAZER_AUDIO_CALL
 #endif
 
-#define LAZER_AUDIO_ABI_VERSION 21u
+#define LAZER_AUDIO_ABI_VERSION 22u
 
 #define LAZER_AUDIO_MAX_EQ_BANDS 32u
 
@@ -133,11 +133,12 @@ typedef enum LazerAudioResampleMode {
     LazerAudioResampleAlwaysFloat32 = 2,
 } LazerAudioResampleMode;
 
-/* DSD output policy. RequireDoP requests raw DSD packed into an exact, exclusive 24-bit PCM carrier;
- * unsupported sources and devices fail instead of silently converting to PCM. */
+/* DSD output policy. Direct modes require an exact device format and never fall back to PCM. */
 typedef enum LazerAudioDsdOutputMode {
     LazerAudioDsdOutputConvertToPcm = 0,
     LazerAudioDsdOutputRequireDoP = 1,
+    /* Append-only in ABI v22: ALSA Native DSD_U8/U16/U32 from raw DSD sources. */
+    LazerAudioDsdOutputRequireNative = 2,
 } LazerAudioDsdOutputMode;
 
 typedef struct LazerAudioDeviceConfig {
@@ -170,6 +171,7 @@ typedef enum LazerAudioSourceFormatKind {
 typedef enum LazerAudioOutputFormatKind {
     LazerAudioOutputFormatPcm = 0,
     LazerAudioOutputFormatDoP = 1,
+    LazerAudioOutputFormatNativeDsd = 2,
 } LazerAudioOutputFormatKind;
 
 /* How the successfully initialized output session format was selected. This reports the player
@@ -183,10 +185,17 @@ typedef enum LazerAudioFormatSelection {
     LazerAudioFormatSelectionExclusiveMixFallback = 5,
     LazerAudioFormatSelectionExclusiveCommonRateFallback = 6,
     LazerAudioFormatSelectionDoPCarrier = 7,
+    /* Append-only in ABI v22: exact ALSA Native DSD hardware formats. */
+    LazerAudioFormatSelectionNativeDsdU8 = 8,
+    LazerAudioFormatSelectionNativeDsdU16Le = 9,
+    LazerAudioFormatSelectionNativeDsdU16Be = 10,
+    LazerAudioFormatSelectionNativeDsdU32Le = 11,
+    LazerAudioFormatSelectionNativeDsdU32Be = 12,
 } LazerAudioFormatSelection;
 
-/* Describes the source and output session format. Output fields describe the WAVEFORMAT accepted by
- * IAudioClient::Initialize; they do not certify the format emitted by the physical DAC. For DSD,
+/* Describes the source and initialized output-session format. PCM/DoP fields describe the format
+ * accepted by the platform endpoint (WAVEFORMAT on WASAPI); Native DSD fields describe the ALSA
+ * DSD word format. None certify the format emitted or recognized by the physical DAC. For DSD,
  * source_sample_rate and source_bits_per_sample are zero because DSD has no PCM sample-rate or
  * sample-depth fields; source_dsd_rate_multiplier carries the DSD rate (64, 128, 256, 512 or 1024). */
 typedef struct LazerAudioStreamInfo {
@@ -202,15 +211,15 @@ typedef struct LazerAudioStreamInfo {
     int32_t output_exclusive;
     /* Set only when the exact lossless PCM format was accepted and DSP/digital volume are bypassed. */
     int32_t bit_perfect_active;
-    /* Append-only in ABI v3: container width and encoding of the initialized WASAPI session. */
+    /* Append-only in ABI v3: container width and encoding of the initialized output session. */
     int32_t output_container_bits_per_sample;
     int32_t output_is_float;
-    /* True only after WASAPI initialization succeeded; this is not a physical-DAC readback. */
+    /* True only after native endpoint initialization succeeded; this is not a DAC readback. */
     int32_t output_format_initialized;
     /* Append-only in ABI v6: source encoding and DSD rate, zero/default for PCM. */
     int32_t source_format_kind;
     int32_t source_dsd_rate_multiplier;
-    /* Append-only in ABI v7: branch that selected the initialized WASAPI format. */
+    /* Append-only in ABI v7: branch that selected the initialized output format. */
     int32_t output_format_selection;
     /* Append-only in ABI v8: valid only for the processed float DSP path, never bit-perfect.
      * Peak is the maximum sample magnitude observed since stream open after DSP/software volume and before output packing,

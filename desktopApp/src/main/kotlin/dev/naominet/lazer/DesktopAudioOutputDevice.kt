@@ -79,6 +79,10 @@ internal fun shouldRequestDesktopExclusiveOutput(
 internal fun supportsDesktopBitPerfectOutput(osName: String = System.getProperty("os.name").orEmpty()): Boolean =
     resolveDesktopAudioOutputBackend(osName) != DesktopAudioOutputBackend.Unsupported
 
+/** Native DSD_U8/U16/U32 negotiation is currently implemented only by the direct ALSA backend. */
+internal fun supportsDesktopNativeDsdOutput(osName: String = System.getProperty("os.name").orEmpty()): Boolean =
+    resolveDesktopAudioOutputBackend(osName) == DesktopAudioOutputBackend.Alsa
+
 /** WASAPI and CoreAudio require an explicit exclusive/Hog request; ALSA hw is direct by definition. */
 internal fun desktopBitPerfectRequiresExclusiveRequest(
     osName: String = System.getProperty("os.name").orEmpty(),

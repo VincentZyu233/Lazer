@@ -72,6 +72,11 @@ internal fun Int.toOutputFormatSelection(): OutputFormatSelection = when (this) 
     LAZER_AUDIO_FORMAT_SELECTION_EXCLUSIVE_COMMON_RATE_FALLBACK ->
         OutputFormatSelection.ExclusiveCommonRateFallback
     LAZER_AUDIO_FORMAT_SELECTION_DOP_CARRIER -> OutputFormatSelection.DoPCarrier
+    LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U8 -> OutputFormatSelection.NativeDsdU8
+    LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U16_LE -> OutputFormatSelection.NativeDsdU16Le
+    LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U16_BE -> OutputFormatSelection.NativeDsdU16Be
+    LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U32_LE -> OutputFormatSelection.NativeDsdU32Le
+    LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U32_BE -> OutputFormatSelection.NativeDsdU32Be
     else -> OutputFormatSelection.Unknown
 }
 
@@ -80,6 +85,19 @@ internal val LazerHiFiStreamInfo.hasDsdSource: Boolean
 
 internal val LazerHiFiStreamInfo.isDoPOutput: Boolean
     get() = outputFormatKind == LAZER_AUDIO_OUTPUT_FORMAT_DOP
+
+internal val LazerHiFiStreamInfo.isNativeDsdOutput: Boolean
+    get() = outputFormatKind == LAZER_AUDIO_OUTPUT_FORMAT_NATIVE_DSD
+
+internal val LazerHiFiStreamInfo.nativeDsdAlsaFormat: String?
+    get() = when (formatSelection) {
+        OutputFormatSelection.NativeDsdU8 -> "DSD_U8"
+        OutputFormatSelection.NativeDsdU16Le -> "DSD_U16_LE"
+        OutputFormatSelection.NativeDsdU16Be -> "DSD_U16_BE"
+        OutputFormatSelection.NativeDsdU32Le -> "DSD_U32_LE"
+        OutputFormatSelection.NativeDsdU32Be -> "DSD_U32_BE"
+        else -> null
+    }
 
 private fun nativeAudioBackendLabel(osName: String = System.getProperty("os.name").orEmpty()): String =
     when (resolveDesktopAudioOutputBackend(osName)) {
@@ -91,7 +109,8 @@ private fun nativeAudioBackendLabel(osName: String = System.getProperty("os.name
 
 internal fun LazerAudioStreamInfo.toOutputTelemetrySnapshot(): OutputTelemetrySnapshot? {
     if (outputTelemetryValid == 0 || outputFormatInitialized == 0 || bitPerfectActive != 0 ||
-        outputFormatKind == LAZER_AUDIO_OUTPUT_FORMAT_DOP
+        outputFormatKind == LAZER_AUDIO_OUTPUT_FORMAT_DOP ||
+        outputFormatKind == LAZER_AUDIO_OUTPUT_FORMAT_NATIVE_DSD
     ) return null
     return OutputTelemetrySnapshot(
         samplePeakDbfs = outputPeakMilliDbfs / 1_000.0,
@@ -100,14 +119,18 @@ internal fun LazerAudioStreamInfo.toOutputTelemetrySnapshot(): OutputTelemetrySn
     )
 }
 
-/** Builds the exact PCM format accepted by a successfully initialized native output session. */
-private fun LazerHiFiStreamInfo.initializedSessionFormat(): AudioFormat.Pcm? {
+/** Builds the exact format accepted by a successfully initialized native output session. */
+private fun LazerHiFiStreamInfo.initializedSessionFormat(): AudioFormat? {
     if (!outputFormatInitialized || sampleRate <= 0) return null
 
     val channelLayout = when (channels) {
         1 -> AudioChannelLayout.Mono
         2 -> AudioChannelLayout.Stereo
         else -> return null
+    }
+    if (isNativeDsdOutput) {
+        val rate = DsdRate.entries.firstOrNull { it.multiplier == outputDsdRateMultiplier } ?: return null
+        return AudioFormat.Dsd(rate, channelLayout)
     }
     val containerBits = outputContainerBitsPerSample
     val validBits = bitsPerSample
@@ -143,17 +166,31 @@ internal fun LazerHiFiStreamInfo.toSignalPathSnapshot(
     }
     val exactFormat = bitPerfectActive
     val doPOutput = isDoPOutput
+    val nativeDsdOutput = isNativeDsdOutput
     val initializedFormat = initializedSessionFormat()
     val outputDsdRate = DsdRate.entries.firstOrNull { it.multiplier == outputDsdRateMultiplier }
-    val negotiatedFormat: AudioFormat? = if (doPOutput && outputDsdRate != null) {
-        val layout = when (channels) {
-            1 -> AudioChannelLayout.Mono
-            2 -> AudioChannelLayout.Stereo
-            else -> null
+    val negotiatedFormat: AudioFormat? = when {
+        nativeDsdOutput -> {
+            val layout = when (channels) {
+                1 -> AudioChannelLayout.Mono
+                2 -> AudioChannelLayout.Stereo
+                else -> null
+            }
+            if (outputFormatInitialized && outputDsdRate != null) {
+                layout?.let { AudioFormat.Dsd(outputDsdRate, it) }
+            } else {
+                null
+            }
         }
-        layout?.let { AudioFormat.DoP(outputDsdRate, sampleRate, it) }
-    } else {
-        initializedFormat
+        doPOutput && outputDsdRate != null -> {
+            val layout = when (channels) {
+                1 -> AudioChannelLayout.Mono
+                2 -> AudioChannelLayout.Stereo
+                else -> null
+            }
+            layout?.let { AudioFormat.DoP(outputDsdRate, sampleRate, it) }
+        }
+        else -> initializedFormat
     }
     val knownFormatChange = sourceIsDsd || sourceSampleRate != sampleRate || sourceChannels != channels ||
         (sourceBitsPerSample > 0 && sourceBitsPerSample != bitsPerSample)
@@ -189,16 +226,20 @@ internal fun LazerHiFiStreamInfo.toSignalPathSnapshot(
         if (lossless) append(" · lossless")
     }
     val outputFormatSummary = initializedFormat?.let { format ->
-        if (format.isFloat) {
-            "${format.containerBitsPerSample}-bit float"
-        } else if (format.validBitsPerSample != format.containerBitsPerSample) {
-            "${format.validBitsPerSample}-bit integer in ${format.containerBitsPerSample}-bit container"
-        } else {
-            "${format.validBitsPerSample}-bit integer"
+        when (format) {
+            is AudioFormat.Dsd -> nativeDsdAlsaFormat ?: "Native DSD format unknown"
+            is AudioFormat.Pcm -> when {
+                format.isFloat -> "${format.containerBitsPerSample}-bit float"
+                format.validBitsPerSample != format.containerBitsPerSample ->
+                    "${format.validBitsPerSample}-bit integer in ${format.containerBitsPerSample}-bit container"
+                else -> "${format.validBitsPerSample}-bit integer"
+            }
+            is AudioFormat.DoP -> "24-bit DoP carrier"
         }
     } ?: "$bitsPerSample bit · format unknown"
     val outputSummary = buildString {
         if (doPOutput) append("DoP over ")
+        if (nativeDsdOutput) append("Native DSD · ")
         append(sampleRate).append(" Hz · ").append(channels).append(" ch · ")
         append(if (doPOutput) "24-bit carrier" else outputFormatSummary).append(" · ")
         append(outputOwnership)
@@ -216,6 +257,7 @@ internal fun LazerHiFiStreamInfo.toSignalPathSnapshot(
                 SignalPathStageStatus.Active,
                 detail = when {
                     doPOutput -> "Raw DSD bitstream preserved for DoP transport"
+                    nativeDsdOutput -> "Raw DSD bitstream preserved for ALSA Native DSD output"
                     exactFormat -> "Lossless integer samples preserved"
                     sourceIsDsd -> "DSD bitstream decoded to PCM by the resampler"
                     else -> "Decoded PCM"
@@ -223,19 +265,25 @@ internal fun LazerHiFiStreamInfo.toSignalPathSnapshot(
             ),
             SignalPathStageSnapshot(
                 SignalPathStage.Dsp,
-                if (exactFormat || doPOutput) SignalPathStageStatus.Bypassed else SignalPathStageStatus.Unknown,
-                detail = if (doPOutput) "EQ, limiter, software volume and dither bypassed" else if (exactFormat) "DSP and software volume bypassed" else "DSP state is configured in the player",
+                if (exactFormat || doPOutput || nativeDsdOutput) SignalPathStageStatus.Bypassed else SignalPathStageStatus.Unknown,
+                detail = when {
+                    doPOutput || nativeDsdOutput -> "EQ, limiter, software volume and PCM dither bypassed"
+                    exactFormat -> "DSP and software volume bypassed"
+                    else -> "DSP state is configured in the player"
+                },
             ),
             SignalPathStageSnapshot(
                 SignalPathStage.FormatConversion,
                 when {
                     doPOutput -> SignalPathStageStatus.Converted
+                    nativeDsdOutput -> SignalPathStageStatus.Converted
                     exactFormat -> SignalPathStageStatus.Bypassed
                     knownFormatChange -> SignalPathStageStatus.Converted
                     else -> SignalPathStageStatus.Unknown
                 },
                 detail = when {
                     doPOutput -> "Packed as 24-bit DoP; no PCM sample-rate conversion"
+                    nativeDsdOutput -> "Packed as ${nativeDsdAlsaFormat ?: "ALSA Native DSD"}; no DSD-to-PCM conversion"
                     exactFormat -> "No resampling or bit-depth conversion"
                     sourceIsDsd -> "DSD$dsdLabel converted to PCM at ${sampleRate} Hz"
                     knownFormatChange -> "Source and output format fields differ"
@@ -258,6 +306,9 @@ internal fun LazerHiFiStreamInfo.toSignalPathSnapshot(
             backend = backend,
             formatSelection = formatSelection,
             detail = when {
+                nativeDsdOutput && negotiatedFormat != null && outputBackend == DesktopAudioOutputBackend.Alsa ->
+                    "ALSA configured the exact Native DSD format on a direct hardware PCM; DAC-side Native DSD recognition is not read back"
+                nativeDsdOutput -> "Native DSD was requested, but an initialized output format is not reported"
                 doPOutput && outputBackend == DesktopAudioOutputBackend.Wasapi ->
                     "WASAPI accepted the exact 24-bit DoP carrier session; DAC-side DoP recognition is not read back"
                 doPOutput && outputBackend == DesktopAudioOutputBackend.Alsa ->
@@ -274,7 +325,19 @@ internal fun LazerHiFiStreamInfo.toSignalPathSnapshot(
                 else -> "$backendLabel session initialized, but its reported format cannot be represented as mono/stereo PCM"
             },
         ),
-        directPath = if (doPOutput) {
+        directPath = if (nativeDsdOutput && negotiatedFormat != null) {
+            DirectPathSnapshot(
+                status = DirectPathStatus.Negotiated,
+                reason = DirectPathReason.DigitalCaptureNotVerified,
+                detail = "Native DSD ALSA session initialized; DAC recognition and digital loopback have not been verified",
+            )
+        } else if (nativeDsdOutput) {
+            DirectPathSnapshot(
+                status = DirectPathStatus.Unknown,
+                reason = DirectPathReason.DeviceOrBackendUnknown,
+                detail = "Native DSD was requested, but no initialized output format is reported",
+            )
+        } else if (doPOutput) {
             DirectPathSnapshot(
                 status = DirectPathStatus.Negotiated,
                 reason = DirectPathReason.DigitalCaptureNotVerified,
@@ -317,6 +380,7 @@ internal class DesktopNativeAudioPlayer(
     initialBufferMillis: Int = 120,
     initialBitPerfect: Boolean = false,
     initialDoPOutput: Boolean = false,
+    initialNativeDsdOutput: Boolean = false,
     apiOverride: LazerAudioLibrary? = null,
 ) : DesktopAudioEngine {
 
@@ -342,10 +406,13 @@ internal class DesktopNativeAudioPlayer(
     private var outputEndpointId: String? = null
 
     @Volatile
-    private var bitPerfect = initialBitPerfect && !initialDoPOutput
+    private var bitPerfect = initialBitPerfect && !initialDoPOutput && !initialNativeDsdOutput
 
     @Volatile
     private var doPOutput = initialDoPOutput
+
+    @Volatile
+    private var nativeDsdOutput = initialNativeDsdOutput && !initialDoPOutput
 
     @Volatile
     private var bufferMillis = initialBufferMillis
@@ -713,6 +780,13 @@ internal class DesktopNativeAudioPlayer(
     /** Requires exact 24-bit DoP output and bypasses EQ and digital volume. */
     fun setDoPOutput(enabled: Boolean) {
         doPOutput = enabled
+        if (enabled) nativeDsdOutput = false
+    }
+
+    /** Requires exact ALSA Native DSD output and bypasses EQ and digital volume. */
+    fun setNativeDsdOutput(enabled: Boolean) {
+        nativeDsdOutput = enabled
+        if (enabled) doPOutput = false
     }
 
     /** Output buffer length in milliseconds; applied when the next stream opens. */
@@ -1023,11 +1097,12 @@ internal class DesktopNativeAudioPlayer(
         resampleMode = LAZER_AUDIO_RESAMPLE_NATIVE
         targetSampleRate = 0
         bufferMillis = this@DesktopNativeAudioPlayer.bufferMillis
-        bitPerfect = if (bitPerfectOverride && !this@DesktopNativeAudioPlayer.doPOutput) 1 else 0
-        dsdOutputMode = if (this@DesktopNativeAudioPlayer.doPOutput) {
-            LAZER_AUDIO_DSD_OUTPUT_REQUIRE_DOP
-        } else {
-            LAZER_AUDIO_DSD_OUTPUT_CONVERT_TO_PCM
+        bitPerfect = if (bitPerfectOverride && !this@DesktopNativeAudioPlayer.doPOutput &&
+            !this@DesktopNativeAudioPlayer.nativeDsdOutput) 1 else 0
+        dsdOutputMode = when {
+            this@DesktopNativeAudioPlayer.nativeDsdOutput -> LAZER_AUDIO_DSD_OUTPUT_REQUIRE_NATIVE
+            this@DesktopNativeAudioPlayer.doPOutput -> LAZER_AUDIO_DSD_OUTPUT_REQUIRE_DOP
+            else -> LAZER_AUDIO_DSD_OUTPUT_CONVERT_TO_PCM
         }
     }
 

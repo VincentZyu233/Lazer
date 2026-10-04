@@ -76,6 +76,7 @@ add_library(lazer-audio SHARED
     src/engine.cpp
     src/source.cpp
     src/dop_packer.cpp
+    src/native_dsd_packer.cpp
     src/dsp_chain.cpp
     src/ring_buffer.cpp
     src/pcm_output.cpp
@@ -130,6 +131,7 @@ if(LAZER_AUDIO_BUILD_PROBE)
         src/engine.cpp
         src/source.cpp
         src/dop_packer.cpp
+        src/native_dsd_packer.cpp
         src/dsp_chain.cpp
         src/ring_buffer.cpp
         src/pcm_output.cpp)
@@ -167,6 +169,7 @@ if(LAZER_AUDIO_BUILD_PROBE)
         src/engine.cpp
         src/source.cpp
         src/dop_packer.cpp
+        src/native_dsd_packer.cpp
         src/dsp_chain.cpp
         src/ring_buffer.cpp
         src/pcm_output.cpp)
@@ -194,6 +197,43 @@ if(LAZER_AUDIO_BUILD_PROBE)
     add_test(NAME lazer-audio-engine-dop
         COMMAND $<TARGET_FILE:lazer-audio-engine-dop-probe>)
     set_tests_properties(lazer-audio-engine-dop PROPERTIES TIMEOUT 30)
+
+    # Exercise the direct Native DSD request/session contract without ALSA hardware.
+    add_executable(lazer-audio-engine-native-dsd-probe
+        tools/lazer_audio_engine_native_dsd_probe.cpp
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/engine.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+        src/native_dsd_packer.cpp
+        src/dsp_chain.cpp
+        src/ring_buffer.cpp
+        src/pcm_output.cpp)
+    target_include_directories(lazer-audio-engine-native-dsd-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(lazer-audio-engine-native-dsd-probe PRIVATE ${LAZER_FFMPEG_LIBRARIES})
+    target_compile_features(lazer-audio-engine-native-dsd-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-engine-native-dsd-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-engine-native-dsd-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-engine-native-dsd-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(LAZER_FFMPEG_RUNTIME_FILES)
+        add_custom_command(TARGET lazer-audio-engine-native-dsd-probe POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                    "$<TARGET_FILE_DIR:lazer-audio-engine-native-dsd-probe>"
+            VERBATIM)
+    endif()
+    add_test(NAME lazer-audio-engine-native-dsd
+        COMMAND $<TARGET_FILE:lazer-audio-engine-native-dsd-probe>)
+    set_tests_properties(lazer-audio-engine-native-dsd PROPERTIES TIMEOUT 30)
 
     # Keep ALSA recovery state semantics executable without an ALSA device or alsa-lib runtime.
     add_executable(lazer-audio-alsa-recovery-probe tools/lazer_audio_alsa_recovery_probe.cpp)
@@ -293,6 +333,7 @@ if(LAZER_AUDIO_BUILD_PROBE)
         src/engine.cpp
         src/source.cpp
         src/dop_packer.cpp
+        src/native_dsd_packer.cpp
         src/dsp_chain.cpp
         src/ring_buffer.cpp
         src/pcm_output.cpp)
@@ -382,6 +423,23 @@ if(LAZER_AUDIO_BUILD_PROBE)
         COMMAND $<TARGET_FILE:lazer-audio-dop-packer-probe>)
     set_tests_properties(lazer-audio-dop-packer PROPERTIES TIMEOUT 15)
 
+    # Verify ALSA Native DSD word packing, endian order and idle padding independently of hardware.
+    add_executable(lazer-audio-native-dsd-packer-probe
+        tools/lazer_audio_native_dsd_packer_probe.cpp
+        src/native_dsd_packer.cpp)
+    target_include_directories(lazer-audio-native-dsd-packer-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_features(lazer-audio-native-dsd-packer-probe PRIVATE cxx_std_20)
+    if(MSVC)
+        set_property(TARGET lazer-audio-native-dsd-packer-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-native-dsd-packer-probe PRIVATE
+            /W4 /WX /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-native-dsd-packer
+        COMMAND $<TARGET_FILE:lazer-audio-native-dsd-packer-probe>)
+    set_tests_properties(lazer-audio-native-dsd-packer PROPERTIES TIMEOUT 15)
+
     # Source-only verification bypasses WASAPI completely and consumes decoded PCM in memory.
     add_executable(lazer-audio-source-probe
         tools/lazer_audio_source_probe.cpp
@@ -389,6 +447,7 @@ if(LAZER_AUDIO_BUILD_PROBE)
         src/dff_dsf_reader.cpp
         src/source.cpp
         src/dop_packer.cpp
+        src/native_dsd_packer.cpp
     )
     target_include_directories(lazer-audio-source-probe PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/include"

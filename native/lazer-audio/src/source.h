@@ -17,6 +17,7 @@
 #include "dff_dsf_reader.h"
 #include "dop_packer.h"
 #include "internal.h"
+#include "native_dsd_packer.h"
 
 namespace lazer::audio {
 
@@ -31,6 +32,9 @@ struct TargetFormat {
     int32_t containerBitsPerSample = 0;
     /* The 24-bit samples contain preformatted DoP carrier words and must bypass PCM conversion. */
     bool doP = false;
+    /* Raw DSD bytes are grouped into exact ALSA DSD_U8/U16/U32 native words. */
+    bool nativeDsd = false;
+    bool nativeDsdBigEndian = true;
 
     [[nodiscard]] bool isFloat() const noexcept { return bitsPerSample == 0; }
     [[nodiscard]] int32_t frameBytes() const noexcept {
@@ -171,6 +175,7 @@ private:
 
     TargetFormat target_{};
     DopPacker dopPacker_{2};
+    NativeDsdPacker nativeDsdPacker_{};
     StreamDescription description_{};
     int64_t durationHintMillis_ = 0;
     bool cueSegmentMode_ = false;

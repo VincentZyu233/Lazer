@@ -157,6 +157,11 @@ internal object DesktopSettings {
         get() = DesktopStateFile.get("playback.hifi_dop_output")?.toBooleanStrictOrNull() ?: false
         set(value) = DesktopStateFile.set("playback.hifi_dop_output", value.toString())
 
+    /** Require raw DSD to use an exact ALSA Native DSD_U8/U16/U32 hardware format. */
+    var hifiNativeDsdOutput: Boolean
+        get() = DesktopStateFile.get("playback.hifi_native_dsd_output")?.toBooleanStrictOrNull() ?: false
+        set(value) = DesktopStateFile.set("playback.hifi_native_dsd_output", value.toString())
+
     /** Opaque stable identity for the selected Windows WASAPI render endpoint; null means default. */
     var hifiDeviceIdentity: String?
         get() = DesktopStateFile.get("playback.hifi_device_identity")?.takeIf(String::isNotBlank)

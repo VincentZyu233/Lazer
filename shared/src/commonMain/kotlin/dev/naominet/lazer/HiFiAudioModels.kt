@@ -252,6 +252,11 @@ enum class OutputFormatSelection {
     ExclusiveMixFallback,
     ExclusiveCommonRateFallback,
     DoPCarrier,
+    NativeDsdU8,
+    NativeDsdU16Le,
+    NativeDsdU16Be,
+    NativeDsdU32Le,
+    NativeDsdU32Be,
 }
 
 /** Backend negotiation is reported separately from a digital capture comparison. */

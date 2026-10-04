@@ -129,6 +129,10 @@ int32_t WasapiOutput::open(const AudioOutputRequest &request, const StreamDescri
     AudioOutputSession &session, std::string &error, LogProxy *log) {
     close();
 
+    if (request.requireNativeDsd || request.desired.nativeDsd) {
+        error = "WASAPI Native DSD is not implemented; use DoP or convert DSD to PCM";
+        return LazerAudioErrorUnsupported;
+    }
     if (request.bitPerfect && !request.exclusive) {
         error = "bit-perfect output requires WASAPI exclusive mode";
         return LazerAudioErrorUnsupported;

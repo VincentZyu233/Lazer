@@ -709,6 +709,33 @@ int32_t AudioSource::configureResampler() {
         return LazerAudioErrorDecode;
     }
 
+    if (target_.doP && target_.nativeDsd) {
+        lastError_ = "DoP and Native DSD are separate output formats";
+        return LazerAudioErrorInvalidArgument;
+    }
+
+    if (target_.nativeDsd) {
+        const size_t wordBytes = static_cast<size_t>(target_.containerBitsPerSample / 8);
+        const int32_t supportedMultipliers[] = {64, 128, 256, 512, 1024};
+        if (!description_.dsd || !description_.rawDsd || dstDecodedToPcm_ ||
+            codec_->sample_fmt != AV_SAMPLE_FMT_DSD || target_.channels != description_.channels ||
+            (description_.channels != 1 && description_.channels != 2) ||
+            std::find(std::begin(supportedMultipliers), std::end(supportedMultipliers),
+                description_.dsdRateMultiplier) == std::end(supportedMultipliers) ||
+            static_cast<int64_t>(description_.sampleRate) * 8 !=
+                static_cast<int64_t>(44'100) * description_.dsdRateMultiplier ||
+            (wordBytes != 1 && wordBytes != 2 && wordBytes != 4) ||
+            target_.bitsPerSample != static_cast<int32_t>(wordBytes * 8) ||
+            target_.containerBitsPerSample != target_.bitsPerSample ||
+            static_cast<int64_t>(target_.sampleRate) * wordBytes != description_.sampleRate) {
+            lastError_ = "Native DSD requires raw mono/stereo DSD and the exact ALSA DSD word clock";
+            return LazerAudioErrorUnsupported;
+        }
+        nativeDsdPacker_ = NativeDsdPacker(static_cast<size_t>(description_.channels),
+            wordBytes, target_.nativeDsdBigEndian);
+        return LazerAudioOk;
+    }
+
     if (target_.doP) {
         if (!description_.dsd || !description_.rawDsd || dstDecodedToPcm_ ||
             codec_->sample_fmt != AV_SAMPLE_FMT_DSD || target_.bitsPerSample != 24 ||
@@ -762,6 +789,7 @@ int32_t AudioSource::setTargetFormat(TargetFormat format) {
         format.channels = description_.channels > 0 ? description_.channels : 2;
     }
     target_ = format;
+    if (target_.nativeDsd) target_.doP = false;
     /* Called from the control path only while the pump is parked; the engine rebuilds the resampler
      * before the next block reaches the ring. */
     if (codec_ != nullptr) {
@@ -889,6 +917,7 @@ int32_t AudioSource::applySeek(int64_t positionMillis) {
     }
     avcodec_flush_buffers(codec_.get());
     if (target_.doP) dopPacker_.reset();
+    if (target_.nativeDsd) nativeDsdPacker_.reset();
     if (resampler_ != nullptr) {
         /* Re-initialising drops the filter history, which is what a hard position change needs; a
          * carried-over delay would smear the first millisecond of the new location. */
@@ -1014,6 +1043,22 @@ int32_t AudioSource::pump(SourceConsumer &consumer) {
                 const DopPackResult flushed = dopPacker_.flush(packedScratch_.data(), 1);
                 if (flushed.status != DopPackStatus::Ok || flushed.producedOutputFrames != 1) {
                     lastError_ = "the final unmatched DSD byte could not be padded into a DoP carrier";
+                    outcome = LazerAudioErrorDecode;
+                    break;
+                }
+                const int32_t delivered = deliverSamples(packedScratch_.data(), 1, consumer);
+                if (delivered != LazerAudioOk) {
+                    outcome = delivered;
+                    break;
+                }
+            } else if (target_.nativeDsd && nativeDsdPacker_.hasPendingInput()) {
+                const size_t frameBytes = static_cast<size_t>(target_.frameBytes());
+                packedScratch_.resize(frameBytes);
+                const NativeDsdPackResult flushed =
+                    nativeDsdPacker_.flush(packedScratch_.data(), 1);
+                if (flushed.status != NativeDsdPackStatus::Ok ||
+                    flushed.producedOutputFrames != 1) {
+                    lastError_ = "the final DSD bytes could not be padded into a native output word";
                     outcome = LazerAudioErrorDecode;
                     break;
                 }
@@ -1279,6 +1324,35 @@ int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
             static_cast<int32_t>(packed.producedOutputFrames), consumer);
     }
 
+    if (target_.nativeDsd) {
+        if (frame->format != AV_SAMPLE_FMT_DSD || frame->extended_data == nullptr ||
+            frame->extended_data[0] == nullptr) {
+            lastError_ = "Native DSD requires packed raw DSD decoder frames";
+            return LazerAudioErrorUnsupported;
+        }
+        const size_t wordBytes = nativeDsdPacker_.wordBytes();
+        const int32_t outputCapacity = std::max(
+            static_cast<int32_t>(inputSamples / static_cast<int>(wordBytes) + 1), 1);
+        packedScratch_.resize(static_cast<size_t>(outputCapacity) *
+            static_cast<size_t>(target_.frameBytes()));
+        const uint8_t *input = alignedDsdData.empty()
+            ? frame->extended_data[0] : alignedDsdData[0];
+        const NativeDsdPackResult packed = nativeDsdPacker_.pack(input,
+            static_cast<size_t>(inputSamples), packedScratch_.data(),
+            static_cast<size_t>(outputCapacity));
+        if (packed.consumedInputFrames != static_cast<size_t>(inputSamples) ||
+            packed.status == NativeDsdPackStatus::OutputFull ||
+            packed.status == NativeDsdPackStatus::InvalidChannelCount ||
+            packed.status == NativeDsdPackStatus::InvalidWordBytes ||
+            packed.status == NativeDsdPackStatus::InvalidArgument ||
+            packed.status == NativeDsdPackStatus::SizeOverflow) {
+            lastError_ = "the native DSD formatter could not preserve a complete device word";
+            return LazerAudioErrorDecode;
+        }
+        return deliverSamples(packedScratch_.data(),
+            static_cast<int32_t>(packed.producedOutputFrames), consumer);
+    }
+
     const int32_t conversionFrameBytes = target_.conversionFrameBytes();
     const int64_t capacity = std::max<int64_t>(
         std::max<int64_t>(swr_get_out_samples(resampler_.get(), frame->nb_samples) + 256,
@@ -1481,6 +1555,7 @@ void AudioSource::close() {
     seekOutputTargetMillis_ = -1;
     seekOutputFramesToDrop_ = -1;
     dopPacker_.reset();
+    nativeDsdPacker_.reset();
     producedFrames_.store(0, std::memory_order_release);
     endOfStream_.store(false, std::memory_order_release);
 }

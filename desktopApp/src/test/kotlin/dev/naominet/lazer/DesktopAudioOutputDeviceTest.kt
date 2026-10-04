@@ -100,6 +100,14 @@ class DesktopAudioOutputDeviceTest {
     }
 
     @Test
+    fun `Native DSD is exposed only by the Linux ALSA backend`() {
+        assertTrue(supportsDesktopNativeDsdOutput("Linux"))
+        assertFalse(supportsDesktopNativeDsdOutput("Windows 11"))
+        assertFalse(supportsDesktopNativeDsdOutput("Mac OS X"))
+        assertFalse(supportsDesktopNativeDsdOutput("FreeBSD"))
+    }
+
+    @Test
     fun `native output device info matches the append-only C ABI`() {
         val info = LazerAudioOutputDeviceInfo()
 

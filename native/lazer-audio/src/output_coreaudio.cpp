@@ -433,6 +433,10 @@ int32_t CoreAudioOutput::open(const AudioOutputRequest &request,
     close();
     error.clear();
 
+    if (request.requireNativeDsd || request.desired.nativeDsd) {
+        error = "CoreAudio Native DSD is not implemented; use DoP or convert DSD to PCM";
+        return LazerAudioErrorUnsupported;
+    }
     if (request.requireDoP && !validCoreAudioDoPRequest(request, source, error)) {
         return LazerAudioErrorUnsupported;
     }

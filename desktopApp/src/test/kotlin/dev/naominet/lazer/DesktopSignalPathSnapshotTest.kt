@@ -29,14 +29,18 @@ class DesktopSignalPathSnapshotTest {
     fun `stream info jna layout preserves append-only fields with current abi`() {
         val info = LazerAudioStreamInfo()
 
-        assertEquals(21, LAZER_AUDIO_ABI_VERSION)
+        assertEquals(22, LAZER_AUDIO_ABI_VERSION)
         assertEquals(6, LAZER_AUDIO_EVENT_TRACK_CHANGED)
         assertEquals(-2, LAZER_AUDIO_READER_IO_ERROR)
         assertEquals(0, LAZER_AUDIO_DSD_OUTPUT_CONVERT_TO_PCM)
         assertEquals(1, LAZER_AUDIO_DSD_OUTPUT_REQUIRE_DOP)
+        assertEquals(2, LAZER_AUDIO_DSD_OUTPUT_REQUIRE_NATIVE)
         assertEquals(0, LAZER_AUDIO_OUTPUT_FORMAT_PCM)
         assertEquals(1, LAZER_AUDIO_OUTPUT_FORMAT_DOP)
+        assertEquals(2, LAZER_AUDIO_OUTPUT_FORMAT_NATIVE_DSD)
         assertEquals(7, LAZER_AUDIO_FORMAT_SELECTION_DOP_CARRIER)
+        assertEquals(8, LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U8)
+        assertEquals(12, LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U32_BE)
         assertEquals(
             listOf(
                 "codec", "sourceSampleRate", "sourceChannels", "sourceBitsPerSample", "sourceBitrateKbps",
@@ -133,6 +137,11 @@ class DesktopSignalPathSnapshotTest {
             outputTelemetryValid = 1
             bitPerfectActive = 1
         }.toOutputTelemetrySnapshot())
+        assertNull(LazerAudioStreamInfo().apply {
+            outputFormatInitialized = 1
+            outputTelemetryValid = 1
+            outputFormatKind = LAZER_AUDIO_OUTPUT_FORMAT_NATIVE_DSD
+        }.toOutputTelemetrySnapshot())
     }
 
     @Test
@@ -150,6 +159,11 @@ class DesktopSignalPathSnapshotTest {
             LAZER_AUDIO_FORMAT_SELECTION_EXCLUSIVE_COMMON_RATE_FALLBACK to
                 OutputFormatSelection.ExclusiveCommonRateFallback,
             LAZER_AUDIO_FORMAT_SELECTION_DOP_CARRIER to OutputFormatSelection.DoPCarrier,
+            LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U8 to OutputFormatSelection.NativeDsdU8,
+            LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U16_LE to OutputFormatSelection.NativeDsdU16Le,
+            LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U16_BE to OutputFormatSelection.NativeDsdU16Be,
+            LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U32_LE to OutputFormatSelection.NativeDsdU32Le,
+            LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U32_BE to OutputFormatSelection.NativeDsdU32Be,
             99 to OutputFormatSelection.Unknown,
         )
 
@@ -278,6 +292,46 @@ class DesktopSignalPathSnapshotTest {
         assertEquals(AudioBackend.Alsa, pcmSnapshot.negotiation.backend)
         assert(pcmSnapshot.negotiation.detail.orEmpty().contains("ALSA configured"))
         assertFalse(pcmSnapshot.negotiation.detail.orEmpty().contains("WASAPI"))
+    }
+
+    @Test
+    fun `Linux Native DSD diagnostics report exact ALSA format without claiming DAC recognition`() {
+        val info = streamInfo(
+            sourceRate = 0,
+            sourceBits = 0,
+            sourceFormatKind = LAZER_AUDIO_SOURCE_FORMAT_DSD,
+            sourceDsdRateMultiplier = 64,
+            rate = 88_200,
+            validBits = 32,
+            containerBits = 32,
+            exclusive = true,
+            initialized = true,
+            nativeFormatSelection = LAZER_AUDIO_FORMAT_SELECTION_NATIVE_DSD_U32_BE,
+        ).copy(
+            outputFormatKind = LAZER_AUDIO_OUTPUT_FORMAT_NATIVE_DSD,
+            outputDsdRateMultiplier = 64,
+        )
+
+        val snapshot = info.toSignalPathSnapshot(osName = "Linux")
+
+        assertEquals(true, info.isNativeDsdOutput)
+        assertEquals("DSD_U32_BE", info.nativeDsdAlsaFormat)
+        assertEquals(AudioBackend.Alsa, snapshot.negotiation.backend)
+        assertEquals(OutputNegotiationStatus.Accepted, snapshot.negotiation.status)
+        assertEquals(OutputFormatSelection.NativeDsdU32Be, snapshot.negotiation.formatSelection)
+        assertEquals(AudioFormat.Dsd(DsdRate.Dsd64, AudioChannelLayout.Stereo), snapshot.negotiation.negotiatedFormat)
+        assertEquals(
+            "Native DSD · 88200 Hz · 2 ch · DSD_U32_BE · ALSA direct hardware PCM",
+            snapshot.stages.single { it.stage == SignalPathStage.OutputBackend }.detail,
+        )
+        assertEquals(SignalPathStageStatus.Bypassed, snapshot.stages.single { it.stage == SignalPathStage.Dsp }.status)
+        assertEquals(SignalPathStageStatus.Converted,
+            snapshot.stages.single { it.stage == SignalPathStage.FormatConversion }.status)
+        assertEquals(DirectPathStatus.Negotiated, snapshot.directPath.status)
+        assert(snapshot.negotiation.detail.orEmpty().contains("ALSA configured the exact Native DSD format"))
+        assert(snapshot.negotiation.detail.orEmpty().contains("not read back"))
+        assert(snapshot.directPath.detail.orEmpty().contains("not been verified"))
+        assertEquals(null, snapshot.outputTelemetry)
     }
 
     @Test

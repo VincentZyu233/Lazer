@@ -29,6 +29,10 @@ bool doPOutputApplies(int32_t dsdOutputMode, const StreamDescription &source) no
         (source.channels == 1 || source.channels == 2);
 }
 
+bool nativeDsdOutputApplies(int32_t dsdOutputMode, const StreamDescription &source) noexcept {
+    return dsdOutputMode == LazerAudioDsdOutputRequireNative && source.dsd;
+}
+
 double replayGainLinear(double gainDb) noexcept {
     return std::pow(10.0, gainDb / 20.0);
 }
@@ -203,7 +207,8 @@ Engine *Engine::create(
     if (config.abi_version != LAZER_AUDIO_ABI_VERSION) return nullptr;
     if (config.struct_size < sizeof(LazerAudioEngineConfig)) return nullptr;
     if (config.device.dsd_output_mode != LazerAudioDsdOutputConvertToPcm &&
-        config.device.dsd_output_mode != LazerAudioDsdOutputRequireDoP) return nullptr;
+        config.device.dsd_output_mode != LazerAudioDsdOutputRequireDoP &&
+        config.device.dsd_output_mode != LazerAudioDsdOutputRequireNative) return nullptr;
     auto *engine = new (std::nothrow) Engine(config, std::move(output));
     return engine;
 }
@@ -273,6 +278,7 @@ void Engine::teardown() {
     cancelled_.store(true, std::memory_order_release);
     paused_.store(true, std::memory_order_release);
     dopActive_.store(false, std::memory_order_release);
+    nativeDsdActive_.store(false, std::memory_order_release);
     cancelCurrentSources();
     joinThreads();
     if (output_ != nullptr) output_->close();
@@ -328,6 +334,7 @@ int32_t Engine::open(
     lastErrorCode_.store(LazerAudioOk, std::memory_order_release);
     bitPerfectActive_ = false;
     dopActive_.store(false, std::memory_order_release);
+    nativeDsdActive_.store(false, std::memory_order_release);
     resetDopMarker();
     const LazerAudioOpenParams safeParams = params;
     if (!std::isfinite(safeParams.replay_gain_db) || safeParams.replay_gain_db < -60.0 ||
@@ -396,23 +403,26 @@ int32_t Engine::open(
 
     const bool requireDoP = doPOutputApplies(
         device_.dsd_output_mode, currentSource().description());
+    const bool requireNativeDsd = nativeDsdOutputApplies(
+        device_.dsd_output_mode, currentSource().description());
     if (safeParams.replay_gain_db != 0.0 &&
-        (device_.bit_perfect != 0 || requireDoP)) {
-        setErrorLocked("ReplayGain changes samples and is unavailable in bit-perfect or DoP mode",
+        (device_.bit_perfect != 0 || requireDoP || requireNativeDsd)) {
+        setErrorLocked("ReplayGain changes samples and is unavailable in bit-perfect or direct DSD mode",
             LazerAudioErrorUnsupported);
         currentSource().close();
         publishTerminal(LazerAudioEventFailed, LazerAudioErrorUnsupported, 0);
         return LazerAudioErrorUnsupported;
     }
-    if (requireDoP && device_.bit_perfect != 0) {
-        setErrorLocked("DoP output and bit-perfect PCM output are separate modes", LazerAudioErrorInvalidArgument);
+    if ((requireDoP || requireNativeDsd) && device_.bit_perfect != 0) {
+        setErrorLocked("direct DSD output and bit-perfect PCM output are separate modes",
+            LazerAudioErrorInvalidArgument);
         currentSource().close();
         publishTerminal(LazerAudioEventFailed, LazerAudioErrorInvalidArgument, 0);
         return LazerAudioErrorInvalidArgument;
     }
-    if ((device_.bit_perfect != 0 || requireDoP) &&
+    if ((device_.bit_perfect != 0 || requireDoP || requireNativeDsd) &&
         volume_.load(std::memory_order_acquire) < 0.999999) {
-        setErrorLocked("set software volume to 100% and use the DAC volume for bit-perfect output",
+        setErrorLocked("set software volume to 100% and use the DAC volume for direct output",
             LazerAudioErrorUnsupported);
         currentSource().close();
         publishTerminal(LazerAudioEventFailed, LazerAudioErrorUnsupported, 0);
@@ -433,10 +443,11 @@ int32_t Engine::open(
         publishTerminal(LazerAudioEventFailed, LazerAudioErrorInvalidArgument, 0);
         return LazerAudioErrorInvalidArgument;
     }
-    request.exclusive = device_.exclusive != 0 || requireDoP;
+    request.exclusive = device_.exclusive != 0 || requireDoP || requireNativeDsd;
     request.bufferMillis = device_.buffer_millis > 0 ? device_.buffer_millis : 120;
     request.bitPerfect = device_.bit_perfect != 0;
     request.requireDoP = requireDoP;
+    request.requireNativeDsd = requireNativeDsd;
     request.desired.sampleRate = currentSource().description().sampleRate;
     request.desired.channels = currentSource().description().channels;
     if (requireDoP) {
@@ -444,6 +455,8 @@ int32_t Engine::open(
         request.desired.bitsPerSample = 24;
         request.desired.containerBitsPerSample = 24;
         request.desired.doP = true;
+    } else if (requireNativeDsd) {
+        request.desired.nativeDsd = true;
     }
 
     std::string deviceError;
@@ -478,12 +491,16 @@ int32_t Engine::configurePipeline() {
     const StreamDescription &description = currentSource().description();
     const TargetFormat &target = outputSession_.target;
     const bool requireDoP = doPOutputApplies(device_.dsd_output_mode, description);
-    if (requireDoP != outputSession_.doP) {
+    const bool requireNativeDsd = nativeDsdOutputApplies(device_.dsd_output_mode, description);
+    if (requireDoP != outputSession_.doP || requireNativeDsd != outputSession_.nativeDsd) {
         lastError_ = requireDoP
             ? "the selected output did not initialize the required DoP carrier format"
-            : "the output initialized DoP even though PCM output was requested";
+            : requireNativeDsd
+                ? "the selected output did not initialize the required Native DSD format"
+                : "the output initialized a DSD mode even though PCM output was requested";
         return LazerAudioErrorUnsupported;
     }
+    nativeDsdActive_.store(false, std::memory_order_release);
     if (outputSession_.doP) {
         if (!description.dsd || !description.rawDsd || !outputSession_.exclusive ||
             target.sampleRate <= 0 || target.sampleRate * 2 != description.sampleRate ||
@@ -504,6 +521,27 @@ int32_t Engine::configurePipeline() {
     } else {
         dopActive_.store(false, std::memory_order_release);
     }
+    if (outputSession_.nativeDsd) {
+        const int32_t wordBytes = target.containerBitsPerSample / 8;
+        if (!description.dsd || !description.rawDsd || !outputSession_.exclusive ||
+            !target.nativeDsd || target.sampleRate <= 0 ||
+            (target.containerBitsPerSample != 8 && target.containerBitsPerSample != 16 &&
+                target.containerBitsPerSample != 32) ||
+            target.bitsPerSample != target.containerBitsPerSample ||
+            static_cast<int64_t>(target.sampleRate) * wordBytes != description.sampleRate ||
+            target.channels != description.channels ||
+            (target.channels != 1 && target.channels != 2)) {
+            lastError_ = "the initialized output does not match the raw Native DSD format contract";
+            return LazerAudioErrorUnsupported;
+        }
+        const int32_t result = currentSource().setTargetFormat(target);
+        if (result != LazerAudioOk) {
+            lastError_ = currentSource().lastError();
+            return result;
+        }
+        dspBypassed_ = false;
+        nativeDsdActive_.store(true, std::memory_order_release);
+    }
     const bool exactContainer = target.containerBitsPerSample == target.bitsPerSample ||
         (target.bitsPerSample == 24 && target.containerBitsPerSample == 32);
     const bool exactPcmFormat = description.lossless && description.integerPcm &&
@@ -513,16 +551,19 @@ int32_t Engine::configurePipeline() {
         description.channels == target.channels && description.bitsPerSample == target.bitsPerSample &&
         exactContainer &&
         (target.bitsPerSample == 16 || target.bitsPerSample == 24 || target.bitsPerSample == 32);
-    if (!outputSession_.doP && device_.bit_perfect != 0 && !exactPcmFormat) {
+    if (!outputSession_.doP && !outputSession_.nativeDsd &&
+        device_.bit_perfect != 0 && !exactPcmFormat) {
         lastError_ = "bit-perfect output requires exact mono or stereo lossless integer PCM format";
         return LazerAudioErrorUnsupported;
     }
-    if (!outputSession_.doP) {
+    if (!outputSession_.doP && !outputSession_.nativeDsd) {
         dspBypassed_ = device_.bit_perfect != 0 && outputSession_.exclusive && exactPcmFormat;
     }
     if (outputSession_.doP) {
         /* DoP words are an encoded DSD bitstream. They must reach the carrier untouched, with
          * software processing and quantization completely out of the chain. */
+    } else if (outputSession_.nativeDsd) {
+        /* Native DSD is a raw bitstream, so keep it out of the PCM DSP and float conversion path. */
     } else if (dspBypassed_) {
         /* Bit-perfect stream out: the decoded integer samples go straight to the device, which is why
          * the volume control must then belong to the amplifier or the DAC. */
@@ -591,6 +632,11 @@ int32_t Engine::queueReader(
         if (queueGeneration <= currentQueueGeneration) return LazerAudioErrorState;
         generation = sessionGeneration_.load(std::memory_order_acquire);
         requireDoP = dopActive_.load(std::memory_order_acquire);
+        /* Native DSD word packing can carry partial words at track EOF. Until queued transitions
+         * can transfer that packer state, the desktop controller must stop/open at each boundary. */
+        if (nativeDsdActive_.load(std::memory_order_acquire)) {
+            return LazerAudioErrorUnsupported;
+        }
         target = requireDoP || dspBypassed_ ? outputSession_.target : floatTarget_;
         if (requireDoP) target.doP = true;
         requireBitPerfect = !requireDoP && dspBypassed_;
@@ -860,7 +906,8 @@ int32_t Engine::play() {
                 return LazerAudioErrorDevice;
             }
         } else if (audioFrames < bufferFrames) {
-            std::memset(firstBuffer.data() + static_cast<size_t>(audioFrames) * frameBytes, 0,
+            std::memset(firstBuffer.data() + static_cast<size_t>(audioFrames) * frameBytes,
+                outputSession_.nativeDsd ? 0x69 : 0,
                 static_cast<size_t>(bufferFrames - audioFrames) * frameBytes);
         }
         std::string primeError;
@@ -920,6 +967,7 @@ int32_t Engine::stop() {
     }
     bitPerfectActive_.store(false, std::memory_order_release);
     dopActive_.store(false, std::memory_order_release);
+    nativeDsdActive_.store(false, std::memory_order_release);
     state_.store(LazerAudioStateStopped, std::memory_order_release);
     return LazerAudioOk;
 }
@@ -950,8 +998,9 @@ int32_t Engine::seek(int64_t positionMillis) {
 int32_t Engine::setVolume(double volume) {
     const double clamped = std::clamp(volume, 0.0, 1.0);
     if ((bitPerfectActive_.load(std::memory_order_acquire) ||
-        dopActive_.load(std::memory_order_acquire)) && clamped < 0.999999) {
-        setError("software volume is unavailable while bit-perfect output is active; use the DAC volume",
+        dopActive_.load(std::memory_order_acquire) ||
+        nativeDsdActive_.load(std::memory_order_acquire)) && clamped < 0.999999) {
+        setError("software volume is unavailable while direct output is active; use the DAC volume",
             LazerAudioErrorUnsupported);
         return LazerAudioErrorUnsupported;
     }
@@ -962,9 +1011,10 @@ int32_t Engine::setVolume(double volume) {
 
 int32_t Engine::setDsp(const LazerAudioDspConfig &dsp) {
     if (dsp.band_count > LAZER_AUDIO_MAX_EQ_BANDS) return LazerAudioErrorInvalidArgument;
-    if (dopActive_.load(std::memory_order_acquire) &&
+    if ((dopActive_.load(std::memory_order_acquire) ||
+        nativeDsdActive_.load(std::memory_order_acquire)) &&
         (dsp.preamp_db != 0.0 || dsp.band_count > 0 || dsp.limiter_enabled != 0)) {
-        setError("EQ and limiter are unavailable while DoP output is active",
+        setError("EQ and limiter are unavailable while direct DSD output is active",
             LazerAudioErrorUnsupported);
         return LazerAudioErrorUnsupported;
     }
@@ -975,7 +1025,8 @@ int32_t Engine::setDsp(const LazerAudioDspConfig &dsp) {
 int32_t Engine::setDevice(const LazerAudioDeviceConfig &device) {
     std::lock_guard guard(apiMutex_);
     if (device.dsd_output_mode != LazerAudioDsdOutputConvertToPcm &&
-        device.dsd_output_mode != LazerAudioDsdOutputRequireDoP) {
+        device.dsd_output_mode != LazerAudioDsdOutputRequireDoP &&
+        device.dsd_output_mode != LazerAudioDsdOutputRequireNative) {
         return LazerAudioErrorInvalidArgument;
     }
     const int32_t currentState = state_.load(std::memory_order_acquire);
@@ -991,6 +1042,7 @@ int32_t Engine::setDevice(const LazerAudioDeviceConfig &device) {
     }
     bitPerfectActive_.store(false, std::memory_order_release);
     dopActive_.store(false, std::memory_order_release);
+    nativeDsdActive_.store(false, std::memory_order_release);
     if (device_.buffer_millis <= 0) device_.buffer_millis = 120;
     return LazerAudioOk;
 }
@@ -1065,10 +1117,12 @@ void Engine::streamInfo(LazerAudioStreamInfo &out) {
         out.output_format_selection = outputSession_.formatSelection;
         out.output_telemetry_valid = outputTelemetryValid_.load(std::memory_order_acquire) &&
             !bitPerfectActive_.load(std::memory_order_acquire) &&
-            !dopActive_.load(std::memory_order_acquire) ? 1 : 0;
-        out.output_format_kind = outputSession_.doP
-            ? LazerAudioOutputFormatDoP : LazerAudioOutputFormatPcm;
-        out.output_dsd_rate_multiplier = outputSession_.doP
+            !dopActive_.load(std::memory_order_acquire) &&
+            !nativeDsdActive_.load(std::memory_order_acquire) ? 1 : 0;
+        out.output_format_kind = outputSession_.nativeDsd
+            ? LazerAudioOutputFormatNativeDsd
+            : outputSession_.doP ? LazerAudioOutputFormatDoP : LazerAudioOutputFormatPcm;
+        out.output_dsd_rate_multiplier = (outputSession_.doP || outputSession_.nativeDsd)
             ? description.dsdRateMultiplier : 0;
     }
     out.bit_perfect_active = bitPerfectActive_.load(std::memory_order_acquire) ? 1 : 0;
@@ -1166,7 +1220,8 @@ int32_t Engine::accept(const uint8_t *bytes, int32_t frameCount) {
     }
     int32_t frames = std::min(frameCount, ring_.writableFrames());
     if (frames <= 0) return 0;
-    if (dspBypassed_ || dopActive_.load(std::memory_order_acquire)) {
+    if (dspBypassed_ || dopActive_.load(std::memory_order_acquire) ||
+        nativeDsdActive_.load(std::memory_order_acquire)) {
         const int32_t written = ring_.write(bytes, frames);
         if (written > 0) acceptedFrames_.fetch_add(written, std::memory_order_release);
         return written;
@@ -1589,7 +1644,8 @@ void Engine::renderLoop() {
                 break;
             }
         } else if (fixedPeriod && frames < room) {
-            std::memset(block.data() + static_cast<size_t>(frames) * frameBytes, 0,
+            std::memset(block.data() + static_cast<size_t>(frames) * frameBytes,
+                outputSession_.nativeDsd ? 0x69 : 0,
                 static_cast<size_t>(room - frames) * frameBytes);
         }
 
@@ -1614,7 +1670,8 @@ void Engine::renderLoop() {
                 continue;
             }
             if (!outputSession_.doP) {
-                std::memset(block.data(), 0, static_cast<size_t>(room) * frameBytes);
+                std::memset(block.data(), outputSession_.nativeDsd ? 0x69 : 0,
+                    static_cast<size_t>(room) * frameBytes);
             }
         }
 
@@ -1624,7 +1681,7 @@ void Engine::renderLoop() {
         error.clear();
         const int32_t written = output_->write(block.data(), framesToWrite, error);
         if (written < 0 || (fixedPeriod && written != room) ||
-            (outputSession_.doP && written != framesToWrite)) {
+            ((outputSession_.doP || outputSession_.nativeDsd) && written != framesToWrite)) {
             setError(error.empty() ? "the output backend rejected the submitted PCM frames" : error,
                 written < 0 ? written : LazerAudioErrorDevice);
             publishTerminal(LazerAudioEventDeviceLost, 0, currentPositionMillis());

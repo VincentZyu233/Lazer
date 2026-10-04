@@ -447,6 +447,7 @@ class DesktopPlayerController(
         private set
     private var hifiBitPerfectOpening by mutableStateOf(false)
     private var hifiDoPOpening by mutableStateOf(false)
+    private var hifiNativeDsdOpening by mutableStateOf(false)
     val hifiDigitalVolumeBypassed: Boolean
         get() = shouldBypassDesktopDigitalVolume(
             nativePlayback = usesNativeAudioFor(nowPlaying),
@@ -454,15 +455,23 @@ class DesktopPlayerController(
             doPActive = hifiStreamInfo?.isDoPOutput == true,
             bitPerfectOpening = hifiBitPerfectOpening,
             doPOpening = hifiDoPOpening,
+            nativeDsdActive = hifiStreamInfo?.isNativeDsdOutput == true,
+            nativeDsdOpening = hifiNativeDsdOpening,
         )
     var hifiBufferMillis by mutableIntStateOf(DesktopSettings.hifiBufferMillis)
         private set
     var hifiBitPerfect by mutableStateOf(
         DesktopSettings.hifiBitPerfect && !DesktopSettings.hifiDoPOutput &&
+            !(DesktopSettings.hifiNativeDsdOutput && supportsDesktopNativeDsdOutput()) &&
             supportsDesktopBitPerfectOutput(),
     )
         private set
     var hifiDoPOutput by mutableStateOf(DesktopSettings.hifiDoPOutput)
+        private set
+    var hifiNativeDsdOutput by mutableStateOf(
+        DesktopSettings.hifiNativeDsdOutput && !DesktopSettings.hifiDoPOutput &&
+            supportsDesktopNativeDsdOutput(),
+    )
         private set
     internal var hifiOutputDevices by mutableStateOf<List<DesktopAudioOutputDevice>>(emptyList())
         private set
@@ -638,12 +647,14 @@ class DesktopPlayerController(
                 hifiStreamInfo = info
                 hifiBitPerfectOpening = false
                 hifiDoPOpening = false
+                hifiNativeDsdOpening = false
             },
             initialExclusiveAudio = shouldRequestDesktopExclusiveOutput(DesktopSettings.exclusiveAudio),
             initialEqualizer = DesktopSettings.equalizer,
             initialBufferMillis = DesktopSettings.hifiBufferMillis,
             initialBitPerfect = hifiBitPerfect,
             initialDoPOutput = DesktopSettings.hifiDoPOutput,
+            initialNativeDsdOutput = hifiNativeDsdOutput,
         )
     } else {
         null
@@ -692,6 +703,7 @@ class DesktopPlayerController(
             hifiStreamInfo = null
             hifiBitPerfectOpening = false
             hifiDoPOpening = false
+            hifiNativeDsdOpening = false
             progress = 1f
             when {
                 playModeState == DesktopPlayMode.SingleLoop -> {
@@ -761,6 +773,12 @@ class DesktopPlayerController(
         val requestGeneration = gaplessRequestGeneration.incrementAndGet()
         player?.clearQueuedNext()
         if (player == null || token == 0L || currentTrack == null) return
+        val nativeDsdSessionExpected = hifiStreamInfo?.isNativeDsdOutput == true ||
+            (hifiNativeDsdOutput && currentTrack.isLocalFile &&
+                (currentTrack.playbackSource as? DesktopTrackSource.LocalFile)?.let { source ->
+                    isDsdLocalAudioFile(File(source.absolutePath))
+                } == true)
+        if (nativeDsdSessionExpected) return
         val successor = nextTrackForGapless(currentTrack) ?: return
         if (currentTrack.isLocalFile || successor.isLocalFile) {
             val nextGain = resolveDesktopReplayGain(successor.replayGain, replayGainMode).appliedGainDb
@@ -894,6 +912,7 @@ class DesktopPlayerController(
             hifiStreamInfo = null
             hifiBitPerfectOpening = false
             hifiDoPOpening = false
+            hifiNativeDsdOpening = false
             isPlaying = false
             isSeeking = false
             streamUrl = null
@@ -1644,6 +1663,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         stopAudioEngineForRequest(stopRequest)
         isPlaying = false
         isSeeking = false
@@ -1911,6 +1931,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         hifiEngineEnabled = target
         DesktopSettings.hifiEngine = target
         standardPlayer.setVolume(volume)
@@ -5294,6 +5315,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         clearHifiOutputRecoveryIntent()
         progress = 0f
         bufferedProgress = 0f
@@ -5680,6 +5702,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         hifiPcmTestToneResume = resume
         val generation = ++hifiPcmTestToneGeneration
         hifiPcmTestToneStatus = DesktopHiFiTestToneStatus.Preparing
@@ -5747,6 +5770,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         hifiPcmTestToneStatus = DesktopHiFiTestToneStatus.Idle
         val resume = hifiPcmTestToneResume
         hifiPcmTestToneResume = null
@@ -5772,6 +5796,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         hifiPcmTestToneStatus = if (error == null) {
             DesktopHiFiTestToneStatus.Completed
         } else {
@@ -5833,9 +5858,15 @@ class DesktopPlayerController(
             DesktopSettings.hifiDoPOutput = false
             player.setDoPOutput(false)
         }
+        if (enabled && hifiNativeDsdOutput) {
+            hifiNativeDsdOutput = false
+            DesktopSettings.hifiNativeDsdOutput = false
+            player.setNativeDsdOutput(false)
+        }
         hifiBitPerfect = enabled
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         DesktopSettings.hifiBitPerfect = enabled
         val track = nowPlaying
         val shouldRebuildPlayback = usesNativeAudioFor(track) && track != null &&
@@ -5870,6 +5901,11 @@ class DesktopPlayerController(
             hifiBitPerfect = false
             DesktopSettings.hifiBitPerfect = false
         }
+        if (enabled && hifiNativeDsdOutput) {
+            hifiNativeDsdOutput = false
+            DesktopSettings.hifiNativeDsdOutput = false
+            player.setNativeDsdOutput(false)
+        }
         hifiDoPOutput = enabled
         DesktopSettings.hifiDoPOutput = enabled
         player.clearQueuedNext()
@@ -5890,8 +5926,76 @@ class DesktopPlayerController(
         }
     }
 
+    fun updateHifiNativeDsdOutput(enabled: Boolean) {
+        val player = nativePlayer ?: return
+        if (enabled && !supportsDesktopNativeDsdOutput()) return
+        if (hifiNativeDsdOutput == enabled) return
+        val currentTrack = nowPlaying
+        val currentSourceIsDsd = hifiStreamInfo?.hasDsdSource == true ||
+            (currentTrack?.playbackSource as? DesktopTrackSource.LocalFile)?.let { source ->
+                isDsdLocalAudioFile(File(source.absolutePath))
+            } == true
+        val currentDsdPlaybackWillReopen = currentSourceIsDsd && currentTrack != null &&
+            (isPlaying || streamUrl != null || hifiStreamInfo != null)
+        if (enabled && currentDsdPlaybackWillReopen && volume < 0.999999f) {
+            statusMessage = tr("status.hifi.native_dsd_volume")
+            return
+        }
+        if (enabled && currentDsdPlaybackWillReopen) {
+            val currentGain = currentTrack?.let {
+                resolveDesktopReplayGain(it.replayGain, replayGainMode).appliedGainDb
+            } ?: 0.0
+            if (equalizer.enabled || currentGain != 0.0) {
+                statusMessage = tr("status.hifi.native_dsd_dsp")
+                return
+            }
+        }
+        if (statusMessage == tr("status.hifi.native_dsd_volume") ||
+            statusMessage == tr("status.hifi.native_dsd_dsp")
+        ) statusMessage = null
+        clearHifiOutputRecoveryIntent()
+        stopHiFiPcmTestTone(restorePlayback = false)
+        if (enabled) {
+            exclusiveAudio = true
+            DesktopSettings.exclusiveAudio = true
+        }
+        val bitPerfectPreferenceWasActive = hifiBitPerfect
+        if (enabled && hifiBitPerfect) {
+            hifiBitPerfect = false
+            DesktopSettings.hifiBitPerfect = false
+        }
+        if (enabled && hifiDoPOutput) {
+            hifiDoPOutput = false
+            DesktopSettings.hifiDoPOutput = false
+            player.setDoPOutput(false)
+        }
+        hifiNativeDsdOutput = enabled
+        DesktopSettings.hifiNativeDsdOutput = enabled
+        hifiNativeDsdOpening = false
+        player.clearQueuedNext()
+        val track = currentTrack
+        val modeRequiresRebuild = currentSourceIsDsd || (enabled && bitPerfectPreferenceWasActive)
+        val shouldRebuildPlayback = usesNativeAudioFor(track) && modeRequiresRebuild && track != null &&
+            (isPlaying || streamUrl != null || hifiStreamInfo != null)
+        val resumeProgress = progress
+        val playWhenReady = isPlaying
+        scope.launch {
+            player.setExclusiveAudio(exclusiveAudio)
+            player.setBitPerfect(hifiBitPerfect)
+            player.setNativeDsdOutput(enabled)
+            if (shouldRebuildPlayback) {
+                bufferedProgress = 0f
+                resolveAndPlay(track, resumeProgress = resumeProgress, playWhenReady = playWhenReady)
+            }
+        }
+    }
+
     /** Persists the listener's equalizer and hands it to the audio engine immediately. */
     fun updateEqualizer(state: LazerEqualizerState) {
+        if (hifiStreamInfo?.isNativeDsdOutput == true && state.enabled) {
+            statusMessage = tr("status.hifi.native_dsd_dsp")
+            return
+        }
         equalizer = state
         DesktopSettings.equalizer = state
         standardPlayer.setEqualizer(state)
@@ -5900,6 +6004,13 @@ class DesktopPlayerController(
 
     fun updateReplayGainMode(mode: DesktopReplayGainMode) {
         if (replayGainMode == mode) return
+        if (hifiStreamInfo?.isNativeDsdOutput == true && mode != DesktopReplayGainMode.Off) {
+            val gain = nowPlaying?.let { resolveDesktopReplayGain(it.replayGain, mode).appliedGainDb } ?: 0.0
+            if (gain != 0.0) {
+                statusMessage = tr("status.hifi.native_dsd_dsp")
+                return
+            }
+        }
         replayGainMode = mode
         DesktopSettings.replayGainMode = mode
         val track = nowPlaying?.takeIf(TrackItem::isLocalFile) ?: return
@@ -7047,6 +7158,13 @@ class DesktopPlayerController(
                         throw IOException(tr("status.local_audio.file_unavailable"))
                     }
                     val player = nativePlayer ?: throw IOException(tr("status.local_audio.native_required"))
+                    val nativeDsdTrack = hifiNativeDsdOutput && isDsdLocalAudioFile(file)
+                    if (nativeDsdTrack && volume < 0.999999f) {
+                        throw IOException(tr("status.hifi.native_dsd_volume"))
+                    }
+                    if (nativeDsdTrack && equalizer.enabled) {
+                        throw IOException(tr("status.hifi.native_dsd_dsp"))
+                    }
                     if (hifiOutputDeviceUnavailable) {
                         throw IOException(tr("status.hifi.device_unavailable"))
                     }
@@ -7055,6 +7173,9 @@ class DesktopPlayerController(
                     val effectiveBitPerfect = hifiBitPerfect && replayGain.appliedGainDb == 0.0
                     if (effectiveBitPerfect && volume < 0.999999f) {
                         throw IOException(tr("status.hifi.bit_perfect_volume"))
+                    }
+                    if (nativeDsdTrack && replayGain.appliedGainDb != 0.0) {
+                        throw IOException(tr("status.hifi.native_dsd_dsp"))
                     }
                     val safeResumeProgress = playableSeekProgress(resumeProgress, track.durationMillis)
                     progress = safeResumeProgress
@@ -7065,6 +7186,7 @@ class DesktopPlayerController(
                     hifiStreamInfo = null
                     hifiBitPerfectOpening = effectiveBitPerfect
                     hifiDoPOpening = hifiDoPOutput && isDsdLocalAudioFile(file)
+                    hifiNativeDsdOpening = nativeDsdTrack
                     val token = withContext(Dispatchers.IO) {
                         player.playLocalFile(
                             file = file,
@@ -7096,6 +7218,7 @@ class DesktopPlayerController(
                     hifiStreamInfo = null
                     hifiBitPerfectOpening = false
                     hifiDoPOpening = false
+                    hifiNativeDsdOpening = false
                     statusMessage = error.toFriendlyMessage(tr("status.play_fail"))
                     publishSystemMedia(
                         statusOverride = SystemMediaPlaybackStatus.STOPPED,
@@ -7143,6 +7266,7 @@ class DesktopPlayerController(
                 hifiStreamInfo = null
                 hifiBitPerfectOpening = false
                 hifiDoPOpening = false
+                hifiNativeDsdOpening = false
                 statusMessage = error.toFriendlyMessage(tr("status.play_fail"))
                 publishSystemMedia(
                     statusOverride = SystemMediaPlaybackStatus.STOPPED,
@@ -7205,6 +7329,7 @@ class DesktopPlayerController(
         hifiStreamInfo = null
         hifiBitPerfectOpening = false
         hifiDoPOpening = false
+        hifiNativeDsdOpening = false
         if (hifiEngineEnabled && hifiOutputDeviceUnavailable) {
             isPlaying = false
             streamUrl = null

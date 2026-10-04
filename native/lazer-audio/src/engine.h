@@ -135,6 +135,7 @@ private:
     int64_t replayGainRampRemainingFrames_ = 0;
     std::atomic<bool> bitPerfectActive_{false};
     std::atomic<bool> dopActive_{false};
+    std::atomic<bool> nativeDsdActive_{false};
     std::atomic<int32_t> outputPeakMilliDbfs_{-120'000};
     std::atomic<int32_t> limiterGainReductionMilliDb_{0};
     std::atomic<uint64_t> outputClippedSampleCount_{0};

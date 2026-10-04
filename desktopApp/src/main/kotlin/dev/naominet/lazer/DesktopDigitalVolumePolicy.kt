@@ -7,5 +7,7 @@ internal fun shouldBypassDesktopDigitalVolume(
     doPActive: Boolean,
     bitPerfectOpening: Boolean,
     doPOpening: Boolean,
+    nativeDsdActive: Boolean = false,
+    nativeDsdOpening: Boolean = false,
 ): Boolean = nativePlayback &&
-    (bitPerfectActive || doPActive || bitPerfectOpening || doPOpening)
+    (bitPerfectActive || doPActive || bitPerfectOpening || doPOpening || nativeDsdActive || nativeDsdOpening)

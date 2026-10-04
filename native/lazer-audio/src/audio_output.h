@@ -24,6 +24,8 @@ struct AudioOutputRequest {
     bool bitPerfect = false;
     /* Require an exact 24-bit PCM carrier for a preformatted DoP payload; no format fallback. */
     bool requireDoP = false;
+    /* Require an exact ALSA Native DSD word format for raw DSD; no PCM/DoP fallback. */
+    bool requireNativeDsd = false;
 };
 
 /* FixedPeriod means each submission is exactly one negotiated period and readiness acknowledges
@@ -48,6 +50,8 @@ struct AudioOutputSession {
     bool queueDepthAvailable = true;
     /* True only when the backend initialized an exact DoP carrier PCM session. */
     bool doP = false;
+    /* True only when the backend initialized an exact Native DSD session. */
+    bool nativeDsd = false;
 };
 
 enum class OutputWaitResult : int32_t {
