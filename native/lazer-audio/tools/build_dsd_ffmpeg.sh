@@ -45,7 +45,6 @@ configure_args=(
     --disable-autodetect
     --disable-avdevice
     --disable-avfilter
-    --disable-postproc
     --disable-swscale
 )
 printf 'FFmpeg revision: %s\nConfigure options: %s\n' \
