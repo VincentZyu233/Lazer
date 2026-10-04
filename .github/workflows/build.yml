@@ -183,9 +183,7 @@ jobs:
           test ! -s "$fixture_dir/end-96k.raw"
           test ! -s "$fixture_dir/end-dop.raw"
       - name: Test desktop media integration and Linux ALSA ABI
-        env:
-          JAVA_TOOL_OPTIONS: -Dlazer.audio.library=${{ github.workspace }}/desktopApp/build/native/lazer-audio/linux-x64/liblazer-audio.so
-        run: ./gradlew :desktopApp:test -PlazerNativeAudio=false --stacktrace
+        run: ./gradlew :desktopApp:test -PlazerNativeAudio=false -PlazerAudioLibrary=${{ github.workspace }}/desktopApp/build/native/lazer-audio/linux-x64/liblazer-audio.so --stacktrace
       - name: Build deb and rpm packages
         run: |
           set -euo pipefail
@@ -319,9 +317,8 @@ jobs:
           for component in avformat avcodec avutil swresample; do
             grep -F "$native_dir/lib$component.so" "$RUNNER_TEMP/lazer-installed-native-deps.txt"
           done
-          JAVA_TOOL_OPTIONS="-Dlazer.audio.library=$installed_native" \
-            ./gradlew :desktopApp:test --tests 'dev.naominet.lazer.DesktopAudioOutputDeviceTest' \
-              -PlazerNativeAudio=false --no-daemon --rerun-tasks --stacktrace
+          ./gradlew :desktopApp:test --tests 'dev.naominet.lazer.DesktopAudioOutputDeviceTest' \
+            -PlazerNativeAudio=false "-PlazerAudioLibrary=$installed_native" --no-daemon --rerun-tasks --stacktrace
       - name: Assemble AppImage
         shell: bash
         run: |
@@ -479,9 +476,7 @@ jobs:
           mv "$FFMPEG_ROOT" "$relocated_sdk"
           test ! -e "$FFMPEG_ROOT"
       - name: Test desktop media integration and CoreAudio ABI
-        env:
-          JAVA_TOOL_OPTIONS: -Dlazer.audio.library=${{ github.workspace }}/build/native/lazer-audio/macos-arm64/liblazer-audio.dylib
-        run: ./gradlew :desktopApp:test -PlazerNativeAudio=false --stacktrace
+        run: ./gradlew :desktopApp:test -PlazerNativeAudio=false -PlazerAudioLibrary=${{ github.workspace }}/build/native/lazer-audio/macos-arm64/liblazer-audio.dylib --stacktrace
       - name: Print macOS desktop test failure details
         if: ${{ failure() }}
         run: |

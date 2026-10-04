@@ -3,6 +3,7 @@ import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Exec
 import org.gradle.api.file.RelativePath
 import org.gradle.language.jvm.tasks.ProcessResources
+import org.gradle.api.tasks.testing.Test
 import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
 
 val desktopOsName = System.getProperty("os.name").orEmpty().lowercase()
@@ -157,7 +158,7 @@ val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") 
         from(nativeAudioBuildDir) {
             include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
             if (!isWindowsHost) exclude(nativeAudioFile.get().asFile.name)
-            eachFile { relativePath = RelativePath(true, name) }
+            if (isWindowsHost) eachFile { relativePath = RelativePath(true, name) }
             into("native/$nativeAudioPlatformId")
         }
         if (!isWindowsHost) {
@@ -203,7 +204,6 @@ if (buildNativeAudio.get() && (isLinuxHost || isMacOSHost)) {
         from(nativeAudioBuildDir) {
             include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
             exclude(nativeAudioFile.get().asFile.name)
-            eachFile { relativePath = RelativePath(true, name) }
             into("native/$nativeAudioPlatformId")
         }
         from(ffmpegLicenseDir!!) {
@@ -211,6 +211,15 @@ if (buildNativeAudio.get() && (isLinuxHost || isMacOSHost)) {
             into("legal/ffmpeg")
         }
     }
+}
+
+// Gradle's test workers are separate JVMs. Forward the optional native library override
+// explicitly so smoke tests load the same library path as the Gradle invocation.
+val lazerAudioLibraryForTests = providers.gradleProperty("lazerAudioLibrary")
+tasks.withType<Test>().configureEach {
+    lazerAudioLibraryForTests.orNull
+        ?.takeIf { it.isNotBlank() }
+        ?.let { systemProperty("lazer.audio.library", it) }
 }
 
 compose.desktop {
