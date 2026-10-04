@@ -476,6 +476,7 @@ jobs:
             [lazer-rpm-x64]="Lazer-$version-linux-x64.rpm"
             [lazer-appimage-x64]="Lazer-$version-linux-x64.AppImage"
             [lazer-jar-linux-x64]="Lazer-$version-linux-x64.jar"
+            [lazer-ios-unsigned]="Lazer-$version-ios-unsigned.ipa"
           )
           mkdir -p release
           missing=()
@@ -501,6 +502,10 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::7}"
           echo "- Built from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA (\`$short_sha\`), the commit each package names on its About page." > release-note.md
+          if [ -f .github/release-template.md ]; then
+            echo "" >> release-note.md
+            cat .github/release-template.md >> release-note.md
+          fi
           cat release-note.md >> "$GITHUB_STEP_SUMMARY"
       # Release titles use "Release X.Y", dropping the leading "v" from the tag.
       - name: Resolve release title
@@ -524,3 +529,4 @@ jobs:
             release/Lazer-*.rpm
             release/Lazer-*.AppImage
             release/Lazer-*-portable.zip
+            release/Lazer-*.ipa
