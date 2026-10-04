@@ -397,6 +397,35 @@ jobs:
             echo "The CoreAudio engine must resolve bundled FFmpeg via @rpath, not its build SDK." >&2
             exit 1
           fi
+          for component in libavformat libavcodec libavutil libswresample; do
+            if ! grep -Fq "@rpath/$component." <<<"$dylib_dependencies"; then
+              echo "The CoreAudio engine must link $component through its bundled @rpath install name." >&2
+              exit 1
+            fi
+          done
+          engine_load_commands="$(otool -l "$build_dir/liblazer-audio.dylib")"
+          if ! grep -Fq 'path @loader_path' <<<"$engine_load_commands"; then
+            echo "The CoreAudio engine must search beside itself for bundled FFmpeg dylibs." >&2
+            exit 1
+          fi
+          shopt -s nullglob
+          ffmpeg_dylibs=("$build_dir"/libav*.dylib "$build_dir"/libswresample*.dylib)
+          if ((${#ffmpeg_dylibs[@]} == 0)); then
+            echo "The CoreAudio build must copy its FFmpeg dylibs beside the engine." >&2
+            exit 1
+          fi
+          for dylib in "${ffmpeg_dylibs[@]}"; do
+            dependencies="$(otool -L "$dylib")"
+            if grep -F "$FFMPEG_ROOT" <<<"$dependencies"; then
+              echo "Bundled FFmpeg dylib $dylib retains a dependency on the build SDK." >&2
+              exit 1
+            fi
+            install_id="$(otool -D "$dylib" | sed -n '2p')"
+            if [[ "$install_id" != @rpath/* ]]; then
+              echo "Bundled FFmpeg dylib $dylib has non-relocatable install ID: $install_id" >&2
+              exit 1
+            fi
+          done
           ctest --test-dir "$build_dir" -C Release --output-on-failure
           python3 native/lazer-audio/tools/generate_dsf_test_fixtures.py "$fixture_dir" \
             --duration-ms 4000 --rates 64

@@ -261,7 +261,8 @@ struct Capture {
 
 class VariableCaptureOutput final : public AudioOutput {
 public:
-    explicit VariableCaptureOutput(std::shared_ptr<Capture> capture) : capture_(std::move(capture)) {}
+    explicit VariableCaptureOutput(std::shared_ptr<Capture> capture, bool paceWrites = false)
+        : capture_(std::move(capture)), paceWrites_(paceWrites) {}
 
     int32_t open(const AudioOutputRequest &request, const StreamDescription &source,
         AudioOutputSession &session, std::string &, LogProxy *) override {
@@ -284,6 +285,7 @@ public:
         session.exclusive = true;
         session.queueDepthAvailable = true;
         session.doP = request.requireDoP;
+        sampleRate_ = session.target.sampleRate;
         capture_->session = session;
         capture_->opened = true;
         opened_ = true;
@@ -338,6 +340,18 @@ public:
                 bytes + static_cast<size_t>(frames) * static_cast<size_t>(frameBytes));
             capture_->changed.notify_all();
         }
+        if (paceWrites_ && sampleRate_ > 0) {
+            /* Variable frame grants must advance at the simulated carrier clock. An unpaced fake
+             * endpoint can spin faster than the producer and invent underrun idle frames. */
+            paceMicros_ += static_cast<int64_t>(frames) * 1'000'000 / sampleRate_;
+            if (paceMicros_ >= 1'000) {
+                const int64_t elapsedMicros = paceMicros_ / 1'000 * 1'000;
+                paceMicros_ -= elapsedMicros;
+                /* Batch sub-millisecond grants; Windows may round every individual sleep up to
+                 * a millisecond, which would make a per-write delay far slower than the carrier. */
+                std::this_thread::sleep_for(std::chrono::microseconds(elapsedMicros));
+            }
+        }
         return frames;
     }
 
@@ -348,6 +362,9 @@ private:
     size_t grantIndex_ = 0;
     bool initialGrantIssued_ = false;
     bool opened_ = false;
+    bool paceWrites_ = false;
+    int32_t sampleRate_ = 0;
+    int64_t paceMicros_ = 0;
 };
 
 bool waitForEnd(Events &events) {
@@ -536,10 +553,11 @@ bool dopPayloadMatchesInOrder(const std::vector<uint8_t> &captured,
 int runDoPGaplessCase() {
     /* Odd DSD-byte counts make each source's final carrier frame leave the next source starting at
      * the opposite marker phase. Different source patterns make a lost, duplicated or swapped
-     * payload at the boundary visible in the byte-for-byte capture. At 120 ms, make the active
-     * fixture just longer than the input ring: open() starts its decoder pump before queueReader()
-     * is called, and a shorter fixture can race to EOF and make queueing legitimately unavailable. */
-    const std::vector<uint8_t> firstDsf = makeStereoDsf(121, 0x00, 1);
+     * payload at the boundary visible in the byte-for-byte capture. The 120 ms endpoint request
+     * yields a 21,168-frame ring target, rounded up by RingBuffer to 32,768 frames. Keep the active
+     * fixture beyond that actual capacity: open() starts its decoder pump before queueReader() is
+     * called, and a shorter fixture can race to EOF and make queueing legitimately unavailable. */
+    const std::vector<uint8_t> firstDsf = makeStereoDsf(201, 0x00, 1);
     const std::vector<uint8_t> secondDsf = makeStereoDsf(121, 0x96, 1);
     std::vector<uint8_t> firstExpected;
     std::vector<uint8_t> secondExpected;
@@ -565,7 +583,8 @@ int runDoPGaplessCase() {
     config.device.dsd_output_mode = LazerAudioDsdOutputRequireDoP;
     config.events.on_event = onEvent;
     config.events.context = &events;
-    Engine *engine = Engine::create(config, std::make_unique<VariableCaptureOutput>(capture));
+    /* This case crosses the ring boundary, so pace the fake endpoint at the carrier clock. */
+    Engine *engine = Engine::create(config, std::make_unique<VariableCaptureOutput>(capture, true));
     if (engine == nullptr) return fail("DoP gapless engine creation failed");
 
     const LazerAudioOpenParams params{sizeof(LazerAudioOpenParams), 0, 0};
@@ -583,6 +602,18 @@ int runDoPGaplessCase() {
     }
     if (engine->play() != LazerAudioOk || !waitForEnd(events)) {
         std::cerr << "gapless DoP error: " << engine->lastError() << '\n';
+        {
+            std::lock_guard guard(capture->mutex);
+            std::cerr << "gapless DoP captured=" << capture->bytes.size() / 6
+                << " idle=" << capture->idleDoPFrames << " writes="
+                << capture->writeFrames.size() << '\n';
+        }
+        {
+            std::lock_guard guard(events.mutex);
+            std::cerr << "gapless DoP events=";
+            for (int32_t event : events.values) std::cerr << event << ',';
+            std::cerr << '\n';
+        }
         engine->destroy();
         return fail("DoP gapless session did not reach clean EOF");
     }

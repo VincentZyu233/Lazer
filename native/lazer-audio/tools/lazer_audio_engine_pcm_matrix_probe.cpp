@@ -454,10 +454,15 @@ bool runPcmFormatReopenCase() {
     constexpr int32_t firstDepth = 16;
     constexpr int32_t nextRate = 96'000;
     constexpr int32_t nextDepth = 24;
-    constexpr int32_t frames = kPeriodFrames;
-    MemoryReader first(makePcmWave(frames, firstRate, firstDepth, 5'000));
-    MemoryReader incompatible(makePcmWave(frames, nextRate, nextDepth, 2'000));
-    MemoryReader second(makePcmWave(frames, nextRate, nextDepth, -4'000));
+    constexpr int32_t reopenFrames = kPeriodFrames;
+    /* Queueability is only expected while the active source has not reached EOF. Keep the first
+     * source beyond the engine's power-of-two input ring so a fast decoder cannot finish it before
+     * this cross-rate compatibility check. */
+    const int32_t firstFrames = ((firstTrackFramesForRate(firstRate) + kPeriodFrames - 1) /
+        kPeriodFrames) * kPeriodFrames;
+    MemoryReader first(makePcmWave(firstFrames, firstRate, firstDepth, 5'000));
+    MemoryReader incompatible(makePcmWave(reopenFrames, nextRate, nextDepth, 2'000));
+    MemoryReader second(makePcmWave(reopenFrames, nextRate, nextDepth, -4'000));
     LazerAudioReader firstReader = asReader(first);
     LazerAudioReader incompatibleReader = asReader(incompatible);
     LazerAudioReader secondReader = asReader(second);

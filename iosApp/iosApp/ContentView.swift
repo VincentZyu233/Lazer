@@ -294,13 +294,21 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         _ urls: [URL]
     ) async -> LazerLocalAudioPickerResult {
         guard prepareLocalAudioCache() else {
-            return LazerLocalAudioPickerResult(files: [], unsupportedFileCount: 0, failedFileCount: urls.count)
+            return LazerLocalAudioPickerResult(
+                files: [],
+                unsupportedFileCount: 0,
+                failedFileCount: Int32(clamping: urls.count)
+            )
         }
         let supportedExtensions: Set<String> = ["wav", "wave", "flac"]
         let supported = urls.filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
         var unsupportedCount = urls.count - supported.count
         guard !supported.isEmpty else {
-            return LazerLocalAudioPickerResult(files: [], unsupportedFileCount: unsupportedCount, failedFileCount: 0)
+            return LazerLocalAudioPickerResult(
+                files: [],
+                unsupportedFileCount: Int32(clamping: unsupportedCount),
+                failedFileCount: 0
+            )
         }
 
         let batchDirectory = localAudioImportDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -310,7 +318,11 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
                 withIntermediateDirectories: true
             )
         } catch {
-            return LazerLocalAudioPickerResult(files: [], unsupportedFileCount: 0, failedFileCount: urls.count)
+            return LazerLocalAudioPickerResult(
+                files: [],
+                unsupportedFileCount: 0,
+                failedFileCount: Int32(clamping: urls.count)
+            )
         }
 
         let (copied, copyFailureCount) = await Task.detached(priority: .userInitiated) {
@@ -363,8 +375,8 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         }
         return LazerLocalAudioPickerResult(
             files: files,
-            unsupportedFileCount: unsupportedCount,
-            failedFileCount: failedFileCount
+            unsupportedFileCount: Int32(clamping: unsupportedCount),
+            failedFileCount: Int32(clamping: failedFileCount)
         )
     }
 

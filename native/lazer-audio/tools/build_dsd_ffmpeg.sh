@@ -47,6 +47,12 @@ configure_args=(
     --disable-avfilter
     --disable-swscale
 )
+# Give FFmpeg dylibs a location-independent install name. The desktop bundle copies these shared
+# libraries beside liblazer-audio.dylib, whose @loader_path runpath then resolves @rpath entries.
+# Keep Linux's normal SONAME/RPATH behavior unchanged.
+if [[ "$(uname -s)" == Darwin ]]; then
+    configure_args+=("--install-name-dir=@rpath")
+fi
 printf 'FFmpeg revision: %s\nConfigure options: %s\n' \
     "$FFmpeg_REVISION" "${configure_args[*]}" | tee "$work_root/build-info.txt"
 ./configure "${configure_args[@]}" 2>&1 | tee "$work_root/configure.log"
