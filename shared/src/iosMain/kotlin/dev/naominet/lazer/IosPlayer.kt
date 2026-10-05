@@ -50,8 +50,6 @@ internal class IosPlayer(
         } else {
             queuePersistenceReady = processQueuePersistenceReady
         }
-        // A new shell cannot prune until it has received a successfully saved, complete queue.
-        bridge.playerUpdateLocalAudioQueue(emptyList(), persisted = false)
         scope.launch { queue.collect(::persistQueue) }
 
         bridge.playerAttachAudioSessionSink(this)
@@ -87,7 +85,7 @@ internal class IosPlayer(
         processQueuePersistenceReady = true
         persistQueue(LazerPlaybackQueue.snapshot.value)
         currentItemLoaded = false
-        pendingPositionTrackId = track.id.takeIf { positionMillis > 0L }
+        pendingPositionTrackId = track.id
         pendingPositionMillis = positionMillis.coerceAtLeast(0L)
         val generation = ++playbackGeneration
         playbackFailureGate.begin(generation)
@@ -171,7 +169,7 @@ internal class IosPlayer(
     override fun seekTo(positionMillis: Long) {
         bridge.playerSeekTo(positionMillis)
         val requested = positionMillis.coerceAtLeast(0L)
-        pendingPositionTrackId = snapshot.value.track?.id?.takeIf { requested > 0L }
+        pendingPositionTrackId = snapshot.value.track?.id
         pendingPositionMillis = requested
         LazerPlaybackStateStore.update { it.copy(positionMillis = requested) }
         persistPosition(force = true, requestedPositionMillis = positionMillis)
@@ -302,10 +300,13 @@ internal class IosPlayer(
         val reportedPosition = bridge.playerPositionMillis()
         val duration = bridge.playerDurationMillis().takeIf { it > 0L } ?: track.durationMillis
         val playing = bridge.playerIsPlaying()
-        val position = if (pendingPositionTrackId == track.id && reportedPosition == 0L && !playing) {
+        val isPendingPosition = pendingPositionTrackId == track.id
+        val position = if (isPendingPosition &&
+            (reportedPosition - pendingPositionMillis).absoluteValue > SEEK_COMPLETION_TOLERANCE_MILLIS
+        ) {
             pendingPositionMillis
         } else {
-            if (pendingPositionTrackId == track.id) pendingPositionTrackId = null
+            if (isPendingPosition) pendingPositionTrackId = null
             reportedPosition
         }
         // The same share of the track the seek bar paints behind the playhead on Android.
@@ -347,9 +348,11 @@ internal class IosPlayer(
         return when (val stored = queueStore.loadQueue()) {
             IosStoredQueue.Missing -> {
                 LazerPlaybackQueue.restoreSnapshot(LazerPlaybackQueueSnapshot())
+                bridge.playerUpdateLocalAudioQueue(emptyList(), queueStateAvailable = true, canPruneOrphans = true)
                 true
             }
             IosStoredQueue.Invalid -> {
+                bridge.playerUpdateLocalAudioQueue(emptyList(), queueStateAvailable = false, canPruneOrphans = false)
                 LazerPlaybackStateStore.update(
                     LazerPlaybackSnapshot(message = tr("status.playback_queue.restore_failed")),
                 )
@@ -357,6 +360,11 @@ internal class IosPlayer(
             }
             is IosStoredQueue.Valid -> {
                 val original = stored.snapshot
+                bridge.playerUpdateLocalAudioQueue(
+                    uris = original.tracks.mapNotNull { (it.source as? LazerTrackSource.LocalFile)?.uri }.distinct(),
+                    queueStateAvailable = true,
+                    canPruneOrphans = true,
+                )
                 val originalCurrent = original.tracks.getOrNull(original.index)
                 val retained = original.tracks.filter { track ->
                     val local = track.source as? LazerTrackSource.LocalFile
@@ -371,7 +379,10 @@ internal class IosPlayer(
                     else -> original.index.coerceIn(retained.indices)
                 }
                 val restored = LazerPlaybackQueueSnapshot(retained, index, original.mode)
-                if (!LazerPlaybackQueue.restoreSnapshot(restored)) return false
+                if (!LazerPlaybackQueue.restoreSnapshot(restored)) {
+                    bridge.playerUpdateLocalAudioQueue(emptyList(), queueStateAvailable = false, canPruneOrphans = false)
+                    return false
+                }
                 val current = restored.tracks.getOrNull(restored.index)
                 val savedPosition = queueStore.loadPosition()
                 val position = LazerPlaybackQueueCodec.restoredPositionMillis(
@@ -387,7 +398,7 @@ internal class IosPlayer(
                         track = current,
                         positionMillis = position,
                         durationMillis = current?.durationMillis ?: 0L,
-                        message = if (skipped > 0) tr("status.local_audio.restore_missing", skipped) else "",
+                        message = if (skipped > 0) tr("status.local_audio.restore_missing", skipped) else null,
                     ),
                 )
                 true
@@ -397,7 +408,7 @@ internal class IosPlayer(
 
     private fun persistQueue(value: LazerPlaybackQueueSnapshot) {
         if (!queuePersistenceReady) {
-            bridge.playerUpdateLocalAudioQueue(emptyList(), persisted = false)
+            bridge.playerUpdateLocalAudioQueue(emptyList(), queueStateAvailable = false, canPruneOrphans = false)
             return
         }
         val saved = queueStore.saveQueue(value)
@@ -405,7 +416,8 @@ internal class IosPlayer(
         if (saved) processQueuePersistenceReady = true
         bridge.playerUpdateLocalAudioQueue(
             uris = if (saved) value.tracks.mapNotNull { (it.source as? LazerTrackSource.LocalFile)?.uri }.distinct() else emptyList(),
-            persisted = saved,
+            queueStateAvailable = saved,
+            canPruneOrphans = false,
         )
     }
 
@@ -426,6 +438,7 @@ internal class IosPlayer(
 
     private companion object {
         const val POSITION_CHECKPOINT_INTERVAL_MILLIS = 5_000L
+        const val SEEK_COMPLETION_TOLERANCE_MILLIS = 250L
 
         var processQueueInitialized = false
         var processQueuePersistenceReady = false

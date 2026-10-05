@@ -28,6 +28,7 @@ internal class IosPlaybackQueueStore(
         return IosStoredQueue.Valid(decoded)
     }
 
+    /** Confirms the defaults cache accepted the snapshot; orphan cleanup still waits for next-launch restore. */
     fun saveQueue(snapshot: LazerPlaybackQueueSnapshot): Boolean = runCatching {
         val encoded = LazerPlaybackQueueCodec.encode(snapshot)
         defaults.setObject(encoded, QUEUE_KEY)

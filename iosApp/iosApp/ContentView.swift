@@ -15,7 +15,9 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     private var audioDocumentPickerHandler: LazerAudioDocumentPickerHandler?
     private var localAudioCachePrepared = false
     private var localAudioQueuedURIs: Set<String> = []
-    private var localAudioQueuePersisted = false
+    private var localAudioQueueStateAvailable = false
+    // NSUserDefaults may still be flushing a changed queue; prune only against a snapshot read at launch.
+    private var localAudioCanPruneOrphans = false
     private var localAudioActiveURI: String?
     private var localAudioInFlightBatchDirectories: Set<URL> = []
     private var backGesture: UIScreenEdgePanGestureRecognizer?
@@ -162,10 +164,11 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         localAudioActiveURI = managedLocalAudioBatchDirectory(for: url) == nil ? nil : url
     }
 
-    func playerUpdateLocalAudioQueue(uris: [String], persisted: Bool) {
+    func playerUpdateLocalAudioQueue(uris: [String], queueStateAvailable: Bool, canPruneOrphans: Bool) {
         localAudioQueuedURIs = Set(uris)
-        localAudioQueuePersisted = persisted
-        if persisted { pruneLocalAudioCache() }
+        localAudioQueueStateAvailable = queueStateAvailable
+        localAudioCanPruneOrphans = queueStateAvailable && canPruneOrphans
+        if localAudioCanPruneOrphans { pruneLocalAudioCache() }
     }
 
     func playerLocalAudioFileExists(uri: String) -> Bool {
@@ -518,7 +521,7 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     }
 
     private func pruneLocalAudioCache() {
-        guard localAudioQueuePersisted,
+        guard localAudioQueueStateAvailable, localAudioCanPruneOrphans,
               let root = existingLocalAudioImportRoot(),
               let children = try? FileManager.default.contentsOfDirectory(
                   at: root,
