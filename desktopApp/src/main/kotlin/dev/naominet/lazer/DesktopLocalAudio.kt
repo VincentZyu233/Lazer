@@ -399,6 +399,7 @@ private fun readDsfMetadata(input: RandomAccessFile): DesktopLocalAudioMetadata?
         album = tags?.displayTags?.get("ALBUM"),
         durationMillis = durationMillis,
         embeddedArtwork = tags?.artwork,
+        replayGain = tags?.replayGain,
     )
 }
 
@@ -487,6 +488,7 @@ private fun readDffMetadata(input: RandomAccessFile): DesktopLocalAudioMetadata?
             artist = id3Tags?.displayTags?.get("ARTIST"),
             album = id3Tags?.displayTags?.get("ALBUM"),
             embeddedArtwork = id3Tags?.artwork,
+            replayGain = id3Tags?.replayGain,
         )
 }
 

@@ -56,7 +56,7 @@ class DesktopLocalAudioLibraryTest {
             assertFalse(refreshed.entries.single().metadataNeedsRefresh)
 
             val header = Files.readAllLines(index).first()
-            assertTrue(header.contains("\"schemaVersion\":9"))
+            assertTrue(header.contains("\"schemaVersion\":10"))
             assertEquals(tags, DesktopLocalAudioLibraryStore(index).load().single().replayGain)
             assertFalse(DesktopLocalAudioLibraryStore(index).load().single().metadataNeedsRefresh)
         } finally {
@@ -106,7 +106,7 @@ class DesktopLocalAudioLibraryTest {
             assertEquals(1, metadataReads.get())
             assertEquals("Refreshed FLAC", migrated.entries.single().title)
             assertEquals(tags, migrated.entries.single().replayGain)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":9"))
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
         } finally {
             directory.toFile().deleteRecursively()
         }
@@ -159,7 +159,7 @@ class DesktopLocalAudioLibraryTest {
             assertEquals("Refreshed dsf", migrated.entries.single { it.absolutePath.endsWith(".dsf") }.title)
             assertEquals("Refreshed dff", migrated.entries.single { it.absolutePath.endsWith(".dff") }.title)
             assertEquals("Refreshed flac", migrated.entries.single { it.absolutePath.endsWith(".flac") }.title)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":9"))
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
@@ -216,7 +216,7 @@ class DesktopLocalAudioLibraryTest {
             assertEquals("Refreshed wav", migrated.entries.single { it.absolutePath.endsWith(".wav") }.title)
             assertEquals("Refreshed flac", migrated.entries.single { it.absolutePath.endsWith(".flac") }.title)
             assertEquals("Refreshed dsf", migrated.entries.single { it.absolutePath.endsWith(".dsf") }.title)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":9"))
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
@@ -294,7 +294,7 @@ class DesktopLocalAudioLibraryTest {
             assertEquals("Refreshed WAV title", cachedDsd.title)
             assertEquals(refreshedTags, cachedFlac.replayGain)
             assertEquals(refreshedTags, cachedDsd.replayGain)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":9"))
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
@@ -351,7 +351,7 @@ class DesktopLocalAudioLibraryTest {
             assertEquals(listOf("dff", "dsf", "flac", "wav"), metadataReads.sorted())
             assertEquals(0, migrated.reusedMetadata)
             assertTrue(migrated.entries.all { it.title == "APE-aware ${it.absolutePath.substringAfterLast('.')}" })
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":9"))
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
@@ -411,12 +411,88 @@ class DesktopLocalAudioLibraryTest {
             assertEquals("Unsync-aware wav", migrated.entries.single { it.absolutePath.endsWith(".wav") }.title)
             assertEquals("Unsync-aware dsf", migrated.entries.single { it.absolutePath.endsWith(".dsf") }.title)
             assertEquals("Unsync-aware dff", migrated.entries.single { it.absolutePath.endsWith(".dff") }.title)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":9"))
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
             store.scanAndCommit(listOf(root), previousEntries = migratedEntries)
             assertEquals(listOf("dff", "dsf", "wav"), metadataReads.sorted())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `schema nine rereads DSF and DFF once for ID3 ReplayGain`() {
+        val directory = Files.createTempDirectory("local-library-dsd-replaygain-migration")
+        try {
+            val root = Files.createDirectory(directory.resolve("music"))
+            val paths = listOf("wav", "flac", "dsf", "dff").associateWith { extension ->
+                Files.write(root.resolve("track.$extension"), byteArrayOf(1, 2, 3))
+            }
+            val index = directory.resolve("index.jsonl")
+            val cachedReplayGain = DesktopReplayGainTags(-5.0, 0.9, -6.0, 0.95)
+            val entries = paths.map { (extension, path) ->
+                buildJsonObject {
+                    put("path", path.toAbsolutePath().normalize().toString())
+                    put("size", Files.size(path))
+                    put("modified", Files.getLastModifiedTime(path).toMillis())
+                    put("title", "Cached $extension")
+                    put("artist", "Cached artist")
+                    put("album", "Cached album")
+                    put("duration", 1_000L)
+                    put("cover", "")
+                    put("replayGainTrackGainDb", cachedReplayGain.trackGainDb)
+                    put("replayGainTrackPeak", cachedReplayGain.trackPeak)
+                    put("replayGainAlbumGainDb", cachedReplayGain.albumGainDb)
+                    put("replayGainAlbumPeak", cachedReplayGain.albumPeak)
+                }.toString()
+            }
+            Files.writeString(
+                index,
+                "${buildJsonObject { put("schemaVersion", 9) }}\n${entries.joinToString("\n")}\n",
+            )
+
+            val metadataReads = mutableListOf<String>()
+            val refreshedReplayGain = DesktopReplayGainTags(-7.0, 0.7, -8.0, 0.8)
+            val store = DesktopLocalAudioLibraryStore(
+                indexPath = index,
+                metadataReader = { file ->
+                    val extension = file.extension.lowercase()
+                    metadataReads += extension
+                    DesktopLocalAudioMetadata(
+                        title = "Refreshed $extension",
+                        replayGain = refreshedReplayGain,
+                    )
+                },
+                artworkWriter = { null },
+            )
+            val loaded = store.load()
+            assertEquals(
+                setOf("dsf", "dff"),
+                loaded.filter { it.metadataNeedsRefresh }
+                    .map { it.absolutePath.substringAfterLast('.') }.toSet(),
+            )
+
+            val migrated = store.scanAndCommit(listOf(root), previousEntries = loaded)
+            assertEquals(listOf("dff", "dsf"), metadataReads.sorted())
+            assertEquals(2, migrated.reusedMetadata)
+            for (extension in listOf("wav", "flac")) {
+                val cached = migrated.entries.single { it.absolutePath.endsWith(".$extension") }
+                assertEquals("Cached $extension", cached.title)
+                assertEquals(cachedReplayGain, cached.replayGain)
+            }
+            for (extension in listOf("dsf", "dff")) {
+                val refreshed = migrated.entries.single { it.absolutePath.endsWith(".$extension") }
+                assertEquals("Refreshed $extension", refreshed.title)
+                assertEquals(refreshedReplayGain, refreshed.replayGain)
+            }
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":10"))
+
+            val migratedEntries = store.load()
+            assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
+            store.scanAndCommit(listOf(root), previousEntries = migratedEntries)
+            assertEquals(listOf("dff", "dsf"), metadataReads.sorted())
         } finally {
             directory.toFile().deleteRecursively()
         }

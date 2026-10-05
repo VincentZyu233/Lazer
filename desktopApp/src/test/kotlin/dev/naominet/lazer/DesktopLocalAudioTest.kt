@@ -556,6 +556,56 @@ class DesktopLocalAudioTest {
     }
 
     @Test
+    fun `reads ID3 ReplayGain from DSF and DFF while preserving duration`() {
+        val dsfPath = Files.createTempFile("local-audio-dsf-replaygain", ".dsf")
+        val dffPath = Files.createTempFile("local-audio-dff-replaygain", ".dff")
+        try {
+            val dsfId3 = id3v23WithExtraFrames(
+                tags = listOf("TIT2" to "DSF ReplayGain"),
+                extraFrames = listOf(
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_TRACK_GAIN", "NaN"),
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_TRACK_GAIN", "-7.25 dB"),
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_TRACK_PEAK", "16.1"),
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_TRACK_PEAK", "1.25"),
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_ALBUM_GAIN", "−3.0 dB"),
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_ALBUM_GAIN", "+2.5DB"),
+                    "TXXX" to id3UserTextFrame(1, "REPLAYGAIN_ALBUM_PEAK", "16"),
+                ),
+            )
+            Files.write(
+                dsfPath,
+                dsfFixture(sampleRate = 2_822_400, sampleCount = 2_822_400, id3Tag = dsfId3),
+            )
+
+            val dffId3 = id3v24WithExtraFrames(
+                tags = listOf("TIT2" to "DFF ReplayGain"),
+                extraFrames = listOf(
+                    "TXXX" to id3UserTextFrame(3, "REPLAYGAIN_TRACK_GAIN", "Infinity"),
+                    "TXXX" to id3UserTextFrame(3, "REPLAYGAIN_TRACK_GAIN", "-4.0 dB"),
+                    "TXXX" to id3UserTextFrame(3, "REPLAYGAIN_TRACK_PEAK", "0.5"),
+                    "TXXX" to id3UserTextFrame(3, "REPLAYGAIN_ALBUM_GAIN", "24.0001 dB"),
+                    "TXXX" to id3UserTextFrame(3, "REPLAYGAIN_ALBUM_GAIN", "-8.5 dB"),
+                    "TXXX" to id3UserTextFrame(3, "REPLAYGAIN_ALBUM_PEAK", "0.75"),
+                ),
+            )
+            Files.write(dffPath, dffFixture(dst = false, id3Tag = dffId3))
+
+            val dsf = readLocalAudioMetadata(dsfPath.toFile())
+            assertEquals("DSF ReplayGain", dsf?.title)
+            assertEquals(1_000L, dsf?.durationMillis)
+            assertEquals(DesktopReplayGainTags(-7.25, 1.25, 2.5, 16.0), dsf?.replayGain)
+
+            val dff = readLocalAudioMetadata(dffPath.toFile())
+            assertEquals("DFF ReplayGain", dff?.title)
+            assertEquals(10L, dff?.durationMillis)
+            assertEquals(DesktopReplayGainTags(-4.0, 0.5, -8.5, 0.75), dff?.replayGain)
+        } finally {
+            Files.deleteIfExists(dsfPath)
+            Files.deleteIfExists(dffPath)
+        }
+    }
+
+    @Test
     fun `ignores malformed and out of range WAV ID3 ReplayGain values`() {
         val path = Files.createTempFile("local-audio-wave-replaygain-invalid", ".wav")
         try {
