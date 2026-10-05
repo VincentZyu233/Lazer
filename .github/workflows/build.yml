@@ -28,6 +28,8 @@ jobs:
       # Do not cache generated APKs or build directories across commits.
       - uses: gradle/actions/setup-gradle@v6
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install Android native build tools
         run: |
           sdkmanager --install "ndk;30.0.16248370" "cmake;3.31.6"
