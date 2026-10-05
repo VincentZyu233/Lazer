@@ -110,6 +110,11 @@ val androidDsdNativeEnabled = providers.gradleProperty("lazerEnableAndroidDsdNat
     .map(String::toBoolean)
     .orElse(!System.getProperty("os.name").contains("windows", ignoreCase = true))
     .get()
+val androidUacNativeEnabled = providers.gradleProperty("lazerEnableAndroidUacNative")
+    .map(String::toBoolean)
+    .orElse(false)
+    .get()
+val androidNativeEnabled = androidDsdNativeEnabled || androidUacNativeEnabled
 val androidDsdAbi = providers.gradleProperty("lazerAbis").orElse("arm64-v8a")
 val defaultAndroidDsdFfmpegRoot = androidDsdAbi.map { abi ->
     layout.buildDirectory.dir("generated/lazer-android-ffmpeg-$abi").get().asFile.absolutePath
@@ -236,19 +241,34 @@ android {
                         "The Android DSD native decoder builds one ABI at a time: arm64-v8a or x86_64."
                     )
                 }
+                if (androidUacNativeEnabled && abis.any { it !in setOf("arm64-v8a", "x86_64") }) {
+                    throw GradleException(
+                        "The Android UAC2 native transport supports arm64-v8a and x86_64."
+                    )
+                }
                 ndk { abiFilters.addAll(abis) }
             }
         if (androidDsdNativeEnabled && providers.gradleProperty("lazerAbis").orNull == null) {
             ndk { abiFilters.add("arm64-v8a") }
         }
-        if (androidDsdNativeEnabled) {
+        if (androidUacNativeEnabled && !androidDsdNativeEnabled &&
+            providers.gradleProperty("lazerAbis").orNull == null
+        ) {
+            ndk { abiFilters.addAll(listOf("arm64-v8a", "x86_64")) }
+        }
+        if (androidNativeEnabled) {
             externalNativeBuild {
                 cmake {
                     arguments += listOf(
                         "-DANDROID_STL=c++_static",
-                        "-DLAZER_FFMPEG_ROOT=${androidDsdFfmpegRoot.get()}",
+                        "-DLAZER_ANDROID_BUILD_UAC2=$androidUacNativeEnabled",
+                        "-DLAZER_ANDROID_BUILD_DSD=$androidDsdNativeEnabled",
                     )
-                    targets += "lazer-audio-dsd"
+                    if (androidDsdNativeEnabled) {
+                        arguments += "-DLAZER_FFMPEG_ROOT=${androidDsdFfmpegRoot.get()}"
+                        targets += "lazer-audio-dsd"
+                    }
+                    if (androidUacNativeEnabled) targets += "lazer-uac2"
                 }
             }
         }
@@ -304,7 +324,7 @@ android {
     buildFeatures {
         compose = true
     }
-    if (androidDsdNativeEnabled) {
+    if (androidNativeEnabled) {
         externalNativeBuild {
             cmake {
                 path = file("../native/lazer-audio/CMakeLists.txt")

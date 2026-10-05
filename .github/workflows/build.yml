@@ -38,6 +38,18 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/30.0.16248370" >> "$GITHUB_ENV"
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config nasm
+      - name: Test USB 2.0 PCM packetizer on the host
+        run: |
+          cmake -S native/lazer-audio/tools/uac2_packetizer_probe \
+            -B build/native/uac2-packetizer-host
+          cmake --build build/native/uac2-packetizer-host --parallel 2
+          ctest --test-dir build/native/uac2-packetizer-host --output-on-failure
+      - name: Test USB 2.0 native transport lifecycle with fake libusb
+        run: |
+          cmake -S native/lazer-audio/tools/uac2_transport_probe \
+            -B build/native/uac2-transport-host
+          cmake --build build/native/uac2-transport-host --parallel 2
+          ctest --test-dir build/native/uac2-transport-host --output-on-failure
       - name: Enable KVM for the Android emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -46,9 +58,34 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Test Android unit suite
         run: ./gradlew :androidApp:testDebugUnitTest --stacktrace
+      - name: Assemble standalone arm64 and x86_64 UAC2 APK without the DSD SDK
+        run: ./gradlew :androidApp:assembleDebug -PlazerEnableAndroidDsdNative=false -PlazerEnableAndroidUacNative=true -PlazerAbis=arm64-v8a,x86_64 --stacktrace
+      - name: Verify standalone UAC2 ABI packaging
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          apks = glob.glob("androidApp/build/outputs/apk/debug/*.apk")
+          if len(apks) != 1:
+              raise SystemExit(f"Expected one standalone UAC2 debug APK, found {len(apks)}")
+          with zipfile.ZipFile(apks[0]) as apk:
+              entries = set(apk.namelist())
+          required = {
+              f"lib/{abi}/{library}"
+              for abi in ("arm64-v8a", "x86_64")
+              for library in ("liblazer-uac2.so", "libusb-1.0.so")
+          }
+          missing = sorted(required - entries)
+          if missing:
+              raise SystemExit(f"Standalone UAC2 APK is missing {missing}")
+          if any(f"lib/{abi}/liblazer-audio-dsd.so" in entries for abi in ("arm64-v8a", "x86_64")):
+              raise SystemExit("UAC2-only APK unexpectedly packages the DSD decoder")
+          print(f"Verified UAC2-only native ABI packaging in {apks[0]}")
+          PY
       - name: Assemble arm64 release APK
-        run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
-      - name: Verify the DSD decoder is packaged
+        run: ./gradlew :androidApp:assembleRelease -PlazerEnableAndroidUacNative=true -PlazerAbis=arm64-v8a --stacktrace
+      - name: Verify DSD and UAC2 libraries are packaged
         run: |
           python3 - <<'PY'
           import glob
@@ -58,10 +95,16 @@ jobs:
           if len(apks) != 1:
               raise SystemExit(f"Expected one release APK, found {len(apks)}")
           with zipfile.ZipFile(apks[0]) as apk:
-              required = "lib/arm64-v8a/liblazer-audio-dsd.so"
-              if required not in apk.namelist():
-                  raise SystemExit(f"Release APK is missing {required}")
-          print(f"Verified native DSD decoder in {apks[0]}")
+              entries = set(apk.namelist())
+          required = {
+              "lib/arm64-v8a/liblazer-audio-dsd.so",
+              "lib/arm64-v8a/liblazer-uac2.so",
+              "lib/arm64-v8a/libusb-1.0.so",
+          }
+          missing = sorted(required - entries)
+          if missing:
+              raise SystemExit(f"Release APK is missing {missing}")
+          print(f"Verified native DSD and UAC2 libraries in {apks[0]}")
           PY
       - name: Generate compact Android DSD fixtures
         run: ./gradlew :androidApp:generateAndroidDsdInstrumentationFixtures --stacktrace
@@ -76,7 +119,7 @@ jobs:
           disable-animations: true
           script: |
             set +e
-            ./gradlew :androidApp:connectedDebugAndroidTest -PlazerAbis=x86_64 --stacktrace
+            ./gradlew :androidApp:connectedDebugAndroidTest -PlazerEnableAndroidUacNative=true -PlazerAbis=x86_64 --stacktrace
             gradle_status=$?
             mkdir -p androidApp/build/diagnostics/android-dsd
             adb logcat -d -v threadtime > androidApp/build/diagnostics/android-dsd/logcat.txt 2>&1 || true

@@ -111,6 +111,14 @@ interface LazerScreenHost {
 
     fun adjustUsbUacVolume(increase: Boolean) { }
 
+    val supportsUsbUacDirectOutput: Boolean get() = false
+
+    val usbUacDirectOutputState: StateFlow<LazerUsbUacDirectOutputSnapshot>
+        get() = LazerUsbUacDirectOutputStateStore.state
+
+    /** Enables Android USB UAC PCM output after permission; device identity comes from the UAC picker. */
+    fun setUsbUacDirectOutput(enabled: Boolean) { }
+
     val pcmTestToneState: StateFlow<LazerPcmTestToneSnapshot> get() = LazerPcmTestToneStateStore.state
 
     /** Format and route reported by the active platform playback output, when available. */

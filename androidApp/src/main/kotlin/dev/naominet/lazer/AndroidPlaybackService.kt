@@ -6,8 +6,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -19,6 +21,8 @@ import android.media.MediaMetadata
 import android.media.audiofx.Visualizer
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -41,6 +45,7 @@ import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.analytics.AnalyticsListener
+import androidx.media3.exoplayer.audio.AudioOutputProvider
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import dev.naominet.lazer.gateway.AudioQuality
 import dev.naominet.lazer.gateway.NeteaseMusicGateway
@@ -66,6 +71,7 @@ import kotlin.math.roundToInt
 /** Entry point used by Compose controls. System-media mode calls back into the same service. */
 object AndroidPlaybackConnection {
     val snapshot: StateFlow<LazerPlaybackSnapshot> = LazerPlaybackStateStore.snapshot
+    @Volatile private var selectedUacDirectOutputDeviceId: String? = null
 
     private var didRestorePersistedQueue = false
     private var restoredLocalTracksWithoutPermission: Set<Long> = emptySet()
@@ -259,6 +265,32 @@ object AndroidPlaybackConnection {
         )
     }
 
+    /** Sets explicit raw USB UAC output intent. The selected USB host device ID is not an
+     * AudioManager route ID; the service resolves it through UsbManager after permission grant.
+     */
+    fun setUsbUacDirectOutput(context: Context, enabled: Boolean, deviceId: String) {
+        require(deviceId.isNotBlank()) { "A selected USB UAC device is required" }
+        if (enabled) {
+            selectedUacDirectOutputDeviceId = deviceId
+        } else if (selectedUacDirectOutputDeviceId == deviceId) {
+            selectedUacDirectOutputDeviceId = null
+        }
+        if (snapshot.value.track == null) return
+        dispatch(
+            context,
+            Intent(context, AndroidPlaybackService::class.java)
+                .setAction(AndroidPlaybackService.ACTION_USB_UAC_DIRECT_OUTPUT_CHANGED)
+                .putExtra(AndroidPlaybackService.EXTRA_USB_UAC_DIRECT_ENABLED, enabled)
+                .putExtra(AndroidPlaybackService.EXTRA_USB_UAC_DIRECT_DEVICE_ID, deviceId),
+        )
+    }
+
+    internal fun currentUsbUacDirectOutputDeviceId(): String? = selectedUacDirectOutputDeviceId
+
+    internal fun clearUsbUacDirectOutputIfSelected(deviceId: String) {
+        if (selectedUacDirectOutputDeviceId == deviceId) selectedUacDirectOutputDeviceId = null
+    }
+
     fun stopAndClearSession(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_STOP_AND_CLEAR_SESSION)
 
     fun playPcmTestTone(context: Context, format: LazerPcmTestFormat) = dispatch(
@@ -314,6 +346,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private lateinit var gateway: NeteaseMusicGateway
     private var player: ExoPlayer? = null
     private var outputProvider: AndroidMedia3AudioOutputProvider? = null
+    private var directOutputProvider: AndroidUac2DirectAudioOutputProvider? = null
+    private var directUacDeviceId: String? = null
     private var equalizerState = LazerEqualizerState()
     private var replayGainMode = LazerReplayGainMode.Off
     private var preparedGeneration: Long? = null
@@ -354,6 +388,18 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                     stopServiceWhenIdle = true,
                 )
             }
+        }
+    }
+    private val usbDetachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
+            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            } ?: return
+            handleDirectUsbDeviceDetached(device.deviceName)
         }
     }
 
@@ -407,8 +453,16 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         replayGainMode = gatewaySettings.replayGainMode
         gatewaySessionStore = AndroidGatewaySessionStore(applicationContext)
         gateway = NeteaseMusicGateway(sessionStore = gatewaySessionStore)
+        directUacDeviceId = AndroidPlaybackConnection.currentUsbUacDirectOutputDeviceId()
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         audioManager.registerAudioDeviceCallback(outputDeviceCallback, handler)
+        val usbDetachFilter = IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbDetachReceiver, usbDetachFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(usbDetachReceiver, usbDetachFilter)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) createNotificationChannel()
         if (gatewaySettings.playbackInterface.usesSystemMediaControls()) ensureMediaSession()
         SuperLyricPublisher.ensureRegistered()
@@ -430,6 +484,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             }
             ACTION_PLAY_TRACK -> {
                 cancelPcmTestTone(restoreMusic = false)
+                directUacDeviceId = AndroidPlaybackConnection.currentUsbUacDirectOutputDeviceId()
                 LazerPlaybackQueue.current()?.let { track ->
                     resolveAndPlay(
                         track = track,
@@ -439,6 +494,10 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                 }
                     ?: publishError(tr("status.audio_queue_end"))
             }
+            ACTION_USB_UAC_DIRECT_OUTPUT_CHANGED -> handleDirectOutputModeChanged(
+                enabled = intent.getBooleanExtra(EXTRA_USB_UAC_DIRECT_ENABLED, false),
+                deviceId = intent.getStringExtra(EXTRA_USB_UAC_DIRECT_DEVICE_ID),
+            )
             ACTION_TOGGLE -> {
                 cancelPcmTestTone(restoreMusic = false)
                 if (requestedPlayWhenReady) pauseCurrent() else resumeCurrent()
@@ -777,48 +836,103 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         } else {
             LazerReplayGainResolution(0.0, LazerReplayGainSource.None)
         }
-        val output = AndroidMedia3AudioOutputProvider(
-            context = this,
-            initialEqualizer = equalizerState,
-            initialReplayGainDb = replayGainResolution.appliedGainDb,
-        ) { observed ->
-            if (generation != loadingGeneration) return@AndroidMedia3AudioOutputProvider
-            val format = observed.actualTrackFormat ?: observed.requestedTrackFormat
-            LazerPlaybackStateStore.update { state ->
-                if (generation != loadingGeneration || state.track?.id != track.id) {
-                    state
-                } else {
-                    state.copy(
-                        output = PlaybackOutputSnapshot(
-                            requestedSampleRateHz = observed.requestedTrackFormat.sampleRateHz,
-                            audioTrackSampleRateHz = observed.actualTrackFormat?.sampleRateHz,
-                            encodingLabel = androidAudioEncodingLabel(format.encoding),
-                            channelCount = androidAudioChannelCount(format),
-                            routedDeviceName = observed.routedDevice?.productName,
-                            audioTrackFormatMatchesRequested = observed.audioTrackFormatMatchesRequested,
-                            mixerAdvertisesExactFormat = observed.mixerAdvertisesExactFormat,
-                            mixerAdvertisesBitPerfectBehavior = observed.mixerAdvertisesBitPerfectBehavior,
-                            mixerPreferenceAccepted = observed.mixerPreferenceAccepted,
-                            appDspMayModifySamples = observed.appDspMayModifySamples,
-                            replayGainAppliedDb = observed.replayGainAppliedDb,
-                            directPath = observed.directPath,
-                            outputDataFormat = observed.outputDataFormat,
-                        ),
-                    )
+        val directDeviceId = directUacDeviceId
+        val audioOutputProvider: AudioOutputProvider = if (directDeviceId != null) {
+            AndroidUac2DirectAudioOutputProvider(
+                context = this,
+                deviceId = directDeviceId,
+                onOutputConfigured = { config, deviceName, usbBitDepth ->
+                    if (generation == loadingGeneration) {
+                        val inputIsFloat = config.encoding == C.ENCODING_PCM_FLOAT
+                        val outputData = PlaybackAudioOutputDataSnapshot(
+                            sampleRateHz = config.sampleRate,
+                            encodingLabel = "PCM $usbBitDepth-bit",
+                            channelCount = Integer.bitCount(config.channelMask),
+                            isLinearPcm = true,
+                            offload = false,
+                            tunneling = false,
+                        )
+                        LazerPlaybackStateStore.update { state ->
+                            if (generation != loadingGeneration || state.track?.id != track.id) {
+                                state
+                            } else {
+                                state.copy(
+                                    output = PlaybackOutputSnapshot(
+                                        requestedSampleRateHz = config.sampleRate,
+                                        audioTrackSampleRateHz = null,
+                                        encodingLabel = "PCM $usbBitDepth-bit",
+                                        channelCount = Integer.bitCount(config.channelMask),
+                                        routedDeviceName = deviceName,
+                                        mixerAdvertisesBitPerfectBehavior = null,
+                                        mixerPreferenceAccepted = null,
+                                        appDspMayModifySamples = false,
+                                        directPath = DirectPathSnapshot(
+                                            status = if (inputIsFloat) DirectPathStatus.Unknown else DirectPathStatus.Negotiated,
+                                            reason = if (inputIsFloat) {
+                                                DirectPathReason.BitDepthConversion
+                                            } else {
+                                                DirectPathReason.DigitalCaptureNotVerified
+                                            },
+                                            detail = if (inputIsFloat) {
+                                                "Media3 high-resolution float PCM is dithered to the USB integer format"
+                                            } else null,
+                                        ),
+                                        outputDataFormat = outputData,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                },
+                onOutputFailed = { error -> reportDirectOutputFailure(directDeviceId, error) },
+            ).also { directOutputProvider = it }.provider
+        } else {
+            AndroidMedia3AudioOutputProvider(
+                context = this,
+                initialEqualizer = equalizerState,
+                initialReplayGainDb = replayGainResolution.appliedGainDb,
+            ) { observed ->
+                if (generation != loadingGeneration) return@AndroidMedia3AudioOutputProvider
+                val format = observed.actualTrackFormat ?: observed.requestedTrackFormat
+                LazerPlaybackStateStore.update { state ->
+                    if (generation != loadingGeneration || state.track?.id != track.id) {
+                        state
+                    } else {
+                        state.copy(
+                            output = PlaybackOutputSnapshot(
+                                requestedSampleRateHz = observed.requestedTrackFormat.sampleRateHz,
+                                audioTrackSampleRateHz = observed.actualTrackFormat?.sampleRateHz,
+                                encodingLabel = androidAudioEncodingLabel(format.encoding),
+                                channelCount = androidAudioChannelCount(format),
+                                routedDeviceName = observed.routedDevice?.productName,
+                                audioTrackFormatMatchesRequested = observed.audioTrackFormatMatchesRequested,
+                                mixerAdvertisesExactFormat = observed.mixerAdvertisesExactFormat,
+                                mixerAdvertisesBitPerfectBehavior = observed.mixerAdvertisesBitPerfectBehavior,
+                                mixerPreferenceAccepted = observed.mixerPreferenceAccepted,
+                                appDspMayModifySamples = observed.appDspMayModifySamples,
+                                replayGainAppliedDb = observed.replayGainAppliedDb,
+                                directPath = observed.directPath,
+                                outputDataFormat = observed.outputDataFormat,
+                            ),
+                        )
+                    }
                 }
-            }
+            }.also { outputProvider = it }.provider
         }
-        outputProvider = output
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(mediaRequestHeaders.getValue("User-Agent"))
             .setDefaultRequestProperties(mediaRequestHeaders)
         val upstreamDataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
         val dataSourceFactory = AndroidDsdPcmDataSourceFactory(this, upstreamDataSourceFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setEnableAudioFloatOutput(true)
+            .setEnableAudioTrackPlaybackParams(directDeviceId == null)
+            .setEnableAudioOutputPlaybackParameters(directDeviceId == null)
         val newPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
-            .setRenderersFactory(DefaultRenderersFactory(this).setEnableAudioFloatOutput(true))
-            .setAudioOutputProvider(output.provider)
+            .setRenderersFactory(renderersFactory)
+            .setAudioOutputProvider(audioOutputProvider)
             .build()
         newPlayer.setAudioAttributes(
             Media3AudioAttributes.Builder()
@@ -1503,6 +1617,78 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .build()
 
+    private fun handleDirectOutputModeChanged(enabled: Boolean, deviceId: String?) {
+        val selectedDeviceId = deviceId?.takeIf(String::isNotBlank) ?: return
+        if (enabled) {
+            // Permission callbacks and device changes are asynchronous; ignore stale intents.
+            if (AndroidPlaybackConnection.currentUsbUacDirectOutputDeviceId() != selectedDeviceId) return
+            if (directUacDeviceId == selectedDeviceId) return
+            directUacDeviceId = selectedDeviceId
+        } else {
+            if (directUacDeviceId != selectedDeviceId) return
+            directUacDeviceId = null
+        }
+        restartCurrentTrackForOutputModeChange()
+    }
+
+    private fun restartCurrentTrackForOutputModeChange() {
+        val current = LazerPlaybackStateStore.snapshot.value
+        val track = current.track ?: return
+        val positionMillis = player?.let { runCatching { it.currentPosition }.getOrNull() }
+            ?.takeIf { it >= 0L } ?: current.positionMillis
+        resolveAndPlay(track, autoplay = requestedPlayWhenReady, startPositionMillis = positionMillis)
+    }
+
+    private fun handleDirectUsbDeviceDetached(deviceId: String) {
+        directOutputProvider?.onDeviceDetached(deviceId)
+        if (directUacDeviceId != deviceId) return
+        AndroidPlaybackConnection.clearUsbUacDirectOutputIfSelected(deviceId)
+        directUacDeviceId = null
+        val track = LazerPlaybackStateStore.snapshot.value.track
+        requestedPlayWhenReady = false
+        releasePlayer()
+        if (track != null) {
+            LazerPlaybackStateStore.update { state ->
+                if (state.track?.id != track.id) state else state.copy(
+                    isPreparing = false,
+                    isPlaying = false,
+                    message = tr("settings.hifi.usb_uac.direct_output.device_changed"),
+                )
+            }
+        }
+        LazerUsbUacDirectOutputStateStore.publish(
+            LazerUsbUacDirectOutputSnapshot(
+                deviceId = deviceId,
+                status = LazerUsbUacDirectOutputStatus.Failed,
+                detail = "settings.hifi.usb_uac.direct_output.device_changed",
+            ),
+        )
+    }
+
+    private fun reportDirectOutputFailure(deviceId: String, error: Throwable) {
+        AndroidPlaybackConnection.clearUsbUacDirectOutputIfSelected(deviceId)
+        if (directUacDeviceId == deviceId) directUacDeviceId = null
+        val status = LazerUsbUacDirectOutputStateStore.state.value
+        if (status.deviceId == deviceId) {
+            LazerUsbUacDirectOutputStateStore.publish(
+                status.copy(
+                    enabled = false,
+                    status = LazerUsbUacDirectOutputStatus.Failed,
+                    detail = "settings.hifi.usb_uac.direct_output.enable_failed",
+                ),
+            )
+        }
+        val message = error.message?.takeIf(String::isNotBlank)
+            ?: tr("settings.hifi.usb_uac.direct_output.failed")
+        LazerPlaybackStateStore.update { state ->
+            if (state.track == null) state else state.copy(
+                isPreparing = false,
+                isPlaying = false,
+                message = message,
+            )
+        }
+    }
+
     private fun audioFocusFailureMessage(): String = if (gatewaySettings.exclusiveAudio) {
         tr("status.exclusive_fail")
     } else {
@@ -1520,6 +1706,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         completedGeneration = null
         outputProvider?.let { provider -> runCatching { provider.close() } }
         outputProvider = null
+        directOutputProvider?.let { provider -> runCatching { provider.close() } }
+        directOutputProvider = null
     }
 
     private fun activeReplayGainResolution(): LazerReplayGainResolution {
@@ -1612,6 +1800,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         cancelPcmTestTone(restoreMusic = false)
         persistCurrentPosition(force = true)
         audioManager.unregisterAudioDeviceCallback(outputDeviceCallback)
+        runCatching { unregisterReceiver(usbDetachReceiver) }
         ++artworkGeneration
         releasePreparationWakeLock()
         artworkTrackId = null
@@ -1636,6 +1825,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val ACTION_EXCLUSIVE_AUDIO_CHANGED = "dev.naominet.lazer.action.EXCLUSIVE_AUDIO_CHANGED"
         const val ACTION_PLAYBACK_INTERFACE_CHANGED = "dev.naominet.lazer.action.PLAYBACK_INTERFACE_CHANGED"
         const val ACTION_USB_AUDIO_TARGET_CHANGED = "dev.naominet.lazer.action.USB_AUDIO_TARGET_CHANGED"
+        const val ACTION_USB_UAC_DIRECT_OUTPUT_CHANGED = "dev.naominet.lazer.action.USB_UAC_DIRECT_OUTPUT_CHANGED"
         const val ACTION_AUDIO_LEVELS_CHANGED = "dev.naominet.lazer.action.AUDIO_LEVELS_CHANGED"
         const val ACTION_EQUALIZER_CHANGED = "dev.naominet.lazer.action.EQUALIZER_CHANGED"
         const val ACTION_REPLAY_GAIN_CHANGED = "dev.naominet.lazer.action.REPLAY_GAIN_CHANGED"
@@ -1651,6 +1841,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val EXTRA_REPLAY_GAIN_MODE = "replay_gain_mode"
         const val EXTRA_USB_TARGET_IDENTITY = "usb_target_identity"
         const val EXTRA_USB_TARGET_USER_CHANGE = "usb_target_user_change"
+        const val EXTRA_USB_UAC_DIRECT_ENABLED = "usb_uac_direct_enabled"
+        const val EXTRA_USB_UAC_DIRECT_DEVICE_ID = "usb_uac_direct_device_id"
 
         private const val CHANNEL_ID = "lazer.playback"
         private const val NOTIFICATION_ID = 2036

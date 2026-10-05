@@ -103,6 +103,31 @@ data class LazerUsbUacVolumeSnapshot(
     val detail: String? = null,
 )
 
+enum class LazerUsbUacDirectOutputStatus {
+    Disabled,
+    AwaitingPermission,
+    Enabled,
+    PermissionDenied,
+    Failed,
+}
+
+/** Explicit Android USB UAC direct-output intent and permission state; separate from volume reads. */
+data class LazerUsbUacDirectOutputSnapshot(
+    val enabled: Boolean = false,
+    val deviceId: String? = null,
+    val status: LazerUsbUacDirectOutputStatus = LazerUsbUacDirectOutputStatus.Disabled,
+    val detail: String? = null,
+)
+
+object LazerUsbUacDirectOutputStateStore {
+    private val mutableState = MutableStateFlow(LazerUsbUacDirectOutputSnapshot())
+    val state: StateFlow<LazerUsbUacDirectOutputSnapshot> = mutableState.asStateFlow()
+
+    fun publish(snapshot: LazerUsbUacDirectOutputSnapshot) {
+        mutableState.value = snapshot
+    }
+}
+
 object LazerUsbUacVolumeStateStore {
     private val mutableState = MutableStateFlow(LazerUsbUacVolumeSnapshot())
     val state: StateFlow<LazerUsbUacVolumeSnapshot> = mutableState.asStateFlow()

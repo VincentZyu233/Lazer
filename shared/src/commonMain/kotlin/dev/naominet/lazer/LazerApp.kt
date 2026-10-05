@@ -1565,6 +1565,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
     val toneState = screen.pcmTestToneState.collectAsState().value
     val usbTargetState = screen.usbAudioTargetSelection.collectAsState().value
     val usbUacState = screen.usbUacVolumeState.collectAsState().value
+    val usbUacDirectOutputState = screen.usbUacDirectOutputState.collectAsState().value
     val playbackSnapshot = screen.playbackSnapshot.collectAsState().value
     val audioSessionSnapshot = screen.audioSessionSnapshot.collectAsState().value
     val playbackOutput = playbackSnapshot.output
@@ -2003,6 +2004,69 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         )
                         val operationRunning = usbUacState.status == LazerUsbUacVolumeStatus.AwaitingPermission ||
                             usbUacState.status == LazerUsbUacVolumeStatus.Reading
+                        if (screen.supportsUsbUacDirectOutput) {
+                            val directOutputAwaitingPermission =
+                                usbUacDirectOutputState.status == LazerUsbUacDirectOutputStatus.AwaitingPermission
+                            val directOutputEnabled = usbUacDirectOutputState.enabled
+                            val directOutputStatusKey = when (usbUacDirectOutputState.status) {
+                                LazerUsbUacDirectOutputStatus.Disabled -> null
+                                LazerUsbUacDirectOutputStatus.AwaitingPermission ->
+                                    "settings.hifi.usb_uac.direct_output.permission_prompt"
+                                LazerUsbUacDirectOutputStatus.Enabled ->
+                                    "settings.hifi.usb_uac.direct_output.enabled"
+                                LazerUsbUacDirectOutputStatus.PermissionDenied ->
+                                    usbUacDirectOutputState.detail
+                                        ?: "settings.hifi.usb_uac.direct_output.permission_denied"
+                                LazerUsbUacDirectOutputStatus.Failed ->
+                                    usbUacDirectOutputState.detail
+                                        ?: "settings.hifi.usb_uac.direct_output.failed"
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .tapClickable(role = Role.Switch) {
+                                        if (!operationRunning && !directOutputAwaitingPermission &&
+                                            (directOutputEnabled || selectedUacDevice != null)
+                                        ) {
+                                            screen.setUsbUacDirectOutput(!directOutputEnabled)
+                                        }
+                                    },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        tr("settings.hifi.usb_uac.direct_output.title"),
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(
+                                        tr("settings.hifi.usb_uac.direct_output.hint"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                    directOutputStatusKey?.let { key ->
+                                        Text(
+                                            tr(key),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                LazerSwitch(
+                                    engine = controller.themeEngine,
+                                    checked = directOutputEnabled,
+                                    onCheckedChange = { enabled ->
+                                        if (!operationRunning && !directOutputAwaitingPermission &&
+                                            (!enabled || selectedUacDevice != null)
+                                        ) {
+                                            screen.setUsbUacDirectOutput(enabled)
+                                        }
+                                    },
+                                    enabled = !operationRunning && !directOutputAwaitingPermission &&
+                                        (directOutputEnabled || selectedUacDevice != null),
+                                )
+                            }
+                        }
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             ThemeTextButton(
                                 onClick = screen::refreshUsbUacDevices,

@@ -1,17 +1,159 @@
 cmake_minimum_required(VERSION 3.21)
-project(lazer_audio LANGUAGES CXX)
+project(lazer_audio LANGUAGES C CXX)
+
+option(LAZER_AUDIO_BUILD_PROBE "Build the lazer-audio-probe console harness" OFF)
+option(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL
+    "Allow the test-only ALSA null PCM route (requires a Linux probe build)" OFF)
+
+if(ANDROID)
+    option(LAZER_ANDROID_BUILD_UAC2 "Build Android UAC2 USB direct-output native transport" OFF)
+    option(LAZER_ANDROID_BUILD_DSD "Build the Android DSD decoder" OFF)
+    if(NOT LAZER_ANDROID_BUILD_UAC2 AND NOT LAZER_ANDROID_BUILD_DSD)
+        message(FATAL_ERROR
+            "No Android native target was requested. Set LAZER_ANDROID_BUILD_UAC2=ON and/or "
+            "LAZER_ANDROID_BUILD_DSD=ON.")
+    endif()
+    foreach(_lazer_android_abi IN ITEMS "${ANDROID_ABI}" "${CMAKE_ANDROID_ARCH_ABI}")
+        if(_lazer_android_abi AND NOT _lazer_android_abi MATCHES "^(arm64-v8a|x86_64)$")
+            message(FATAL_ERROR
+                "The Android native audio targets support arm64-v8a and x86_64; "
+                "requested ${_lazer_android_abi}.")
+        endif()
+    endforeach()
+    find_package(Threads REQUIRED)
+
+    if(LAZER_ANDROID_BUILD_UAC2)
+        # Pin the upstream release commit and archive hash. The source set below follows libusb's
+        # own android/jni/libusb.mk, keeping its Linux usbfs backend and Android feature config in
+        # sync without building the unrelated DSD/FFmpeg SDK.
+        include(FetchContent)
+        if(POLICY CMP0169)
+            cmake_policy(SET CMP0169 OLD)
+        endif()
+        FetchContent_Declare(libusb
+            URL "https://codeload.github.com/libusb/libusb/tar.gz/87a55632db62c9bdc58cd31d3ccfa673f1bb017f"
+            URL_HASH SHA256=26733c3eee2475c062e14f80a62ece4b33ee3b33fc0c88b2758964412a42b7e0
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_GetProperties(libusb)
+        if(NOT libusb_POPULATED)
+            FetchContent_Populate(libusb)
+        endif()
+
+        set(_lazer_libusb_root "${libusb_SOURCE_DIR}")
+        add_library(usb-1.0 SHARED
+            "${_lazer_libusb_root}/libusb/core.c"
+            "${_lazer_libusb_root}/libusb/descriptor.c"
+            "${_lazer_libusb_root}/libusb/hotplug.c"
+            "${_lazer_libusb_root}/libusb/io.c"
+            "${_lazer_libusb_root}/libusb/sync.c"
+            "${_lazer_libusb_root}/libusb/strerror.c"
+            "${_lazer_libusb_root}/libusb/os/linux_usbfs.c"
+            "${_lazer_libusb_root}/libusb/os/events_posix.c"
+            "${_lazer_libusb_root}/libusb/os/threads_posix.c"
+            "${_lazer_libusb_root}/libusb/os/linux_netlink.c")
+        target_include_directories(usb-1.0 PRIVATE
+            "${_lazer_libusb_root}/android"
+            "${_lazer_libusb_root}/libusb"
+            "${_lazer_libusb_root}/libusb/os")
+        target_compile_features(usb-1.0 PRIVATE c_std_11)
+        target_compile_options(usb-1.0 PRIVATE -fvisibility=hidden -pthread)
+        target_link_libraries(usb-1.0 PRIVATE Threads::Threads log)
+        set_target_properties(usb-1.0 PROPERTIES
+            OUTPUT_NAME "usb-1.0"
+            C_EXTENSIONS ON
+            POSITION_INDEPENDENT_CODE ON)
+
+        add_library(lazer-uac2 SHARED
+            src/android_uac2_jni.cpp
+            src/android_uac2_iso_transport.cpp
+            src/android_uac2_packetizer.cpp)
+        target_include_directories(lazer-uac2 PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            "${_lazer_libusb_root}/libusb")
+        target_link_libraries(lazer-uac2 PRIVATE usb-1.0 Threads::Threads log)
+        target_compile_features(lazer-uac2 PRIVATE cxx_std_20)
+        set_target_properties(lazer-uac2 PROPERTIES
+            CXX_EXTENSIONS OFF
+            POSITION_INDEPENDENT_CODE ON)
+    endif()
+
+    if(LAZER_ANDROID_BUILD_DSD)
+        if(ANDROID_PLATFORM MATCHES "^android-([0-9]+)$")
+            set(_lazer_android_api "${CMAKE_MATCH_1}")
+        elseif(ANDROID_PLATFORM MATCHES "^([0-9]+)$")
+            set(_lazer_android_api "${CMAKE_MATCH_1}")
+        elseif(CMAKE_ANDROID_API MATCHES "^[0-9]+$")
+            set(_lazer_android_api "${CMAKE_ANDROID_API}")
+        else()
+            message(FATAL_ERROR "Set ANDROID_PLATFORM to android-24 or newer for the Android DSD target.")
+        endif()
+        if(_lazer_android_api LESS 24)
+            message(FATAL_ERROR "The Android DSD FFmpeg SDK requires API 24 or newer.")
+        endif()
+
+        # FFmpeg is required only by the DSD decoder. USB transport-only builds remain independent
+        # of this external SDK and its configure-time downloads.
+        set(LAZER_FFMPEG_ROOT "" CACHE PATH "Directory holding the prebuilt FFmpeg include/ lib/ bin/")
+        list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+        find_package(LazerFFmpeg REQUIRED)
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_INCLUDES ${LAZER_FFMPEG_INCLUDE_DIRS})
+        unset(LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS CACHE)
+        check_cxx_source_compiles("\
+            #include <libavutil/channel_layout.h>\n\
+            #include <libavutil/samplefmt.h>\n\
+            #include <libswresample/swresample.h>\n\
+            #include <type_traits>\n\
+            int main() {\n\
+                static_assert(AV_SAMPLE_FMT_DSD >= 0);\n\
+                AVChannelLayout layout = AV_CHANNEL_LAYOUT_STEREO;\n\
+                using SetOpts2 = decltype(&swr_alloc_set_opts2);\n\
+                static_assert(std::is_pointer<SetOpts2>::value);\n\
+                return layout.nb_channels != 2;\n\
+            }" LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS)
+        unset(CMAKE_REQUIRED_INCLUDES)
+        if(NOT LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS)
+            message(FATAL_ERROR
+                "The native HiFi engine requires FFmpeg with AV_SAMPLE_FMT_DSD, AVChannelLayout, and "
+                "swr_alloc_set_opts2. Do not use a distro/Homebrew FFmpeg without those APIs; configure "
+                "with -DLAZER_FFMPEG_ROOT=<DSD-capable FFmpeg prefix> or FFMPEG_ROOT.")
+        endif()
+
+        add_library(lazer-audio-dsd SHARED
+            src/common.cpp
+            src/dff_dsf_reader.cpp
+            src/source.cpp
+            src/dop_packer.cpp
+            src/native_dsd_packer.cpp
+            src/dsd_pcm_decoder.cpp
+            src/android_dsd_jni.cpp)
+        target_include_directories(lazer-audio-dsd PRIVATE
+            "${CMAKE_CURRENT_LIST_DIR}/include"
+            "${CMAKE_CURRENT_LIST_DIR}/src"
+            ${LAZER_FFMPEG_INCLUDE_DIRS})
+        target_link_libraries(lazer-audio-dsd PRIVATE ${LAZER_FFMPEG_LIBRARIES} Threads::Threads)
+        target_compile_features(lazer-audio-dsd PRIVATE cxx_std_20)
+        set_target_properties(lazer-audio-dsd PROPERTIES
+            CXX_EXTENSIONS OFF
+            POSITION_INDEPENDENT_CODE ON)
+    endif()
+
+    if((ANDROID_STL AND NOT ANDROID_STL STREQUAL "c++_static") OR
+       (CMAKE_ANDROID_STL_TYPE AND NOT CMAKE_ANDROID_STL_TYPE STREQUAL "c++_static"))
+        message(FATAL_ERROR
+            "Android native audio targets currently expect the Android c++_static runtime; "
+            "configure with -DANDROID_STL=c++_static.")
+    endif()
+    message(STATUS "Building Android native audio targets: UAC2=${LAZER_ANDROID_BUILD_UAC2}, DSD=${LAZER_ANDROID_BUILD_DSD}")
+    return()
+endif()
 
 # FFmpeg stays outside the repository. Windows consumes the supplied import-library bundle;
 # Linux/macOS use pkg-config unless -DLAZER_FFMPEG_ROOT=<dir> or FFMPEG_ROOT points to a shared
-# development package with lib/pkgconfig metadata. All builds require the upstream DSD sample
-# format/API; ordinary distro packages may be too old or lack DSD support entirely.
+# development package with lib/pkgconfig metadata. All desktop builds require DSD-capable FFmpeg.
 set(LAZER_FFMPEG_ROOT "" CACHE PATH "Directory holding the prebuilt FFmpeg include/ lib/ bin/")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 find_package(LazerFFmpeg REQUIRED)
-
-# Fail at configure time with an actionable message instead of emitting dozens of confusing
-# source.cpp errors when a system package lacks AV_SAMPLE_FMT_DSD, modern channel layouts or the
-# matching swresample API. This is a mandatory feature check: there is no non-DSD build mode.
 include(CheckCXXSourceCompiles)
 set(CMAKE_REQUIRED_INCLUDES ${LAZER_FFMPEG_INCLUDE_DIRS})
 unset(LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS CACHE)
@@ -33,61 +175,6 @@ if(NOT LAZER_FFMPEG_HAS_REQUIRED_DSD_APIS)
         "The native HiFi engine requires FFmpeg with AV_SAMPLE_FMT_DSD, AVChannelLayout, and "
         "swr_alloc_set_opts2. Do not use a distro/Homebrew FFmpeg without those APIs; configure "
         "with -DLAZER_FFMPEG_ROOT=<DSD-capable FFmpeg prefix> or FFMPEG_ROOT.")
-endif()
-option(LAZER_AUDIO_BUILD_PROBE "Build the lazer-audio-probe console harness" OFF)
-option(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL
-    "Allow the test-only ALSA null PCM route (requires a Linux probe build)" OFF)
-
-if(ANDROID)
-    foreach(_lazer_android_abi IN ITEMS "${ANDROID_ABI}" "${CMAKE_ANDROID_ARCH_ABI}")
-        if(_lazer_android_abi AND NOT _lazer_android_abi MATCHES "^(arm64-v8a|x86_64)$")
-            message(FATAL_ERROR
-                "The Android DSD FFmpeg SDK supports arm64-v8a and x86_64; "
-                "requested ${_lazer_android_abi}.")
-        endif()
-    endforeach()
-    if(ANDROID_PLATFORM MATCHES "^android-([0-9]+)$")
-        set(_lazer_android_api "${CMAKE_MATCH_1}")
-    elseif(ANDROID_PLATFORM MATCHES "^([0-9]+)$")
-        set(_lazer_android_api "${CMAKE_MATCH_1}")
-    elseif(CMAKE_ANDROID_API MATCHES "^[0-9]+$")
-        set(_lazer_android_api "${CMAKE_ANDROID_API}")
-    else()
-        message(FATAL_ERROR "Set ANDROID_PLATFORM to android-24 or newer for the Android DSD target.")
-    endif()
-    if(_lazer_android_api LESS 24)
-        message(FATAL_ERROR "The Android DSD FFmpeg SDK requires API 24 or newer.")
-    endif()
-
-    find_package(Threads REQUIRED)
-    add_library(lazer-audio-dsd SHARED
-        src/common.cpp
-        src/dff_dsf_reader.cpp
-        src/source.cpp
-        src/dop_packer.cpp
-        src/native_dsd_packer.cpp
-        src/dsd_pcm_decoder.cpp
-        src/android_dsd_jni.cpp)
-    target_include_directories(lazer-audio-dsd PRIVATE
-        "${CMAKE_CURRENT_LIST_DIR}/include"
-        "${CMAKE_CURRENT_LIST_DIR}/src"
-        ${LAZER_FFMPEG_INCLUDE_DIRS})
-    target_link_libraries(lazer-audio-dsd PRIVATE
-        ${LAZER_FFMPEG_LIBRARIES}
-        Threads::Threads)
-    target_compile_features(lazer-audio-dsd PRIVATE cxx_std_20)
-    set_target_properties(lazer-audio-dsd PROPERTIES
-        CXX_EXTENSIONS OFF
-        POSITION_INDEPENDENT_CODE ON)
-
-    if((ANDROID_STL AND NOT ANDROID_STL STREQUAL "c++_static") OR
-       (CMAKE_ANDROID_STL_TYPE AND NOT CMAKE_ANDROID_STL_TYPE STREQUAL "c++_static"))
-        message(FATAL_ERROR
-            "lazer-audio-dsd currently expects the single-library Android c++_static runtime; "
-            "configure with -DANDROID_STL=c++_static.")
-    endif()
-    message(STATUS "Building Android DSD decoder shared library with Android's c++_static runtime")
-    return()
 endif()
 
 set(LAZER_AUDIO_PLATFORM_SOURCES "")

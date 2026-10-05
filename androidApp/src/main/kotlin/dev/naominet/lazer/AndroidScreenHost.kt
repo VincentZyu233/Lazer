@@ -119,11 +119,20 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
         refreshDevices = ::enumerateUsbUacDevices,
         publish = ::publishUsbUacVolume,
     )
+    private val usbUacDirectOutputSession = AndroidUsbUacDirectOutputSession(
+        initialSnapshot = LazerUsbUacDirectOutputStateStore.state.value,
+        requestPermission = ::requestUsbUacDirectOutputPermission,
+        setOutput = { enabled, deviceId ->
+            AndroidPlaybackConnection.setUsbUacDirectOutput(activity, enabled, deviceId)
+        },
+        publish = ::publishUsbUacDirectOutput,
+    )
     private val usbUacReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device = intent.usbDeviceExtra() ?: return
+                    usbUacDirectOutputSession.onDeviceDetached(device.deviceName)
                     usbUacVolumeSession.onDeviceDetached(device.deviceName)
                     refreshUsbUacDevices()
                 }
@@ -131,6 +140,8 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> refreshUsbUacDevices()
 
                 ACTION_USB_UAC_PERMISSION -> onUsbUacPermissionResult(intent)
+
+                ACTION_USB_UAC_DIRECT_OUTPUT_PERMISSION -> onUsbUacDirectOutputPermissionResult(intent)
             }
         }
     }
@@ -241,6 +252,10 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
 
     override val usbUacVolumeState get() = mutableUsbUacVolume
 
+    override val supportsUsbUacDirectOutput: Boolean get() = true
+
+    override val usbUacDirectOutputState get() = LazerUsbUacDirectOutputStateStore.state
+
     override val pcmTestToneState get() = LazerPcmTestToneStateStore.state
 
     override fun playPcmTestTone(format: LazerPcmTestFormat) = AndroidPlaybackConnection.playPcmTestTone(activity, format)
@@ -259,7 +274,18 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
     }
 
     override fun refreshUsbUacDevices() {
-        usbUacVolumeSession.updateDevices(enumerateUsbUacDevices())
+        val current = mutableUsbUacVolume.value
+        val devices = enumerateUsbUacDevices()
+        val oldSelection = current.selectedDeviceId?.let { id -> current.devices.singleOrNull { it.id == id } }
+        val replacement = current.selectedDeviceId?.let { id -> devices.singleOrNull { it.id == id } }
+        val selectionWillBeCleared = current.selectedDeviceId != null &&
+            (replacement == null || oldSelection == null || replacement.vendorId != oldSelection.vendorId ||
+                replacement.productId != oldSelection.productId)
+        if (selectionWillBeCleared) {
+            // Ask playback to tear down direct output while the old selection is still identifiable.
+            usbUacDirectOutputSession.onSelectedDeviceChanged(null)
+        }
+        usbUacVolumeSession.updateDevices(devices)
     }
 
     private fun enumerateUsbUacDevices(): List<LazerUsbUacDeviceOption> = runCatching {
@@ -281,7 +307,35 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
         }.getOrDefault(emptyList())
 
     override fun selectUsbUacDevice(identity: String?) {
+        val current = mutableUsbUacVolume.value
+        if (identity == current.selectedDeviceId) return
+        if (identity != null && current.devices.none { it.id == identity }) return
+        usbUacDirectOutputSession.onSelectedDeviceChanged(identity)
         usbUacVolumeSession.selectDevice(identity)
+    }
+
+    override fun setUsbUacDirectOutput(enabled: Boolean) {
+        val volume = mutableUsbUacVolume.value
+        val selectedDevice = volume.devices.singleOrNull { it.id == volume.selectedDeviceId }
+        if (!enabled) {
+            usbUacDirectOutputSession.disable(volume.selectedDeviceId)
+            return
+        }
+
+        val attachedDevice = selectedDevice?.let { option ->
+            usbManager.deviceList[option.id]?.takeIf {
+                it.vendorId == option.vendorId && it.productId == option.productId &&
+                    hasUsbAudioControlInterface(it)
+            }
+        }
+        if (attachedDevice == null || selectedDevice == null) {
+            usbUacDirectOutputSession.enable(selectedDevice = null, hasPermission = false)
+            return
+        }
+        usbUacDirectOutputSession.enable(
+            selectedDevice = selectedDevice,
+            hasPermission = runCatching { usbManager.hasPermission(attachedDevice) }.getOrDefault(false),
+        )
     }
 
     override fun readUsbUacVolume() {
@@ -358,6 +412,7 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
             addAction(ACTION_USB_UAC_PERMISSION)
+            addAction(ACTION_USB_UAC_DIRECT_OUTPUT_PERMISSION)
         }
         runCatching {
             ContextCompat.registerReceiver(
@@ -384,9 +439,77 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
         )
     }
 
+    private fun requestUsbUacDirectOutputPermission(request: AndroidUsbUacDirectOutputRequest) {
+        val device = usbManager.deviceList[request.deviceId]
+            ?.takeIf {
+                it.vendorId == request.vendorId && it.productId == request.productId &&
+                    hasUsbAudioControlInterface(it)
+            }
+            ?: error("USB audio device is no longer attached")
+        val permissionIntent = PendingIntent.getBroadcast(
+            activity,
+            request.requestId.toInt(),
+            Intent(ACTION_USB_UAC_DIRECT_OUTPUT_PERMISSION)
+                .setPackage(activity.packageName)
+                .putExtra(EXTRA_USB_UAC_DIRECT_OUTPUT_REQUEST_ID, request.requestId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+        )
+        usbManager.requestPermission(device, permissionIntent)
+    }
+
+    private fun onUsbUacDirectOutputPermissionResult(intent: Intent) {
+        val callbackDevice = intent.usbDeviceExtra() ?: return
+        val requestId = if (intent.hasExtra(EXTRA_USB_UAC_DIRECT_OUTPUT_REQUEST_ID)) {
+            intent.getLongExtra(EXTRA_USB_UAC_DIRECT_OUTPUT_REQUEST_ID, Long.MIN_VALUE)
+        } else null
+        val option = LazerUsbUacDeviceOption(
+            id = callbackDevice.deviceName,
+            label = callbackDevice.productName?.toString().orEmpty(),
+            vendorId = callbackDevice.vendorId,
+            productId = callbackDevice.productId,
+        )
+        val volume = mutableUsbUacVolume.value
+        val selectedDevice = volume.devices.singleOrNull { it.id == volume.selectedDeviceId }
+        val attachedDevice = usbManager.deviceList[callbackDevice.deviceName]
+            ?.takeIf {
+                it.vendorId == callbackDevice.vendorId && it.productId == callbackDevice.productId &&
+                    hasUsbAudioControlInterface(it)
+            }
+            ?.let { attached ->
+                LazerUsbUacDeviceOption(
+                    id = attached.deviceName,
+                    label = attached.productName?.toString().orEmpty(),
+                    vendorId = attached.vendorId,
+                    productId = attached.productId,
+                )
+            }
+        val hasPermission = attachedDevice?.let { option ->
+            usbManager.deviceList[option.id]?.let { current ->
+                current.vendorId == option.vendorId && current.productId == option.productId &&
+                    runCatching { usbManager.hasPermission(current) }.getOrDefault(false)
+            }
+        } == true
+        usbUacDirectOutputSession.onPermissionResult(
+            result = AndroidUsbUacDirectOutputPermissionResult(
+                requestId = requestId,
+                deviceId = option.id,
+                vendorId = option.vendorId,
+                productId = option.productId,
+                granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false),
+            ),
+            selectedDevice = selectedDevice,
+            attachedDevice = attachedDevice,
+            hasPermission = hasPermission,
+        )
+    }
+
     private fun publishUsbUacVolume(snapshot: LazerUsbUacVolumeSnapshot) {
         mutableUsbUacVolume.value = snapshot
         LazerUsbUacVolumeStateStore.publish(snapshot)
+    }
+
+    private fun publishUsbUacDirectOutput(snapshot: LazerUsbUacDirectOutputSnapshot) {
+        LazerUsbUacDirectOutputStateStore.publish(snapshot)
     }
 
     private fun hasUsbAudioControlInterface(device: UsbDevice): Boolean =
@@ -514,7 +637,9 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
 
     private companion object {
         const val ACTION_USB_UAC_PERMISSION = "dev.naominet.lazer.USB_UAC_PERMISSION"
+        const val ACTION_USB_UAC_DIRECT_OUTPUT_PERMISSION = "dev.naominet.lazer.USB_UAC_DIRECT_OUTPUT_PERMISSION"
         const val EXTRA_USB_UAC_GENERATION = "dev.naominet.lazer.USB_UAC_GENERATION"
+        const val EXTRA_USB_UAC_DIRECT_OUTPUT_REQUEST_ID = "dev.naominet.lazer.USB_UAC_DIRECT_OUTPUT_REQUEST_ID"
         const val USB_SUBCLASS_AUDIO_CONTROL = 1
 
         const val KEY_BACKGROUND = "lazer.background"
