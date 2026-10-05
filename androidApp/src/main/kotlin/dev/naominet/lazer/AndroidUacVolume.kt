@@ -542,6 +542,7 @@ internal class AndroidUsbConnectionControlTransfer(
 internal class AndroidUacHardwareVolume(
     private val control: AndroidUacVolumeControl,
     private val transfer: AndroidUsbControlTransfer,
+    private val setCurrent: ((transfer: () -> Int) -> Int)? = null,
 ) {
     fun readVolumeRanges(): List<AndroidUacVolumeRange> = when (control.version) {
         AndroidUacVersion.Uac1 -> {
@@ -576,7 +577,7 @@ internal class AndroidUacHardwareVolume(
         require(ranges.any { it.contains(volumeDb256) }) {
             "USB Audio Class volume is outside the advertised range or resolution"
         }
-        val sent = transfer.transfer(request)
+        val sent = setCurrent?.invoke { transfer.transfer(request) } ?: transfer.transfer(request)
         check(sent == request.length) { "USB Audio Class SET_CUR failed ($sent)" }
         return readCurrentVolume()
     }

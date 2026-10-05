@@ -60,30 +60,71 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) = refreshAudioOutputDevices()
     }
     private val mutableUsbUacVolume = MutableStateFlow(LazerUsbUacVolumeSnapshot())
-    private var usbUacGeneration = 0L
-    private var pendingUsbUacRequest: PendingUsbUacRequest? = null
+    private val usbUacVolumeGateway = object : AndroidUacVolumeGateway {
+        override fun findDevice(deviceId: String): AndroidUacDeviceIdentity? =
+            usbManager.deviceList[deviceId]?.let(::usbUacIdentity)
+
+        override fun hasPermission(device: AndroidUacDeviceIdentity): Boolean =
+            findUsbUacDevice(device)?.let(usbManager::hasPermission) == true
+
+        override fun requestPermission(request: AndroidUacPermissionRequest) {
+            val device = findUsbUacDevice(request.device)
+                ?: error("USB audio device is no longer attached")
+            val intent = Intent(ACTION_USB_UAC_PERMISSION)
+                .setPackage(activity.packageName)
+                .putExtra(EXTRA_USB_UAC_GENERATION, request.generation)
+            val permissionIntent = PendingIntent.getBroadcast(
+                activity,
+                request.generation.toInt(),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+            )
+            usbManager.requestPermission(device, permissionIntent)
+        }
+
+        override suspend fun perform(
+            request: AndroidUacPermissionRequest,
+            setCurrent: (transfer: () -> Int) -> Int,
+        ): AndroidUacVolumeOperationResult {
+            val device = findUsbUacDevice(request.device)
+                ?: error("USB audio device is no longer attached")
+            check(usbManager.hasPermission(device)) { "USB permission is no longer granted" }
+            val connection = usbManager.openDevice(device)
+                ?: error("USB device could not be opened")
+            try {
+                return performAndroidUacVolumeOperation(
+                    descriptors = connection.rawDescriptors,
+                    transfer = AndroidUsbConnectionControlTransfer(connection),
+                    increase = request.increase,
+                    setCurrent = { writeTransfer ->
+                        setCurrent {
+                            val currentDevice = findUsbUacDevice(request.device)
+                                ?: error("USB audio device is no longer attached")
+                            check(usbManager.hasPermission(currentDevice)) {
+                                "USB permission is no longer granted"
+                            }
+                            writeTransfer()
+                        }
+                    },
+                )
+            } finally {
+                connection.close()
+            }
+        }
+    }
+    private val usbUacVolumeSession = AndroidUsbUacVolumeSession(
+        gateway = usbUacVolumeGateway,
+        scope = activity.lifecycleScope,
+        initialSnapshot = mutableUsbUacVolume.value,
+        refreshDevices = ::enumerateUsbUacDevices,
+        publish = ::publishUsbUacVolume,
+    )
     private val usbUacReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val device = intent.usbDeviceExtra() ?: return
-                    if (mutableUsbUacVolume.value.selectedDeviceId == device.deviceName) {
-                        usbUacGeneration += 1
-                        pendingUsbUacRequest = null
-                        publishUsbUacVolume(
-                            mutableUsbUacVolume.value.copy(
-                                devices = mutableUsbUacVolume.value.devices.filterNot { it.id == device.deviceName },
-                                selectedDeviceId = null,
-                                status = LazerUsbUacVolumeStatus.Idle,
-                                currentDb256 = null,
-                                muted = false,
-                                ranges = emptyList(),
-                                canDecrease = false,
-                                canIncrease = false,
-                                detail = "settings.hifi.usb_uac.device_removed",
-                            ),
-                        )
-                    }
+                    usbUacVolumeSession.onDeviceDetached(device.deviceName)
                     refreshUsbUacDevices()
                 }
 
@@ -216,7 +257,10 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
     }
 
     override fun refreshUsbUacDevices() {
-        val devices = runCatching {
+        usbUacVolumeSession.updateDevices(enumerateUsbUacDevices())
+    }
+
+    private fun enumerateUsbUacDevices(): List<LazerUsbUacDeviceOption> = runCatching {
             usbManager.deviceList.values
                 .filter(::hasUsbAudioControlInterface)
                 .map { device ->
@@ -233,52 +277,17 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
                 }
                 .sortedBy(LazerUsbUacDeviceOption::label)
         }.getOrDefault(emptyList())
-        val state = mutableUsbUacVolume.value
-        val selectedStillConnected = state.selectedDeviceId?.let { selectedId ->
-            devices.singleOrNull { it.id == selectedId }
-        }
-        if (state.selectedDeviceId != null && selectedStillConnected == null) {
-            usbUacGeneration += 1
-            pendingUsbUacRequest = null
-        }
-        publishUsbUacVolume(
-            if (selectedStillConnected == null && state.selectedDeviceId != null) {
-                state.copy(
-                    devices = devices,
-                    selectedDeviceId = null,
-                    status = LazerUsbUacVolumeStatus.Idle,
-                    currentDb256 = null,
-                    muted = false,
-                    ranges = emptyList(),
-                    canDecrease = false,
-                    canIncrease = false,
-                    detail = "settings.hifi.usb_uac.device_removed",
-                )
-            } else {
-                state.copy(devices = devices)
-            },
-        )
-    }
 
     override fun selectUsbUacDevice(identity: String?) {
-        val devices = mutableUsbUacVolume.value.devices
-        if (identity != null && devices.none { it.id == identity }) return
-        usbUacGeneration += 1
-        pendingUsbUacRequest = null
-        publishUsbUacVolume(
-            LazerUsbUacVolumeSnapshot(
-                devices = devices,
-                selectedDeviceId = identity,
-            ),
-        )
+        usbUacVolumeSession.selectDevice(identity)
     }
 
     override fun readUsbUacVolume() {
-        requestUsbUacOperation(increase = null)
+        usbUacVolumeSession.request(increase = null)
     }
 
     override fun adjustUsbUacVolume(increase: Boolean) {
-        requestUsbUacOperation(increase)
+        usbUacVolumeSession.request(increase)
     }
 
     fun refreshPcmTestToneCapabilities() {
@@ -339,8 +348,7 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
             runCatching { activity.unregisterReceiver(usbUacReceiver) }
             usbUacReceiverRegistered = false
         }
-        usbUacGeneration += 1
-        pendingUsbUacRequest = null
+        usbUacVolumeSession.close()
     }
 
     private fun registerUsbUacReceiver() {
@@ -360,189 +368,18 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
         }
     }
 
-    private fun requestUsbUacOperation(increase: Boolean?) {
-        val state = mutableUsbUacVolume.value
-        if (state.status == LazerUsbUacVolumeStatus.AwaitingPermission ||
-            state.status == LazerUsbUacVolumeStatus.Reading
-        ) return
-        val id = state.selectedDeviceId ?: return
-        val option = state.devices.singleOrNull { it.id == id }
-        val device = usbManager.deviceList[id]
-        if (option == null || device == null ||
-            device.vendorId != option.vendorId || device.productId != option.productId
-        ) {
-            refreshUsbUacDevices()
-            publishUsbUacVolume(mutableUsbUacVolume.value.copy(status = LazerUsbUacVolumeStatus.Failed,
-                detail = "settings.hifi.usb_uac.device_removed"))
-            return
-        }
-
-        usbUacGeneration += 1
-        val request = PendingUsbUacRequest(id, device.vendorId, device.productId, increase, usbUacGeneration)
-        if (usbManager.hasPermission(device)) {
-            performUsbUacOperation(request, device)
-            return
-        }
-        pendingUsbUacRequest = request
-        publishUsbUacVolume(state.copy(
-            status = LazerUsbUacVolumeStatus.AwaitingPermission,
-            currentDb256 = null,
-            muted = false,
-            ranges = emptyList(),
-            canDecrease = false,
-            canIncrease = false,
-            detail = "settings.hifi.usb_uac.permission_prompt",
-        ))
-        runCatching {
-            val intent = Intent(ACTION_USB_UAC_PERMISSION)
-                .setPackage(activity.packageName)
-                .putExtra(EXTRA_USB_UAC_GENERATION, request.generation)
-            val permissionIntent = PendingIntent.getBroadcast(
-                activity,
-                request.generation.toInt(),
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
-            )
-            usbManager.requestPermission(device, permissionIntent)
-        }.onFailure {
-            pendingUsbUacRequest = null
-            publishUsbUacVolume(mutableUsbUacVolume.value.copy(
-                status = LazerUsbUacVolumeStatus.Failed,
-                detail = "settings.hifi.usb_uac.permission_failed",
-            ))
-        }
-    }
-
     private fun onUsbUacPermissionResult(intent: Intent) {
-        val request = pendingUsbUacRequest ?: return
         val grantedDevice = intent.usbDeviceExtra() ?: return
         val callbackGeneration = if (intent.hasExtra(EXTRA_USB_UAC_GENERATION)) {
             intent.getLongExtra(EXTRA_USB_UAC_GENERATION, Long.MIN_VALUE)
         } else null
-        if (!androidUacPermissionCallbackMatches(
-                requestDeviceId = request.deviceId,
-                requestVendorId = request.vendorId,
-                requestProductId = request.productId,
-                requestGeneration = request.generation,
-                currentGeneration = usbUacGeneration,
-                selectedDeviceId = mutableUsbUacVolume.value.selectedDeviceId,
-                callbackDeviceId = grantedDevice.deviceName,
-                callbackVendorId = grantedDevice.vendorId,
-                callbackProductId = grantedDevice.productId,
-                callbackGeneration = callbackGeneration,
-            )
-        ) return
-        pendingUsbUacRequest = null
-        val device = usbManager.deviceList[request.deviceId]
-        if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false).not()) {
-            publishUsbUacVolume(mutableUsbUacVolume.value.copy(
-                status = LazerUsbUacVolumeStatus.PermissionDenied,
-                detail = "settings.hifi.usb_uac.permission_denied",
-            ))
-            return
-        }
-        if (device == null || device.vendorId != request.vendorId || device.productId != request.productId) {
-            refreshUsbUacDevices()
-            return
-        }
-        performUsbUacOperation(request, device)
-    }
-
-    private fun performUsbUacOperation(request: PendingUsbUacRequest, device: UsbDevice) {
-        publishUsbUacVolume(mutableUsbUacVolume.value.copy(
-            status = LazerUsbUacVolumeStatus.Reading,
-            detail = null,
-            canDecrease = false,
-            canIncrease = false,
-        ))
-        activity.lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val connection = usbManager.openDevice(device)
-                        ?: error("USB device could not be opened")
-                    try {
-                        val control = findAndroidUacPlaybackVolumeControl(connection.rawDescriptors)
-                            ?: return@runCatching UsbUacOperationResult.Unsupported
-                        val volume = AndroidUacHardwareVolume(
-                            control,
-                            AndroidUsbConnectionControlTransfer(connection),
-                        )
-                        val ranges = volume.readVolumeRanges()
-                        val current = volume.readCurrentVolume()
-                        val updated = if (request.increase == null) {
-                            current
-                        } else {
-                            val direction = if (request.increase) AndroidUacVolumeDirection.Up
-                            else AndroidUacVolumeDirection.Down
-                            val target = nextAndroidUacVolumeValue(current, ranges, direction)
-                                ?: return@runCatching UsbUacOperationResult.Ready(current, ranges)
-                            volume.setAndReadBackDb256(target, ranges)
-                        }
-                        UsbUacOperationResult.Ready(updated, ranges)
-                    } finally {
-                        connection.close()
-                    }
-                }
-            }
-            if (request.generation != usbUacGeneration ||
-                mutableUsbUacVolume.value.selectedDeviceId != request.deviceId
-            ) return@launch
-            val attachedDevice = usbManager.deviceList[request.deviceId]
-            if (attachedDevice == null || attachedDevice.vendorId != request.vendorId ||
-                attachedDevice.productId != request.productId
-            ) {
-                refreshUsbUacDevices()
-                return@launch
-            }
-            result.onSuccess { operation ->
-                when (operation) {
-                    UsbUacOperationResult.Unsupported -> publishUsbUacVolume(
-                        mutableUsbUacVolume.value.copy(
-                            status = LazerUsbUacVolumeStatus.Unsupported,
-                            currentDb256 = null,
-                            muted = false,
-                            ranges = emptyList(),
-                            detail = "settings.hifi.usb_uac.unsupported",
-                        ),
-                    )
-
-                    is UsbUacOperationResult.Ready -> {
-                        val finiteDb256 = (operation.volume as? AndroidUacVolumeValue.Finite)?.db256
-                        val canDecrease = nextAndroidUacVolumeValue(
-                            operation.volume,
-                            operation.ranges,
-                            AndroidUacVolumeDirection.Down,
-                        ) != null
-                        val canIncrease = nextAndroidUacVolumeValue(
-                            operation.volume,
-                            operation.ranges,
-                            AndroidUacVolumeDirection.Up,
-                        ) != null
-                        publishUsbUacVolume(mutableUsbUacVolume.value.copy(
-                            status = LazerUsbUacVolumeStatus.Ready,
-                            currentDb256 = finiteDb256,
-                            muted = operation.volume == AndroidUacVolumeValue.Muted,
-                            ranges = operation.ranges.map {
-                                LazerUsbUacVolumeRange(it.minimumDb256, it.maximumDb256, it.resolutionDb256)
-                            },
-                            canDecrease = canDecrease,
-                            canIncrease = canIncrease,
-                            detail = null,
-                        ))
-                    }
-                }
-            }.onFailure {
-                publishUsbUacVolume(mutableUsbUacVolume.value.copy(
-                    status = LazerUsbUacVolumeStatus.Failed,
-                    currentDb256 = null,
-                    muted = false,
-                    ranges = emptyList(),
-                    canDecrease = false,
-                    canIncrease = false,
-                    detail = "settings.hifi.usb_uac.transfer_failed",
-                ))
-            }
-        }
+        usbUacVolumeSession.onPermissionResult(
+            AndroidUacPermissionResult(
+                device = usbUacIdentity(grantedDevice),
+                generation = callbackGeneration,
+                granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false),
+            ),
+        )
     }
 
     private fun publishUsbUacVolume(snapshot: LazerUsbUacVolumeSnapshot) {
@@ -557,6 +394,17 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
                 usbInterface.interfaceSubclass == USB_SUBCLASS_AUDIO_CONTROL
         }
 
+    private fun usbUacIdentity(device: UsbDevice) = AndroidUacDeviceIdentity(
+        id = device.deviceName,
+        vendorId = device.vendorId,
+        productId = device.productId,
+    )
+
+    private fun findUsbUacDevice(identity: AndroidUacDeviceIdentity): UsbDevice? =
+        usbManager.deviceList[identity.id]?.takeIf {
+            it.vendorId == identity.vendorId && it.productId == identity.productId
+        }
+
     private fun Intent.usbDeviceExtra(): UsbDevice? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
@@ -564,22 +412,6 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
             @Suppress("DEPRECATION")
             getParcelableExtra(UsbManager.EXTRA_DEVICE)
         }
-
-    private data class PendingUsbUacRequest(
-        val deviceId: String,
-        val vendorId: Int,
-        val productId: Int,
-        val increase: Boolean?,
-        val generation: Long,
-    )
-
-    private sealed interface UsbUacOperationResult {
-        data object Unsupported : UsbUacOperationResult
-        data class Ready(
-            val volume: AndroidUacVolumeValue,
-            val ranges: List<AndroidUacVolumeRange>,
-        ) : UsbUacOperationResult
-    }
 
     override val microphoneGranted: Boolean
         get() = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
