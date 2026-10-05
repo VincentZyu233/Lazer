@@ -14,6 +14,13 @@ import org.junit.Test
  * [DesktopNativeOpenCancellationTest]; the native library is never loaded.
  */
 class DesktopNativeOutputEndpointTest {
+    private data class NativeDevicePolicySnapshot(
+        val exclusive: Int,
+        val bufferMillis: Int,
+        val bitPerfect: Int,
+        val dsdOutputMode: Int,
+    )
+
     @Test
     fun `selected endpoint reaches the native device config on open and reopen`() {
         val createdDeviceIds = mutableListOf<String?>()
@@ -62,6 +69,68 @@ class DesktopNativeOutputEndpointTest {
         }
     }
 
+    @Test
+    fun `effective PCM policy reaches the native config and ReplayGain clears strict mode`() {
+        val createdDeviceIds = mutableListOf<String?>()
+        val setDeviceIds = mutableListOf<String?>()
+        val setPolicies = mutableListOf<NativeDevicePolicySnapshot>()
+        val player = DesktopNativeAudioPlayer(
+            onProgress = { _, _ -> },
+            onBuffered = { _, _ -> },
+            onCompleted = {},
+            onError = { _, _ -> },
+            onTrackChanged = { _, _ -> },
+            onStreamInfo = {},
+            initialExclusiveAudio = true,
+            initialBufferMillis = 240,
+            initialBitPerfect = true,
+            apiOverride = fakeAudioLibrary(createdDeviceIds, setDeviceIds, setPolicies),
+        )
+        val file = Files.createTempFile("native-policy", ".wav").toFile()
+
+        try {
+            player.playLocalFile(
+                file,
+                trackId = 1L,
+                durationMillis = 1_000L,
+                fromProgress = 0f,
+                volume = 1f,
+                replayGainDb = 0.0,
+                playWhenReady = false,
+            )
+            player.playLocalFile(
+                file,
+                trackId = 2L,
+                durationMillis = 1_000L,
+                fromProgress = 0f,
+                volume = 1f,
+                replayGainDb = 2.0,
+                playWhenReady = false,
+            )
+
+            assertEquals(
+                listOf(
+                    NativeDevicePolicySnapshot(
+                        exclusive = 1,
+                        bufferMillis = 240,
+                        bitPerfect = 1,
+                        dsdOutputMode = LAZER_AUDIO_DSD_OUTPUT_CONVERT_TO_PCM,
+                    ),
+                    NativeDevicePolicySnapshot(
+                        exclusive = 1,
+                        bufferMillis = 240,
+                        bitPerfect = 0,
+                        dsdOutputMode = LAZER_AUDIO_DSD_OUTPUT_CONVERT_TO_PCM,
+                    ),
+                ),
+                setPolicies,
+            )
+        } finally {
+            player.close()
+            file.delete()
+        }
+    }
+
     private fun newPlayer(api: LazerAudioLibrary): DesktopNativeAudioPlayer = DesktopNativeAudioPlayer(
         onProgress = { _, _ -> },
         onBuffered = { _, _ -> },
@@ -75,6 +144,7 @@ class DesktopNativeOutputEndpointTest {
     private fun fakeAudioLibrary(
         createdDeviceIds: MutableList<String?>,
         setDeviceIds: MutableList<String?>,
+        setPolicies: MutableList<NativeDevicePolicySnapshot> = mutableListOf(),
     ): LazerAudioLibrary = Proxy.newProxyInstance(
         LazerAudioLibrary::class.java.classLoader,
         arrayOf(LazerAudioLibrary::class.java),
@@ -88,6 +158,12 @@ class DesktopNativeOutputEndpointTest {
             "lazer_audio_set_device" -> {
                 val device = requireNotNull(arguments).get(1) as LazerAudioDeviceConfig
                 setDeviceIds += device.deviceId?.toString()
+                setPolicies += NativeDevicePolicySnapshot(
+                    exclusive = device.exclusive,
+                    bufferMillis = device.bufferMillis,
+                    bitPerfect = device.bitPerfect,
+                    dsdOutputMode = device.dsdOutputMode,
+                )
                 LAZER_AUDIO_OK
             }
             "lazer_audio_open_file_utf8" -> LAZER_AUDIO_OK

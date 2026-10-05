@@ -117,4 +117,75 @@ class HiFiAudioModelsTest {
             )
         }
     }
+
+    @Test
+    fun `desktop PCM settings resolve to explicit strict or conversion policies`() {
+        val strict = resolvePcmPlaybackPolicy(
+            bitPerfectRequested = true,
+            exclusiveRequested = true,
+            processingActive = false,
+            bufferDurationMillis = 120,
+        )
+        assertEquals(DirectnessPreference.RequireBitPerfect, strict.directness)
+        assertEquals(OutputFallbackPolicy.Fail, strict.fallback)
+        assertEquals(120, strict.bufferDurationMillis)
+        assertEquals(1, strict.toNativePcmBitPerfectFlag())
+
+        val exclusivePreferred = resolvePcmPlaybackPolicy(
+            bitPerfectRequested = false,
+            exclusiveRequested = true,
+            processingActive = false,
+            bufferDurationMillis = 240,
+        )
+        assertEquals(DirectnessPreference.PreferBitPerfect, exclusivePreferred.directness)
+        assertEquals(OutputFallbackPolicy.ConvertToDeviceFormat, exclusivePreferred.fallback)
+        assertEquals(240, exclusivePreferred.bufferDurationMillis)
+        assertEquals(0, exclusivePreferred.toNativePcmBitPerfectFlag())
+
+        val sharedCompatible = resolvePcmPlaybackPolicy(
+            bitPerfectRequested = false,
+            exclusiveRequested = false,
+            processingActive = false,
+            bufferDurationMillis = 300,
+        )
+        assertEquals(DirectnessPreference.PreferCompatibility, sharedCompatible.directness)
+        assertEquals(OutputFallbackPolicy.ConvertToDeviceFormat, sharedCompatible.fallback)
+        assertEquals(0, sharedCompatible.toNativePcmBitPerfectFlag())
+    }
+
+    @Test
+    fun `active processing downgrades bitperfect request to the selected output preference`() {
+        val policy = resolvePcmPlaybackPolicy(
+            bitPerfectRequested = true,
+            exclusiveRequested = true,
+            processingActive = true,
+            bufferDurationMillis = 120,
+        )
+
+        assertEquals(DirectnessPreference.PreferBitPerfect, policy.directness)
+        assertEquals(OutputFallbackPolicy.ConvertToDeviceFormat, policy.fallback)
+        assertEquals(0, policy.toNativePcmBitPerfectFlag())
+    }
+
+    @Test
+    fun `desktop PCM ABI mapping rejects policy values it cannot represent`() {
+        val compatible = resolvePcmPlaybackPolicy(
+            bitPerfectRequested = false,
+            exclusiveRequested = true,
+            processingActive = false,
+            bufferDurationMillis = 120,
+        )
+        assertFailsWith<IllegalArgumentException> {
+            compatible.copy(fallback = OutputFallbackPolicy.TryOtherBitDepth).toNativePcmBitPerfectFlag()
+        }
+        assertFailsWith<IllegalArgumentException> {
+            compatible.copy(fallback = OutputFallbackPolicy.SystemDefault).toNativePcmBitPerfectFlag()
+        }
+        assertFailsWith<IllegalArgumentException> {
+            compatible.copy(dsdOutput = DsdOutputPreference.PreferNative).toNativePcmBitPerfectFlag()
+        }
+        assertFailsWith<IllegalArgumentException> {
+            compatible.copy(volume = PlaybackVolumePolicy.AllowSoftware).toNativePcmBitPerfectFlag()
+        }
+    }
 }

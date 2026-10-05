@@ -43,6 +43,7 @@ set(LAZER_AUDIO_PLATFORM_LIBRARIES "")
 if(WIN32)
     list(APPEND LAZER_AUDIO_PLATFORM_SOURCES
         src/output_wasapi.cpp
+        src/wasapi_pcm_format_policy.cpp
         src/device_catalog_wasapi.cpp
         src/endpoint_volume_wasapi.cpp
         src/pcm_format_probe_wasapi.cpp)
@@ -263,6 +264,27 @@ if(LAZER_AUDIO_BUILD_PROBE)
     add_test(NAME lazer-audio-alsa-pcm-packing
         COMMAND $<TARGET_FILE:lazer-audio-alsa-pcm-packing-probe>)
     set_tests_properties(lazer-audio-alsa-pcm-packing PROPERTIES TIMEOUT 15)
+
+    # Run the actual WASAPI PCM candidate-ordering policy with an injected format-support probe.
+    # The test is platform-independent; the WASAPI adapter uses the same policy on Windows.
+    add_executable(lazer-audio-wasapi-pcm-policy-probe
+        tools/lazer_audio_wasapi_pcm_policy_probe.cpp
+        src/wasapi_pcm_format_policy.cpp)
+    target_include_directories(lazer-audio-wasapi-pcm-policy-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/src")
+    target_compile_features(lazer-audio-wasapi-pcm-policy-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-wasapi-pcm-policy-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-wasapi-pcm-policy-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-wasapi-pcm-policy-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME lazer-audio-wasapi-pcm-policy
+        COMMAND $<TARGET_FILE:lazer-audio-wasapi-pcm-policy-probe>)
+    set_tests_properties(lazer-audio-wasapi-pcm-policy PROPERTIES TIMEOUT 15)
 
     # Keep CoreAudio's target-vs-HAL PCM format policy executable on non-Apple build hosts.
     # This validates negotiation decisions only; the HAL output adapter itself is Apple-only.

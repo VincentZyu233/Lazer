@@ -13,6 +13,8 @@
 #include <ks.h>
 #include <ksmedia.h>
 
+#include "wasapi_pcm_format_policy.h"
+
 namespace lazer::audio {
 
 namespace {
@@ -107,16 +109,42 @@ void copyFormat(WAVEFORMATEX *&destination, const WAVEFORMATEX *source) {
     std::memcpy(destination, source, size);
 }
 
-bool tryExclusivePcmFormat(IAudioClient *audioClient, const WAVEFORMATEX *candidate,
-    WAVEFORMATEX *&chosen, uint32_t validBits, uint32_t &chosenBits, bool &usingFloat) {
-    if (audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, candidate, nullptr) != S_OK) {
-        return false;
+const WAVEFORMATEX *makePcmCandidateFormat(const wasapi::PcmCandidate &candidate,
+    const WAVEFORMATEX *mixFormat, WAVEFORMATEXTENSIBLE &extensible, WAVEFORMATEX &legacy) {
+    switch (candidate.descriptor) {
+    case wasapi::PcmDescriptor::DeviceMix:
+        return mixFormat;
+    case wasapi::PcmDescriptor::LegacyInteger:
+        ZeroMemory(&legacy, sizeof(legacy));
+        legacy.wFormatTag = WAVE_FORMAT_PCM;
+        legacy.nChannels = candidate.channels;
+        legacy.nSamplesPerSec = candidate.sampleRate;
+        legacy.wBitsPerSample = candidate.containerBits;
+        legacy.nBlockAlign = static_cast<WORD>(candidate.channels * candidate.containerBits / 8);
+        legacy.nAvgBytesPerSec = legacy.nSamplesPerSec * legacy.nBlockAlign;
+        return &legacy;
+    case wasapi::PcmDescriptor::ExtensibleInteger:
+        fillExtensible(extensible, static_cast<int32_t>(candidate.sampleRate), candidate.channels,
+            candidate.validBits, false, candidate.containerBits);
+        return &extensible.Format;
     }
-    copyFormat(chosen, candidate);
-    if (chosen == nullptr) return false;
-    chosenBits = validBits;
-    usingFloat = false;
-    return true;
+    return nullptr;
+}
+
+int32_t selectionForPcmCandidate(wasapi::PcmCandidateTier tier) {
+    switch (tier) {
+    case wasapi::PcmCandidateTier::ExactSource:
+        return LazerAudioFormatSelectionExclusiveSource;
+    case wasapi::PcmCandidateTier::SameRateAlternate:
+        return LazerAudioFormatSelectionExclusiveSameRateAlternate;
+    case wasapi::PcmCandidateTier::MonoToStereo:
+        return LazerAudioFormatSelectionExclusiveMonoToStereo;
+    case wasapi::PcmCandidateTier::MixFormat:
+        return LazerAudioFormatSelectionExclusiveMixFallback;
+    case wasapi::PcmCandidateTier::CommonRate:
+        return LazerAudioFormatSelectionExclusiveCommonRateFallback;
+    }
+    return LazerAudioFormatSelectionUnknown;
 }
 
 }  // namespace
@@ -257,247 +285,42 @@ int32_t WasapiOutput::open(const AudioOutputRequest &request, const StreamDescri
             return LazerAudioErrorUnsupported;
         }
     } else if (request.exclusive) {
-        if (source.lossless && source.integerPcm &&
-            source.sampleRate > 0 && (source.channels == 1 || source.channels == 2) &&
-            (source.bitsPerSample == 16 || source.bitsPerSample == 24 ||
-                source.bitsPerSample == 32)) {
-            /* Offer the stream's own format first: a USB DAC that accepts 96 kHz will then be driven
-             * at 96 kHz with no resampling anywhere in the path. */
-            auto tryIntegerFormat = [&](uint32_t containerBits) {
-                WAVEFORMATEXTENSIBLE candidate{};
-                fillExtensible(candidate, source.sampleRate, source.channels,
-                    static_cast<uint32_t>(source.bitsPerSample), false, containerBits);
-                const HRESULT supported = audioClient->IsFormatSupported(
-                    AUDCLNT_SHAREMODE_EXCLUSIVE, &candidate.Format, nullptr);
-                if (supported != S_OK) return false;
-                copyFormat(chosen, &candidate.Format);
-                if (chosen == nullptr) return false;
-                chosenBits = static_cast<uint32_t>(source.bitsPerSample);
-                usingFloat = false;
-                formatSelection = LazerAudioFormatSelectionExclusiveSource;
-                return true;
-            };
-            bool exactFormatAccepted = tryIntegerFormat(
-                static_cast<uint32_t>(source.bitsPerSample));
-            if (!exactFormatAccepted && source.bitsPerSample == 24) {
-                /* Many DAC drivers expose 24 valid bits in a 32-bit physical container. */
-                exactFormatAccepted = tryIntegerFormat(32);
-            }
-            if (!exactFormatAccepted && source.bitsPerSample == 16) {
-                /* Microsoft recommends trying both extensible and legacy PCM descriptors for mono/stereo. */
-                WAVEFORMATEX candidate{};
-                candidate.wFormatTag = WAVE_FORMAT_PCM;
-                candidate.nChannels = static_cast<WORD>(source.channels);
-                candidate.nSamplesPerSec = static_cast<DWORD>(source.sampleRate);
-                candidate.wBitsPerSample = 16;
-                candidate.nBlockAlign = static_cast<WORD>(candidate.nChannels * 2);
-                candidate.nAvgBytesPerSec = candidate.nSamplesPerSec * candidate.nBlockAlign;
-                const HRESULT supported = audioClient->IsFormatSupported(
-                    AUDCLNT_SHAREMODE_EXCLUSIVE, &candidate, nullptr);
-                if (supported == S_OK) {
-                    copyFormat(chosen, &candidate);
-                    if (chosen != nullptr) {
-                        chosenBits = 16;
-                        usingFloat = false;
-                        formatSelection = LazerAudioFormatSelectionExclusiveSource;
-                        exactFormatAccepted = true;
-                    }
+        const wasapi::PcmSourceFormat pcmSource{
+            source.sampleRate > 0 ? static_cast<uint32_t>(source.sampleRate) : 0,
+            static_cast<uint16_t>(source.channels),
+            source.bitsPerSample > 0 ? static_cast<uint16_t>(source.bitsPerSample) : uint16_t{0},
+            source.lossless,
+            source.integerPcm,
+        };
+        const wasapi::PcmMixFormat pcmMix{mixFormat->nSamplesPerSec};
+        const auto selected = wasapi::selectExclusivePcmCandidate(pcmSource, pcmMix,
+            request.bitPerfect, [&](const wasapi::PcmCandidate &candidate) {
+                WAVEFORMATEXTENSIBLE extensible{};
+                WAVEFORMATEX legacy{};
+                const WAVEFORMATEX *format = makePcmCandidateFormat(
+                    candidate, mixFormat, extensible, legacy);
+                if (format == nullptr || audioClient->IsFormatSupported(
+                    AUDCLNT_SHAREMODE_EXCLUSIVE, format, nullptr) != S_OK) {
+                    return false;
                 }
-            }
-        }
-        if (chosen == nullptr && !request.bitPerfect && source.sampleRate > 0 &&
-            (source.channels == 1 || source.channels == 2)) {
-            /* If the exact source depth is unavailable, keep the source clock when possible and
-             * let the normal DSP/converter adapt precision at the output boundary. */
-            uint32_t depths[] = {32, 24, 16};
-            if (source.bitsPerSample == 16 || source.bitsPerSample == 24 ||
-                source.bitsPerSample == 32) {
-                depths[0] = static_cast<uint32_t>(source.bitsPerSample);
-                depths[1] = source.bitsPerSample == 32 ? 24 : 32;
-                depths[2] = source.bitsPerSample == 16 ? 24 : 16;
-            }
-            uint32_t lastTried = 0;
-            for (const uint32_t depth : depths) {
-                if (depth == lastTried) continue;
-                lastTried = depth;
-                auto tryDepth = [&](uint32_t containerBits) {
-                    WAVEFORMATEXTENSIBLE candidate{};
-                    fillExtensible(candidate, source.sampleRate, source.channels,
-                        depth, false, containerBits);
-                    if (audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
-                        &candidate.Format, nullptr) != S_OK) return false;
-                    copyFormat(chosen, &candidate.Format);
-                    if (chosen == nullptr) return false;
-                    chosenBits = depth;
-                    usingFloat = false;
-                    formatSelection = LazerAudioFormatSelectionExclusiveSameRateAlternate;
-                    return true;
-                };
-                if (tryDepth(depth)) break;
-                if (depth == 24 && tryDepth(32)) break;
-                if (depth == 16) {
-                    WAVEFORMATEX candidate{};
-                    candidate.wFormatTag = WAVE_FORMAT_PCM;
-                    candidate.nChannels = static_cast<WORD>(source.channels);
-                    candidate.nSamplesPerSec = static_cast<DWORD>(source.sampleRate);
-                    candidate.wBitsPerSample = 16;
-                    candidate.nBlockAlign = static_cast<WORD>(candidate.nChannels * 2);
-                    candidate.nAvgBytesPerSec = candidate.nSamplesPerSec * candidate.nBlockAlign;
-                    if (audioClient->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE,
-                        &candidate, nullptr) == S_OK) {
-                        copyFormat(chosen, &candidate);
-                        if (chosen != nullptr) {
-                            chosenBits = 16;
-                            usingFloat = false;
-                            formatSelection = LazerAudioFormatSelectionExclusiveSameRateAlternate;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if (chosen == nullptr && !request.bitPerfect && source.sampleRate > 0 &&
-            source.channels == 1) {
-            /* A mono source can still use the endpoint's common stereo path. Keep its sample clock
-             * when possible; the float resampler/mixer converts mono to stereo after selection. */
-            const uint32_t depths[] = {32, 24, 16};
-            for (const uint32_t depth : depths) {
-                auto tryStereoFormat = [&](uint32_t containerBits) {
-                    WAVEFORMATEXTENSIBLE candidate{};
-                    fillExtensible(candidate, source.sampleRate, 2, depth, false, containerBits);
-                    const bool accepted = tryExclusivePcmFormat(audioClient, &candidate.Format,
-                        chosen, depth, chosenBits, usingFloat);
-                    if (accepted) {
-                        formatSelection = LazerAudioFormatSelectionExclusiveMonoToStereo;
-                    }
-                    return accepted;
-                };
-                if (tryStereoFormat(depth)) break;
-                if (depth == 24 && tryStereoFormat(32)) break;
-                if (depth == 16) {
-                    WAVEFORMATEX candidate{};
-                    candidate.wFormatTag = WAVE_FORMAT_PCM;
-                    candidate.nChannels = 2;
-                    candidate.nSamplesPerSec = static_cast<DWORD>(source.sampleRate);
-                    candidate.wBitsPerSample = 16;
-                    candidate.nBlockAlign = 4;
-                    candidate.nAvgBytesPerSec = candidate.nSamplesPerSec * candidate.nBlockAlign;
-                    if (tryExclusivePcmFormat(audioClient, &candidate, chosen,
-                        16, chosenBits, usingFloat)) {
-                        formatSelection = LazerAudioFormatSelectionExclusiveMonoToStereo;
-                        break;
-                    }
-                }
-            }
-        }
-        if (chosen == nullptr) {
-            if (request.bitPerfect) {
-                CoTaskMemFree(mixFormat);
-                error = source.lossless
+                copyFormat(chosen, format);
+                return chosen != nullptr;
+            });
+        if (!selected) {
+            CoTaskMemFree(mixFormat);
+            error = request.bitPerfect
+                ? (source.lossless
                     ? "the device does not support the source PCM format for bit-perfect output"
-                    : "bit-perfect output is available only for lossless PCM sources";
-                close();
-                return LazerAudioErrorUnsupported;
-            }
-            /* If no source candidate is accepted, try the system mix format as an exclusive
-             * fallback. Successful Initialize below proves only the WASAPI stream format. */
-            const HRESULT nativeProbe = audioClient->IsFormatSupported(
-                AUDCLNT_SHAREMODE_EXCLUSIVE, mixFormat, nullptr);
-            if (nativeProbe == S_OK) {
-                copyFormat(chosen, mixFormat);
-                if (chosen != nullptr) {
-                    chosenBits = significantBits(chosen);
-                    usingFloat = isFloatSubtype(chosen);
-                    formatSelection = LazerAudioFormatSelectionExclusiveMixFallback;
-                }
-            }
-
-            if (chosen == nullptr) {
-                /* A shared mix format is not necessarily legal in exclusive mode. Try common
-                 * stereo PCM formats exactly, starting at the endpoint mix rate and then the
-                 * source's 44.1/48 kHz clock family ordered by proximity. Only this non-bit-perfect
-                 * path may change rate or channel count; the source is converted to float first. */
-                constexpr uint32_t commonRates[] = {
-                    44100, 48000, 88200, 96000, 176400, 192000,
-                    352800, 384000, 705600, 768000
-                };
-                std::vector<uint32_t> fallbackRates;
-                auto appendUniqueRate = [&](uint32_t rate) {
-                    if (rate == 0 || std::find(fallbackRates.begin(), fallbackRates.end(), rate) !=
-                        fallbackRates.end()) return;
-                    fallbackRates.push_back(rate);
-                };
-
-                appendUniqueRate(mixFormat->nSamplesPerSec);
-                std::vector<uint32_t> orderedCommonRates;
-                const bool sourceUses441Family = source.sampleRate % 44100 == 0;
-                for (const uint32_t rate : commonRates) {
-                    if (rate == static_cast<uint32_t>(source.sampleRate) ||
-                        rate == mixFormat->nSamplesPerSec) continue;
-                    orderedCommonRates.push_back(rate);
-                }
-                std::stable_sort(orderedCommonRates.begin(), orderedCommonRates.end(),
-                    [&](uint32_t left, uint32_t right) {
-                        const bool leftSameFamily = (left % 44100 == 0) == sourceUses441Family;
-                        const bool rightSameFamily = (right % 44100 == 0) == sourceUses441Family;
-                        if (leftSameFamily != rightSameFamily) return leftSameFamily;
-                        const uint64_t leftDistance = left > static_cast<uint32_t>(source.sampleRate)
-                            ? left - static_cast<uint32_t>(source.sampleRate)
-                            : static_cast<uint32_t>(source.sampleRate) - left;
-                        const uint64_t rightDistance = right > static_cast<uint32_t>(source.sampleRate)
-                            ? right - static_cast<uint32_t>(source.sampleRate)
-                            : static_cast<uint32_t>(source.sampleRate) - right;
-                        return leftDistance < rightDistance;
-                    });
-                for (const uint32_t rate : orderedCommonRates) appendUniqueRate(rate);
-
-                uint32_t depths[] = {32, 24, 16};
-                if (source.bitsPerSample == 16 || source.bitsPerSample == 24 ||
-                    source.bitsPerSample == 32) {
-                    depths[0] = static_cast<uint32_t>(source.bitsPerSample);
-                    depths[1] = source.bitsPerSample == 32 ? 24 : 32;
-                    depths[2] = source.bitsPerSample == 16 ? 24 : 16;
-                }
-                for (const uint32_t rate : fallbackRates) {
-                    for (const uint32_t depth : depths) {
-                        auto tryStereoFormat = [&](uint32_t containerBits) {
-                            WAVEFORMATEXTENSIBLE candidate{};
-                            fillExtensible(candidate, static_cast<int32_t>(rate), 2, depth,
-                                false, containerBits);
-                            const bool accepted = tryExclusivePcmFormat(audioClient,
-                                &candidate.Format, chosen, depth, chosenBits, usingFloat);
-                            if (accepted) {
-                                formatSelection = LazerAudioFormatSelectionExclusiveCommonRateFallback;
-                            }
-                            return accepted;
-                        };
-                        if (tryStereoFormat(depth)) break;
-                        if (depth == 24 && tryStereoFormat(32)) break;
-                        if (depth == 16) {
-                            WAVEFORMATEX candidate{};
-                            candidate.wFormatTag = WAVE_FORMAT_PCM;
-                            candidate.nChannels = 2;
-                            candidate.nSamplesPerSec = rate;
-                            candidate.wBitsPerSample = 16;
-                            candidate.nBlockAlign = 4;
-                            candidate.nAvgBytesPerSec = candidate.nSamplesPerSec * candidate.nBlockAlign;
-                            if (tryExclusivePcmFormat(audioClient, &candidate, chosen,
-                                16, chosenBits, usingFloat)) {
-                                formatSelection = LazerAudioFormatSelectionExclusiveCommonRateFallback;
-                                break;
-                            }
-                        }
-                    }
-                    if (chosen != nullptr) break;
-                }
-            }
-            if (chosen == nullptr) {
-                CoTaskMemFree(mixFormat);
-                error = "the device accepts none of the tried exclusive PCM conversion formats";
-                close();
-                return LazerAudioErrorUnsupported;
-            }
+                    : "bit-perfect output is available only for lossless PCM sources")
+                : "the device accepts none of the tried exclusive PCM conversion formats";
+            close();
+            return LazerAudioErrorUnsupported;
         }
+
+        chosenBits = selected->descriptor == wasapi::PcmDescriptor::DeviceMix
+            ? significantBits(chosen) : selected->validBits;
+        usingFloat = selected->descriptor == wasapi::PcmDescriptor::DeviceMix && isFloatSubtype(chosen);
+        formatSelection = selectionForPcmCandidate(selected->tier);
     } else {
         copyFormat(chosen, mixFormat);
         chosenBits = significantBits(chosen);

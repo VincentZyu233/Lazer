@@ -610,6 +610,7 @@ internal class DesktopNativeAudioPlayer(
         fromProgress: Float,
         volume: Float,
         replayGainDb: Double = 0.0,
+        pcmPlaybackPolicy: PlaybackPolicy? = null,
         playWhenReady: Boolean,
         cueStartFrame75: Long = 0L,
         cueEndFrame75: Long = 0L,
@@ -636,7 +637,7 @@ internal class DesktopNativeAudioPlayer(
                 ?: return fail(IOException("无法创建原生音频引擎"))
             val configured = api.lazer_audio_set_device(
                 enginePtr,
-                createDeviceConfig(bitPerfectOverride = bitPerfect && activeReplayGainDb == 0.0),
+                createDeviceConfig(policyOverride = pcmPlaybackPolicy),
             )
             if (configured != LAZER_AUDIO_OK) {
                 return fail(IOException("无法应用 ${nativeAudioBackendLabel()} 输出设置：${lastError()}"))
@@ -1096,14 +1097,20 @@ internal class DesktopNativeAudioPlayer(
         api.lazer_audio_create(config)
     }.getOrNull()
 
-    private fun createDeviceConfig(bitPerfectOverride: Boolean = bitPerfect) = LazerAudioDeviceConfig().apply {
+    private fun createDeviceConfig(policyOverride: PlaybackPolicy? = null) = LazerAudioDeviceConfig().apply {
+        val pcmPolicy = policyOverride ?: resolvePcmPlaybackPolicy(
+            bitPerfectRequested = this@DesktopNativeAudioPlayer.bitPerfect,
+            exclusiveRequested = this@DesktopNativeAudioPlayer.exclusiveAudio,
+            processingActive = this@DesktopNativeAudioPlayer.activeReplayGainDb != 0.0,
+            bufferDurationMillis = this@DesktopNativeAudioPlayer.bufferMillis,
+        )
         deviceId = outputEndpointId?.let(::WString)
         exclusive = if (exclusiveAudio) 1 else 0
         resampleMode = LAZER_AUDIO_RESAMPLE_NATIVE
         targetSampleRate = 0
         bufferMillis = this@DesktopNativeAudioPlayer.bufferMillis
-        bitPerfect = if (bitPerfectOverride && !this@DesktopNativeAudioPlayer.doPOutput &&
-            !this@DesktopNativeAudioPlayer.nativeDsdOutput) 1 else 0
+        bitPerfect = if (this@DesktopNativeAudioPlayer.doPOutput ||
+            this@DesktopNativeAudioPlayer.nativeDsdOutput) 0 else pcmPolicy.toNativePcmBitPerfectFlag()
         dsdOutputMode = when {
             this@DesktopNativeAudioPlayer.nativeDsdOutput -> LAZER_AUDIO_DSD_OUTPUT_REQUIRE_NATIVE
             this@DesktopNativeAudioPlayer.doPOutput -> LAZER_AUDIO_DSD_OUTPUT_REQUIRE_DOP

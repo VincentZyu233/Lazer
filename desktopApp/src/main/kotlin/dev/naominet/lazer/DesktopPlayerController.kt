@@ -7167,7 +7167,13 @@ class DesktopPlayerController(
                     }
                     val replayGain = resolveDesktopReplayGain(track.replayGain, replayGainMode)
                     activeReplayGainResolution = replayGain.takeIf { replayGainMode != DesktopReplayGainMode.Off }
-                    val effectiveBitPerfect = hifiBitPerfect && replayGain.appliedGainDb == 0.0
+                    val pcmPlaybackPolicy = resolvePcmPlaybackPolicy(
+                        bitPerfectRequested = hifiBitPerfect,
+                        exclusiveRequested = exclusiveAudio,
+                        processingActive = replayGain.appliedGainDb != 0.0,
+                        bufferDurationMillis = hifiBufferMillis,
+                    )
+                    val effectiveBitPerfect = pcmPlaybackPolicy.toNativePcmBitPerfectFlag() == 1
                     if (effectiveBitPerfect && volume < 0.999999f) {
                         throw IOException(tr("status.hifi.bit_perfect_volume"))
                     }
@@ -7192,6 +7198,7 @@ class DesktopPlayerController(
                             fromProgress = safeResumeProgress,
                             volume = volume,
                             replayGainDb = replayGain.appliedGainDb,
+                            pcmPlaybackPolicy = pcmPlaybackPolicy,
                             cueStartFrame75 = track.playbackSource.cueStartFrame75,
                             cueEndFrame75 = track.playbackSource.cueEndFrame75,
                             playWhenReady = playWhenReady,

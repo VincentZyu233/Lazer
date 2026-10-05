@@ -209,6 +209,59 @@ data class PlaybackPolicy(
     }
 }
 
+/**
+ * Resolves the PCM intent exposed by the current desktop settings into the shared playback policy.
+ * DSP makes strict bit-perfect output ineligible for this track; the output backend may still
+ * prefer a close device format and use the configured conversion fallback.
+ */
+fun resolvePcmPlaybackPolicy(
+    bitPerfectRequested: Boolean,
+    exclusiveRequested: Boolean,
+    processingActive: Boolean,
+    bufferDurationMillis: Int,
+): PlaybackPolicy = when {
+    bitPerfectRequested && !processingActive -> PlaybackPolicy(
+        directness = DirectnessPreference.RequireBitPerfect,
+        fallback = OutputFallbackPolicy.Fail,
+        bufferDurationMillis = bufferDurationMillis,
+    )
+    else -> PlaybackPolicy(
+        directness = if (exclusiveRequested) {
+            DirectnessPreference.PreferBitPerfect
+        } else {
+            DirectnessPreference.PreferCompatibility
+        },
+        fallback = OutputFallbackPolicy.ConvertToDeviceFormat,
+        bufferDurationMillis = bufferDurationMillis,
+    )
+}
+
+/** Projects the currently supported desktop PCM policies onto the existing native ABI flag. */
+fun PlaybackPolicy.toNativePcmBitPerfectFlag(): Int {
+    require(dsdOutput == DsdOutputPreference.FollowDevice) {
+        "The desktop PCM ABI does not represent DSD output preference."
+    }
+    require(volume == PlaybackVolumePolicy.PreferHardware) {
+        "The desktop PCM ABI does not represent software-volume policy."
+    }
+    return when (directness) {
+        DirectnessPreference.RequireBitPerfect -> {
+            require(fallback == OutputFallbackPolicy.Fail) {
+                "Required bit-perfect PCM cannot silently fall back."
+            }
+            1
+        }
+        DirectnessPreference.PreferBitPerfect,
+        DirectnessPreference.PreferCompatibility,
+        -> {
+            require(fallback == OutputFallbackPolicy.ConvertToDeviceFormat) {
+                "This desktop PCM backend only supports device-format conversion fallback."
+            }
+            0
+        }
+    }
+}
+
 enum class SignalPathStage {
     Source,
     Decoder,
