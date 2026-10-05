@@ -3950,7 +3950,7 @@ private fun DesktopEqualizerSection(controller: DesktopPlayerController) {
             label = ::equalizerPresetLabel,
             onSelected = { id ->
                 LazerEqualizerPresets.firstOrNull { it.id == id }?.let { preset ->
-                    controller.updateEqualizer(equalizer.withPreset(preset))
+                    controller.updateEqualizer(equalizer.activatePreset(preset))
                 }
             },
         )

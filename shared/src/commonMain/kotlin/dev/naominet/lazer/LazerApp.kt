@@ -96,11 +96,13 @@ import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -1589,6 +1591,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
     }
     val audioLevelsEnabled = controller.audioReactiveLevels && microphoneGranted
     var isAudioQualitySheetVisible by remember { mutableStateOf(false) }
+    var isEqualizerEditorVisible by remember { mutableStateOf(false) }
     var isCacheSheetVisible by remember { mutableStateOf(false) }
     var isCookieSheetVisible by remember { mutableStateOf(false) }
     var cookieCopied by remember { mutableStateOf(false) }
@@ -2142,10 +2145,13 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                                 },
                                 onSelected = { preset ->
                                     preset?.let {
-                                        controller.updateEqualizer(equalizer.withPreset(it).copy(enabled = true))
+                                        controller.updateEqualizer(equalizer.activatePreset(it))
                                     }
                                 },
                             )
+                            ThemeTextButton(onClick = { isEqualizerEditorVisible = true }) {
+                                Text(tr("settings.equalizer.edit"))
+                            }
                         }
                         Text(
                             tr("settings.equalizer.android_output_note"),
@@ -2911,6 +2917,13 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             onDismiss = { isAudioQualitySheetVisible = false },
         )
     }
+    if (isEqualizerEditorVisible) {
+        LazerEqualizerEditorDialog(
+            controller = controller,
+            initialState = controller.equalizer,
+            onDismiss = { isEqualizerEditorVisible = false },
+        )
+    }
     if (isCacheSheetVisible) {
         CacheChoiceSheet(
             onClearSongs = {
@@ -2937,6 +2950,175 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             onDismiss = { isCookieSheetVisible = false },
         )
     }
+}
+
+@Composable
+private fun LazerEqualizerEditorDialog(
+    controller: LazerGatewayController,
+    initialState: LazerEqualizerState,
+    onDismiss: () -> Unit,
+) {
+    var draft by remember(initialState) { mutableStateOf(initialState) }
+    val colors = MaterialTheme.colorScheme
+
+    fun preview(next: LazerEqualizerState) {
+        draft = next
+        controller.previewEqualizer(next)
+    }
+
+    fun commit(next: LazerEqualizerState) {
+        draft = next
+        controller.updateEqualizer(next)
+    }
+
+    fun finishEditing() {
+        controller.updateEqualizer(draft)
+        onDismiss()
+    }
+
+    AlertDialog(
+        onDismissRequest = ::finishEditing,
+        title = { Text(tr("settings.equalizer.title")) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 560.dp)
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    tr("settings.equalizer.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tapClickable(role = Role.Switch) {
+                            commit(draft.copy(enabled = !draft.enabled))
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.equalizer.enable"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (draft.enabled) tr("settings.equalizer.on") else tr("settings.equalizer.off"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = draft.enabled,
+                        onCheckedChange = null,
+                    )
+                }
+                HorizontalDivider()
+                EqualizerGainSliderRow(
+                    label = tr("settings.equalizer.preamp"),
+                    gainDb = draft.preampDb,
+                    engine = controller.themeEngine,
+                    onPreview = { preview(draft.copy(preampDb = clampLazerEqPreampDb(it))) },
+                    onCommit = { commit(draft.copy(preampDb = clampLazerEqPreampDb(it))) },
+                    valueRange = MIN_LAZER_EQ_PREAMP_DB.toFloat()..MAX_LAZER_EQ_PREAMP_DB.toFloat(),
+                )
+                HorizontalDivider()
+                draft.bands.forEachIndexed { index, band ->
+                    EqualizerGainSliderRow(
+                        label = lazerEqFrequencyLabel(band.frequencyHz),
+                        gainDb = band.gainDb,
+                        engine = controller.themeEngine,
+                        onPreview = { preview(draft.withBandGain(index, it)) },
+                        onCommit = { commit(draft.withBandGain(index, it)) },
+                        valueRange = MIN_LAZER_EQ_GAIN_DB.toFloat()..MAX_LAZER_EQ_GAIN_DB.toFloat(),
+                    )
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tapClickable(role = Role.Switch) {
+                            commit(draft.copy(limiterEnabled = !draft.limiterEnabled))
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.equalizer.limiter"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            tr("settings.equalizer.limiter_hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = draft.limiterEnabled,
+                        onCheckedChange = null,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            ThemeTextButton(onClick = ::finishEditing) { Text(tr("settings.equalizer.close")) }
+        },
+        dismissButton = {
+            ThemeTextButton(
+                onClick = { commit(LazerEqualizerState(enabled = draft.enabled)) },
+            ) { Text(tr("settings.equalizer.reset")) }
+        },
+    )
+}
+
+@Composable
+private fun EqualizerGainSliderRow(
+    label: String,
+    gainDb: Double,
+    engine: LazerThemeEngine,
+    onPreview: (Double) -> Unit,
+    onCommit: (Double) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+) {
+    var local by remember(gainDb) { mutableFloatStateOf(gainDb.toFloat()) }
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(52.dp),
+        )
+        TapSlider(
+            engine = engine,
+            value = local,
+            onValueChange = {
+                local = it
+                onPreview(it.toDouble())
+            },
+            onValueChangeFinished = { onCommit(local.toDouble()) },
+            valueRange = valueRange,
+            modifier = Modifier.weight(1f).semantics { contentDescription = label },
+        )
+        Text(
+            formatEqualizerGain(local.toDouble()),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.primary,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(58.dp),
+        )
+    }
+}
+
+private fun lazerEqFrequencyLabel(frequencyHz: Double): String =
+    if (frequencyHz >= 1_000.0) "${(frequencyHz / 1_000.0).toInt()} kHz" else "${frequencyHz.toInt()} Hz"
+
+private fun formatEqualizerGain(gainDb: Double): String {
+    val rounded = (gainDb * 10.0).roundToInt() / 10.0
+    val value = if (rounded == 0.0) 0.0 else rounded
+    val sign = if (value > 0.0) "+" else ""
+    return "$sign$value dB"
 }
 
 /** What this build is, and what it stands on. Reached from the foot of the settings list. */

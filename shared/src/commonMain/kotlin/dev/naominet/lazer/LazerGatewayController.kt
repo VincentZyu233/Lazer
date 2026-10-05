@@ -202,6 +202,7 @@ class LazerGatewayController(private val device: LazerDevice) {
         private set
     var equalizer by mutableStateOf(settings.equalizer)
         private set
+    private var equalizerPreviewActive = false
     var playbackInterface by mutableStateOf(settings.playbackInterface)
         private set
     var audioReactiveLevels by mutableStateOf(settings.audioReactiveLevels)
@@ -1132,9 +1133,16 @@ class LazerGatewayController(private val device: LazerDevice) {
     }
 
     fun updateEqualizer(state: LazerEqualizerState) {
-        if (equalizer == state) return
+        if (equalizer == state && !equalizerPreviewActive) return
+        equalizerPreviewActive = false
         equalizer = state
         settings.equalizer = state
+        player.updateEqualizer(state)
+    }
+
+    /** Applies an in-progress slider value without writing each drag event to preferences. */
+    fun previewEqualizer(state: LazerEqualizerState) {
+        equalizerPreviewActive = true
         player.updateEqualizer(state)
     }
 

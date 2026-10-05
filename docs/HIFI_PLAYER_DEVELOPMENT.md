@@ -261,6 +261,8 @@ Android 设置页现在分开展示应用 DSP 状态、HAL mixer 偏好结果与
 
 2026-10-05 Android PCM 测试音的临时 bit-perfect mixer preference 现先读取并保存旧值，读取失败时不写系统偏好；停止或 USB 路由失败时，只在当前值仍与本播放器写入值一致时恢复。系统读取/恢复失败会重试一次并记录日志，已被其他组件修改的值会保留。恢复策略由 JVM 单测覆盖；系统 AudioManager 行为与设备拔插仍待 Android 实机验证。
 
+2026-10-05 Android 设置页新增可滚动的自定义 EQ 编辑器，可调前级与 10 个频段，支持旁路、limiter 与重置；拖动时实时预听，松手或关闭时保存，不逐帧写偏好。Android 与桌面选择预设都会启用 EQ。共享状态逻辑和 Android 构建已验证；矮屏/横屏布局及真实设备音频仍需实机验证。
+
 ## 9. 测试与发布矩阵
 
 ALSA 恢复策略可在任意平台单独验证：`cmake --build native/lazer-audio/build --config Release --target lazer-audio-alsa-recovery-probe --parallel 2` 后运行 `ctest --test-dir native/lazer-audio/build -C Release -R '^lazer-audio-alsa-recovery$' --output-on-failure`。探针覆盖永久 `-EAGAIN` 时 PCM 只在重试上限后 prepare 并按序回排 pending 帧，DoP 则在同一上限失败且无 prepare 路径。Windows Release 本轮定向 CTest 为 1/1 通过；这验证平台无关恢复策略，不代表 `output_alsa.cpp` 已在 Linux 编译或真实 ALSA suspend/XRUN 已测试。

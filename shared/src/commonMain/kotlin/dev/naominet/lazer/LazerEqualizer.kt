@@ -121,6 +121,22 @@ fun LazerEqualizerState.withPreset(preset: LazerEqualizerPreset): LazerEqualizer
     )
 }
 
+/** Selects a usable preset and makes it audible on every platform. */
+fun LazerEqualizerState.activatePreset(preset: LazerEqualizerPreset): LazerEqualizerState {
+    if (preset.gainsDb.size != bands.size) return this
+    return withPreset(preset).copy(enabled = true)
+}
+
+/** Updates one visible band without changing its filter shape or any other EQ setting. */
+fun LazerEqualizerState.withBandGain(index: Int, gainDb: Double): LazerEqualizerState {
+    if (index !in bands.indices) return this
+    return copy(
+        bands = bands.mapIndexed { bandIndex, band ->
+            if (bandIndex == index) band.copy(gainDb = clampLazerEqGainDb(gainDb)) else band
+        },
+    )
+}
+
 fun clampLazerEqGainDb(value: Double): Double = value.coerceIn(MIN_LAZER_EQ_GAIN_DB, MAX_LAZER_EQ_GAIN_DB)
 
 fun clampLazerEqPreampDb(value: Double): Double = value.coerceIn(MIN_LAZER_EQ_PREAMP_DB, MAX_LAZER_EQ_PREAMP_DB)
