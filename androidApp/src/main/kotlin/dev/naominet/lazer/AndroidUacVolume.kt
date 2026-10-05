@@ -141,7 +141,7 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
     fun readSources(start: Int, count: Int, descriptorEnd: Int): List<Int>? {
         if (count <= 0 || start + count > descriptorEnd) return null
         val sources = (start until start + count).map(::unsigned)
-        if (sources.any { it == 0 } || sources.distinct().size != sources.size) return null
+        if (sources.any { it == 0 }) return null
         return sources
     }
 

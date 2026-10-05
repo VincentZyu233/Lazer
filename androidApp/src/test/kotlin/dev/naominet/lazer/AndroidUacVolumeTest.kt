@@ -49,6 +49,31 @@ class AndroidUacVolumeTest {
     }
 
     @Test
+    fun `mixers may reference the same source entity from multiple input pins`() {
+        val uac1Descriptors = uac1Configuration(
+            inputTerminalUac1(2),
+            mixerUac1(unitId = 4, sourceIds = listOf(2, 2)),
+            featureUac1(unitId = 5, sourceId = 4),
+            outputTerminalUac1(terminalId = 7, sourceId = 5),
+        )
+        val uac2Descriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            mixerUac2(unitId = 4, sourceIds = listOf(2, 2)),
+            featureUac2(unitId = 5, sourceId = 4, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 5),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac1, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(uac1Descriptors),
+        )
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(uac2Descriptors),
+        )
+    }
+
+    @Test
     fun `UAC1 processing and extension units preserve the Feature Unit source path`() {
         val descriptors = uac1Configuration(
             inputTerminalUac1(2),
@@ -109,6 +134,42 @@ class AndroidUacVolumeTest {
         assertEquals(
             AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 5),
             findAndroidUacPlaybackVolumeControl(descriptors),
+        )
+    }
+
+    @Test
+    fun `UAC2 effect and sample rate converter units preserve the Feature Unit source path`() {
+        val effectDescriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            effectUac2(unitId = 3, sourceId = 2),
+            featureUac2(unitId = 4, sourceId = 3, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 4),
+        )
+        val sampleRateConverterDescriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            sampleRateConverterUac2(unitId = 3, sourceId = 2),
+            featureUac2(unitId = 4, sourceId = 3, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 4),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 4),
+            findAndroidUacPlaybackVolumeControl(effectDescriptors),
+        )
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 4),
+            findAndroidUacPlaybackVolumeControl(sampleRateConverterDescriptors),
+        )
+        val truncatedEffect = effectUac2(unitId = 3, sourceId = 2).copyOf(19).apply { this[0] = 19 }
+        assertNull(
+            findAndroidUacPlaybackVolumeControl(
+                uac2Configuration(
+                    inputTerminalUac2(2),
+                    truncatedEffect,
+                    featureUac2(unitId = 4, sourceId = 3, masterControls = 0x0c),
+                    outputTerminalUac2(terminalId = 7, sourceId = 4),
+                ),
+            ),
         )
     }
 
@@ -471,7 +532,7 @@ class AndroidUacVolumeTest {
 
     private fun extensionUac1(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
         15, 0x24, 0x08, unitId.toByte(), 0, 0, 1, sourceId.toByte(),
-        1, 0, 0, 0, 1, 0, 0,
+        1, 0, 0, 0, 1, 1, 0,
     )
 
     private fun processingUac2(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
@@ -481,7 +542,15 @@ class AndroidUacVolumeTest {
 
     private fun extensionUac2(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
         16, 0x24, 0x09, unitId.toByte(), 0, 0, 1, sourceId.toByte(),
-        1, 0, 0, 0, 0, 0, 0, 0,
+        1, 0, 0, 0, 0, 0, 1, 0,
+    )
+
+    private fun effectUac2(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        20, 0x24, 0x07, unitId.toByte(), 1, 0, sourceId.toByte(),
+    ) + ByteArray(13)
+
+    private fun sampleRateConverterUac2(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        8, 0x24, 0x0d, unitId.toByte(), sourceId.toByte(), 1, 1, 0,
     )
 
     private fun selectorUac2(unitId: Int, sourceIds: List<Int>): ByteArray = byteArrayOf(
