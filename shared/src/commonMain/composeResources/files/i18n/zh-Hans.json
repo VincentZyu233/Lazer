@@ -415,6 +415,7 @@
   "status.audio_queue_end": "播放队列已结束，请从应用内重新选择一首歌",
   "status.track_unplayable": "这首歌暂时无法播放",
   "status.playback_failed": "播放失败",
+  "status.playback_queue.restore_failed": "无法恢复已保存的播放队列",
   "status.local_file_permission_lost": "本地文件的访问授权已失效，请重新选择该文件",
   "status.exclusive_fail": "无法独占音频输出，请关闭独占音频后重试",
   "status.hifi.bit_perfect_volume": "位完美输出需要软件音量为 100%。请先关闭位完美输出，将软件音量调至 100%，再用 DAC 调节音量。",

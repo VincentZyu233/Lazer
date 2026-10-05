@@ -14,7 +14,10 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     private var pickerHandler: LazerPickerHandler?
     private var audioDocumentPickerHandler: LazerAudioDocumentPickerHandler?
     private var localAudioCachePrepared = false
-    private var localAudioBatchByURI: [String: URL] = [:]
+    private var localAudioQueuedURIs: Set<String> = []
+    private var localAudioQueuePersisted = false
+    private var localAudioActiveURI: String?
+    private var localAudioInFlightBatchDirectories: Set<URL> = []
     private var backGesture: UIScreenEdgePanGestureRecognizer?
     private var backSink: IosBackGestureSink?
 
@@ -61,9 +64,13 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         let handler = LazerAudioDocumentPickerHandler { [weak self] urls in
             guard let self else { return }
             Task { @MainActor in
-                let result = await self.importLocalAudioFiles(urls)
+                let imported = await self.importLocalAudioFiles(urls)
                 self.audioDocumentPickerHandler = nil
-                onPicked(result)
+                onPicked(imported.result)
+                if let batchDirectory = imported.batchDirectory {
+                    self.localAudioInFlightBatchDirectories.remove(batchDirectory)
+                    self.pruneLocalAudioCache()
+                }
             }
         }
         audioDocumentPickerHandler = handler
@@ -152,7 +159,20 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
             positionMillis: Double(positionMillis) / 1000,
             playbackGeneration: generation
         )
-        pruneLocalAudioCache(keeping: url)
+        localAudioActiveURI = managedLocalAudioBatchDirectory(for: url) == nil ? nil : url
+    }
+
+    func playerUpdateLocalAudioQueue(uris: [String], persisted: Bool) {
+        localAudioQueuedURIs = Set(uris)
+        localAudioQueuePersisted = persisted
+        if persisted { pruneLocalAudioCache() }
+    }
+
+    func playerLocalAudioFileExists(uri: String) -> Bool {
+        guard let fileURL = managedLocalAudioFileURL(for: uri) else { return false }
+        let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        return values?.isRegularFile == true && values?.isSymbolicLink != true &&
+            FileManager.default.isReadableFile(atPath: fileURL.path)
     }
 
     func playerPlay() { audio.play() }
@@ -163,7 +183,8 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 
     func playerRelease() {
         audio.release()
-        pruneLocalAudioCache(keeping: nil)
+        localAudioActiveURI = nil
+        pruneLocalAudioCache()
     }
 
     func playerPositionMillis() -> Int64 { audio.positionMillis }
@@ -263,26 +284,19 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     /// Picker URLs are staged in an app-owned folder so the queue never depends on a security-scoped
     /// URL whose access lifetime cannot be represented by the shared playback model.
     private func prepareLocalAudioCache() -> Bool {
-        guard !localAudioCachePrepared else { return true }
+        if localAudioCachePrepared { return existingLocalAudioImportRoot() != nil }
         let fileManager = FileManager.default
-        do {
-            try fileManager.removeItem(at: localAudioImportDirectory)
-        } catch let error as NSError where error.code == NSFileNoSuchFileError {
-            // A first import has nothing stale to remove.
-        } catch {
-            return false
-        }
         do {
             try fileManager.createDirectory(
                 at: localAudioImportDirectory,
                 withIntermediateDirectories: true
             )
+            guard existingLocalAudioImportRoot() != nil else { return false }
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
             var directory = localAudioImportDirectory
             try directory.setResourceValues(values)
             localAudioCachePrepared = true
-            localAudioBatchByURI.removeAll()
             return true
         } catch {
             return false
@@ -292,38 +306,60 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     @MainActor
     private func importLocalAudioFiles(
         _ urls: [URL]
-    ) async -> LazerLocalAudioPickerResult {
+    ) async -> (result: LazerLocalAudioPickerResult, batchDirectory: URL?) {
         guard prepareLocalAudioCache() else {
-            return LazerLocalAudioPickerResult(
-                files: [],
-                unsupportedFileCount: 0,
-                failedFileCount: Int32(clamping: urls.count)
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: 0,
+                    failedFileCount: Int32(clamping: urls.count)
+                ),
+                nil
             )
         }
         let supportedExtensions: Set<String> = ["wav", "wave", "flac"]
         let supported = urls.filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
         var unsupportedCount = urls.count - supported.count
         guard !supported.isEmpty else {
-            return LazerLocalAudioPickerResult(
-                files: [],
-                unsupportedFileCount: Int32(clamping: unsupportedCount),
-                failedFileCount: 0
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: Int32(clamping: unsupportedCount),
+                    failedFileCount: 0
+                ),
+                nil
             )
         }
 
-        let batchDirectory = localAudioImportDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let createdBatchDirectory = localAudioImportDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(
-                at: batchDirectory,
+                at: createdBatchDirectory,
                 withIntermediateDirectories: true
             )
         } catch {
-            return LazerLocalAudioPickerResult(
-                files: [],
-                unsupportedFileCount: 0,
-                failedFileCount: Int32(clamping: urls.count)
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: 0,
+                    failedFileCount: Int32(clamping: urls.count)
+                ),
+                nil
             )
         }
+        guard let root = existingLocalAudioImportRoot(),
+              let batchDirectory = managedLocalAudioBatchDirectory(at: createdBatchDirectory, root: root) else {
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: 0,
+                    failedFileCount: Int32(clamping: urls.count)
+                ),
+                nil
+            )
+        }
+        localAudioInFlightBatchDirectories.insert(batchDirectory)
 
         let (copied, copyFailureCount) = await Task.detached(priority: .userInitiated) {
             () -> ([(url: URL, fallbackTitle: String)], Int) in
@@ -332,7 +368,7 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
             let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let pickerInbox = documentsDirectory.appendingPathComponent("Inbox").standardizedFileURL
             for source in supported {
-                let target = batchDirectory.appendingPathComponent(UUID().uuidString)
+                let target = createdBatchDirectory.appendingPathComponent(UUID().uuidString)
                     .appendingPathExtension(source.pathExtension.lowercased())
                 let accessed = source.startAccessingSecurityScopedResource()
                 defer { if accessed { source.stopAccessingSecurityScopedResource() } }
@@ -361,7 +397,6 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
             let url = item.url
             let metadata = await localAudioMetadata(for: url)
             let uri = url.absoluteString
-            localAudioBatchByURI[uri] = batchDirectory
             files.append(LazerPickedAudioFile(
                 uri: uri,
                 title: metadata.title.isEmpty ? item.fallbackTitle : metadata.title,
@@ -371,12 +406,24 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
             ))
         }
         if copied.isEmpty {
-            try? FileManager.default.removeItem(at: batchDirectory)
+            removeManagedLocalAudioBatch(batchDirectory)
+            localAudioInFlightBatchDirectories.remove(batchDirectory)
+            return (
+                LazerLocalAudioPickerResult(
+                    files: files,
+                    unsupportedFileCount: Int32(clamping: unsupportedCount),
+                    failedFileCount: Int32(clamping: failedFileCount)
+                ),
+                nil
+            )
         }
-        return LazerLocalAudioPickerResult(
-            files: files,
-            unsupportedFileCount: Int32(clamping: unsupportedCount),
-            failedFileCount: Int32(clamping: failedFileCount)
+        return (
+            LazerLocalAudioPickerResult(
+                files: files,
+                unsupportedFileCount: Int32(clamping: unsupportedCount),
+                failedFileCount: Int32(clamping: failedFileCount)
+            ),
+            batchDirectory
         )
     }
 
@@ -394,20 +441,119 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         return (title, artist, album, durationMillis)
     }
 
-    private func pruneLocalAudioCache(keeping uri: String?) {
-        let retainedDirectory = uri.flatMap { localAudioBatchByURI[$0] }
-        guard let children = try? FileManager.default.contentsOfDirectory(
-            at: localAudioImportDirectory,
-            includingPropertiesForKeys: nil
-        ) else { return }
-        for child in children where child != retainedDirectory {
-            try? FileManager.default.removeItem(at: child)
+    private func existingLocalAudioImportRoot() -> URL? {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .resolvingSymlinksInPath().standardizedFileURL
+        let root = localAudioImportDirectory.standardizedFileURL
+        guard root.lastPathComponent == "LazerLocalAudio",
+              root.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path == applicationSupport.path,
+              let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true,
+              values.isSymbolicLink != true else { return nil }
+        let resolved = root.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.deletingLastPathComponent().path == applicationSupport.path else { return nil }
+        return resolved
+    }
+
+    private func managedLocalAudioBatchDirectory(for uri: String) -> URL? {
+        guard let fileURL = managedLocalAudioFileURL(for: uri),
+              let root = existingLocalAudioImportRoot() else { return nil }
+        return managedLocalAudioBatchDirectory(at: fileURL.deletingLastPathComponent(), root: root)
+    }
+
+    private func managedLocalAudioFileURL(for uri: String) -> URL? {
+        guard let fileURL = URL(string: uri), fileURL.isFileURL,
+              let components = URLComponents(url: fileURL, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "file",
+              components.host == nil || components.host == "",
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else { return nil }
+        let encodedPath = components.percentEncodedPath
+        let rawComponents = encodedPath.split(separator: "/", omittingEmptySubsequences: true)
+        for component in rawComponents {
+            guard let decoded = String(component).removingPercentEncoding,
+                  decoded != ".", decoded != "..",
+                  !decoded.contains("/"), !decoded.contains("\\") else { return nil }
         }
-        if let retainedDirectory {
-            localAudioBatchByURI = localAudioBatchByURI.filter { $0.value == retainedDirectory }
-        } else {
-            localAudioBatchByURI.removeAll()
+
+        let standardized = fileURL.standardizedFileURL
+        let rootPathComponents = localAudioImportDirectory.standardizedFileURL.pathComponents
+        let pathComponents = standardized.pathComponents
+        guard pathComponents.count == rootPathComponents.count + 2,
+              Array(pathComponents.prefix(rootPathComponents.count)) == rootPathComponents else { return nil }
+        let batchName = pathComponents[rootPathComponents.count]
+        let filename = pathComponents[rootPathComponents.count + 1]
+        let fileExtension = standardized.pathExtension.lowercased()
+        guard Self.isCanonicalUUID(batchName),
+              ["wav", "wave", "flac"].contains(fileExtension),
+              Self.isCanonicalUUID(standardized.deletingPathExtension().lastPathComponent) else { return nil }
+
+        guard let root = existingLocalAudioImportRoot(),
+              managedLocalAudioBatchDirectory(
+                  at: standardized.deletingLastPathComponent(), root: root
+              ) != nil else { return nil }
+        let resolved = standardized.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedComponents = resolved.pathComponents
+        guard resolvedComponents.count == root.pathComponents.count + 2,
+              Array(resolvedComponents.prefix(root.pathComponents.count)) == root.pathComponents,
+              resolved.lastPathComponent == filename,
+              resolved.deletingLastPathComponent().lastPathComponent == batchName else { return nil }
+        if let values = try? resolved.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           values.isSymbolicLink == true { return nil }
+        return resolved
+    }
+
+    private func managedLocalAudioBatchDirectory(at candidate: URL, root: URL) -> URL? {
+        let standardized = candidate.standardizedFileURL
+        guard standardized.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path == root.path,
+              Self.isCanonicalUUID(standardized.lastPathComponent),
+              let values = try? standardized.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true,
+              values.isSymbolicLink != true else { return nil }
+        let resolved = standardized.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.deletingLastPathComponent().path == root.path,
+              resolved.lastPathComponent == standardized.lastPathComponent else { return nil }
+        return resolved
+    }
+
+    private func pruneLocalAudioCache() {
+        guard localAudioQueuePersisted,
+              let root = existingLocalAudioImportRoot(),
+              let children = try? FileManager.default.contentsOfDirectory(
+                  at: root,
+                  includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+              ) else { return }
+
+        var retainedDirectories = Set<String>()
+        var retainedURIs = localAudioQueuedURIs
+        if let localAudioActiveURI { retainedURIs.insert(localAudioActiveURI) }
+        for uri in retainedURIs {
+            if let directory = managedLocalAudioBatchDirectory(for: uri) {
+                retainedDirectories.insert(directory.path)
+            }
         }
+        for directory in localAudioInFlightBatchDirectories {
+            if let managed = managedLocalAudioBatchDirectory(at: directory, root: root) {
+                retainedDirectories.insert(managed.path)
+            }
+        }
+        for child in children {
+            guard let directory = managedLocalAudioBatchDirectory(at: child, root: root),
+                  !retainedDirectories.contains(directory.path) else { continue }
+            removeManagedLocalAudioBatch(directory)
+        }
+    }
+
+    private func removeManagedLocalAudioBatch(_ candidate: URL) {
+        guard let root = existingLocalAudioImportRoot(),
+              let directory = managedLocalAudioBatchDirectory(at: candidate, root: root) else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private static func isCanonicalUUID(_ value: String) -> Bool {
+        guard value.count == 36, let uuid = UUID(uuidString: value) else { return false }
+        return value.caseInsensitiveCompare(uuid.uuidString) == .orderedSame
     }
 
     private func present(_ controller: UIViewController) {

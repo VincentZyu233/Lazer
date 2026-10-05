@@ -415,6 +415,7 @@
   "status.audio_queue_end": "再生キューが終了しました。アプリ内から曲を選び直してください",
   "status.track_unplayable": "この曲は一時的に再生できません",
   "status.playback_failed": "再生に失敗しました",
+  "status.playback_queue.restore_failed": "保存された再生キューを復元できませんでした",
   "status.local_file_permission_lost": "ローカルファイルへのアクセス権が失効しました。もう一度選択してください",
   "status.exclusive_fail": "排他オーディオ出力を取得できません。排他オーディオをオフにして再試行してください",
   "status.hifi.bit_perfect_volume": "ビットパーフェクト出力にはソフトウェア音量 100% が必要です。いったんオフにして 100% に設定し、DAC 側で音量を調整してください。",

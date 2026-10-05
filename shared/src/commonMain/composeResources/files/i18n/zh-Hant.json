@@ -415,6 +415,7 @@
   "status.audio_queue_end": "播放佇列已結束，請從應用內重新選擇一首歌",
   "status.track_unplayable": "這首歌暫時無法播放",
   "status.playback_failed": "播放失敗",
+  "status.playback_queue.restore_failed": "無法還原已儲存的播放佇列",
   "status.local_file_permission_lost": "本機檔案的存取授權已失效，請重新選擇該檔案",
   "status.exclusive_fail": "無法獨佔音訊輸出，請關閉獨佔音訊後重試",
   "status.hifi.bit_perfect_volume": "位元完美輸出需要軟體音量為 100%。請先關閉位元完美輸出，將軟體音量調至 100%，再用 DAC 調整音量。",

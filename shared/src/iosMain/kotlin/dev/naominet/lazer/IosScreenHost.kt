@@ -56,6 +56,12 @@ interface IosShellBridge {
      */
     fun playerLoad(url: String, startPlaying: Boolean, positionMillis: Long, generation: Long)
 
+    /** Updates Swift's file-retention set only after the full queue has been persisted. */
+    fun playerUpdateLocalAudioQueue(uris: List<String>, persisted: Boolean)
+
+    /** True only for a readable file owned by the app's local-audio import cache. */
+    fun playerLocalAudioFileExists(uri: String): Boolean
+
     fun playerPlay()
 
     fun playerPause()

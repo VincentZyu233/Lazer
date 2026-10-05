@@ -415,6 +415,7 @@
   "status.audio_queue_end": "Queue ended — pick a song in the app",
   "status.track_unplayable": "This song can't play right now",
   "status.playback_failed": "Playback failed",
+  "status.playback_queue.restore_failed": "The saved playback queue could not be restored",
   "status.local_file_permission_lost": "Access to this local file expired. Please select it again",
   "status.exclusive_fail": "Couldn't take exclusive audio output. Disable exclusive audio and retry",
   "status.hifi.bit_perfect_volume": "Bit-perfect output needs software volume at 100%. Turn bit-perfect off, set software volume to 100%, then adjust volume on the DAC.",
