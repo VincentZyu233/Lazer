@@ -183,6 +183,7 @@ internal class AndroidUac2DirectAudioOutputProvider(
             device = device,
             plan = plan,
             gateway = AndroidFrameworkUac2PlaybackSessionGateway(usbManager),
+            volumeControl = findAndroidUacPlaybackVolumeControl(descriptors),
         )
         session.openAndConfigure()
         return AndroidUac2NativeIsochronousTransport(session, plan)

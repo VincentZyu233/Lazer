@@ -195,6 +195,7 @@ internal class AndroidUac2PlaybackSession(
     private val device: UsbDevice,
     private val plan: AndroidUac2PlaybackStreamPlan,
     private val gateway: AndroidUac2PlaybackSessionGateway,
+    private val volumeControl: AndroidUacVolumeControl? = null,
 ) : AutoCloseable {
     private val claimedInterfaces = linkedSetOf<Int>()
     private var clockRanges: List<AndroidUac2ClockFrequencyRange> = emptyList()
@@ -208,6 +209,8 @@ internal class AndroidUac2PlaybackSession(
     private var previousConfigurationValue: Int? = null
     private var configurationMayHaveChanged = false
     private var failure: Throwable? = null
+    private var verifiedHardwareVolume: AndroidUacHardwareVolume? = null
+    private var hardwareVolumeRanges: List<AndroidUacVolumeRange> = emptyList()
 
     /** Held for the full configured session so a future libusb bridge can wrap its descriptor. */
     private var connection: UsbDeviceConnection? = null
@@ -292,6 +295,7 @@ internal class AndroidUac2PlaybackSession(
                 "AudioStreaming interface ${plan.interfaceNumber} alternate ${plan.alternateSetting} failed"
             }
             state = AndroidUac2PlaybackSessionState.ConfiguredNotStreaming
+            initializeHardwareVolume()
             return state
         } catch (error: Throwable) {
             failure = error
@@ -310,6 +314,37 @@ internal class AndroidUac2PlaybackSession(
             "USB connection is not configured for playback (state=$state)"
         }
         return requireConnection()
+    }
+
+    @get:Synchronized
+    val supportsHardwareVolume: Boolean
+        get() = state == AndroidUac2PlaybackSessionState.ConfiguredNotStreaming &&
+            verifiedHardwareVolume != null
+
+    /** Sends player volume only through the descriptor-verified Feature Unit on this session. */
+    @Synchronized
+    fun setHardwareVolume(volume: Float) {
+        require(volume.isFinite() && volume in 0f..1f) { "Hardware volume must be finite and between 0 and 1" }
+        check(state == AndroidUac2PlaybackSessionState.ConfiguredNotStreaming) {
+            "USB Audio playback session is not active (state=$state)"
+        }
+        val hardware = checkNotNull(verifiedHardwareVolume) {
+            "This UAC2 session has no verified Feature Unit hardware-volume control"
+        }
+        if (volume == 0f) {
+            check(volumeControl?.hasMasterMuteControl == true) {
+                "This USB Audio Feature Unit has no verified Mute control; zero volume is unsupported"
+            }
+            hardware.setMuteAndReadBack(true)
+            return
+        }
+
+        val targetDb256 = androidUacVolumeDb256ForLinearVolume(volume, hardwareVolumeRanges)
+            ?: error("Requested player volume is outside the USB device's advertised volume range")
+        hardware.setAndReadBackDb256(targetDb256, hardwareVolumeRanges)
+        if (volumeControl?.hasMasterMuteControl == true && hardware.readCurrentMute() == true) {
+            hardware.setMuteAndReadBack(false)
+        }
     }
 
     /** Device-detach callback: stop touching device controls, release local claims and close fd. */
@@ -342,6 +377,45 @@ internal class AndroidUac2PlaybackSession(
             "USB Audio interface $interfaceNumber alternate $alternateSetting could not be claimed"
         }
         claimedInterfaces += interfaceNumber
+    }
+
+    private fun initializeHardwareVolume() {
+        verifiedHardwareVolume = null
+        hardwareVolumeRanges = emptyList()
+        val candidate = volumeControl ?: return
+        if (candidate.version != AndroidUacVersion.Uac2 ||
+            candidate.controlInterfaceNumber != plan.controlInterfaceNumber
+        ) return
+
+        val hardware = AndroidUacHardwareVolume(
+            control = candidate,
+            transfer = object : AndroidUsbControlTransfer {
+                override fun transfer(request: AndroidUsbControlRequest, timeoutMillis: Int): Int =
+                    gateway.transfer(requireConnection(), request)
+            },
+        )
+        try {
+            val ranges = hardware.readVolumeRangesAndVerifyUnity()
+            when (val current = hardware.readCurrentVolume()) {
+                AndroidUacVolumeValue.Muted -> {
+                    check(candidate.hasMasterMuteControl && hardware.readCurrentMute() == true) {
+                        "USB Feature Unit reports muted volume without a verified Mute control"
+                    }
+                }
+
+                is AndroidUacVolumeValue.Finite -> check(ranges.any { it.contains(current.db256) }) {
+                    "USB Feature Unit current volume is outside its advertised range"
+                }
+            }
+            if (candidate.hasMasterMuteControl) hardware.readCurrentMute()
+            hardwareVolumeRanges = ranges
+            verifiedHardwareVolume = hardware
+        } catch (_: Exception) {
+            // Volume control is optional: malformed, unsupported, or unreadable controls never
+            // prevent PCM playback and never trigger a digital-volume fallback.
+            hardwareVolumeRanges = emptyList()
+            verifiedHardwareVolume = null
+        }
     }
 
     private fun readClockRanges(source: AndroidUac2ClockSource): List<AndroidUac2ClockFrequencyRange> {

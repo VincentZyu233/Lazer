@@ -5,6 +5,7 @@ import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbEndpoint
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import org.junit.Test
@@ -52,6 +53,78 @@ class AndroidUac2PlaybackSessionTest {
         assertTrue(gateway.operations.indexOf("restore-configuration:3") < gateway.operations.indexOf("release:2"))
         assertTrue(gateway.operations.indexOf("release:2") < gateway.operations.indexOf("release:1"))
         assertEquals("close", gateway.operations.last())
+    }
+
+    @Test
+    fun `verified Feature Unit uses the retained playback connection for volume and mute`() {
+        val gateway = FakeGateway(currentClockHz = 96_000)
+        val volumeControl = AndroidUacVolumeControl(
+            version = AndroidUacVersion.Uac2,
+            controlInterfaceNumber = 1,
+            unitId = 8,
+            hasMasterMuteControl = true,
+        )
+        val session = newSession(gateway, volumeControl = volumeControl)
+        session.openAndConfigure()
+
+        assertTrue(session.supportsHardwareVolume)
+        assertEquals(listOf("volume-range-header", "volume-range-full", "volume-current", "mute-current"),
+            gateway.operations.filter { it.startsWith("volume-") || it.startsWith("mute-") })
+
+        session.setHardwareVolume(0.5f)
+        assertEquals(-6 * 256, gateway.currentVolumeDb256)
+        session.setHardwareVolume(0f)
+        assertTrue(gateway.currentMute)
+        session.setHardwareVolume(1f)
+        assertEquals(0, gateway.currentVolumeDb256)
+        assertFalse(gateway.currentMute)
+        assertTrue(gateway.operations.filter { it.startsWith("volume-") || it.startsWith("mute-") }
+            .all { it != "volume-digital-fallback" })
+
+        session.close()
+        assertEquals(AndroidUac2PlaybackSessionState.Closed, session.state)
+    }
+
+    @Test
+    fun `Feature Unit without Mute rejects zero instead of substituting minimum attenuation`() {
+        val gateway = FakeGateway(currentClockHz = 96_000)
+        val session = newSession(
+            gateway,
+            volumeControl = AndroidUacVolumeControl(AndroidUacVersion.Uac2, 1, 8),
+        )
+        session.openAndConfigure()
+
+        assertTrue(session.supportsHardwareVolume)
+        assertFailsWith<IllegalStateException> { session.setHardwareVolume(0f) }
+        assertTrue(gateway.operations.none { it.startsWith("mute-") })
+        session.close()
+    }
+
+    @Test
+    fun `detach closes the shared USB session and forbids later hardware volume transfers`() {
+        val gateway = FakeGateway(currentClockHz = 96_000)
+        val session = newSession(
+            gateway,
+            volumeControl = AndroidUacVolumeControl(
+                AndroidUacVersion.Uac2,
+                controlInterfaceNumber = 1,
+                unitId = 8,
+                hasMasterMuteControl = true,
+            ),
+        )
+        session.openAndConfigure()
+        assertTrue(session.supportsHardwareVolume)
+        val volumeRequestCount = gateway.operations.count { it.startsWith("volume-") || it.startsWith("mute-") }
+
+        session.onDeviceDetached()
+
+        assertFalse(session.supportsHardwareVolume)
+        assertFailsWith<IllegalStateException> { session.setHardwareVolume(0.5f) }
+        assertEquals(
+            volumeRequestCount,
+            gateway.operations.count { it.startsWith("volume-") || it.startsWith("mute-") },
+        )
+        assertEquals(AndroidUac2PlaybackSessionState.Detached, session.state)
     }
 
     @Test
@@ -396,10 +469,12 @@ class AndroidUac2PlaybackSessionTest {
         gateway: FakeGateway,
         access: AndroidUac2ClockFrequencyAccess = AndroidUac2ClockFrequencyAccess.HostProgrammable,
         plan: AndroidUac2PlaybackStreamPlan = testPlan(access),
+        volumeControl: AndroidUacVolumeControl? = null,
     ) = AndroidUac2PlaybackSession(
         device = ReflectionHelpers.newInstance(UsbDevice::class.java),
         plan = plan,
         gateway = gateway,
+        volumeControl = volumeControl,
     )
 
     private fun selectorPlan(
@@ -477,6 +552,8 @@ class AndroidUac2PlaybackSessionTest {
         var failClaimFor: Int? = null
         var rejectClockRate: Long? = null
         var currentConfigurationValue = 3
+        var currentVolumeDb256 = 0
+        var currentMute = false
         var currentClockHz = currentClockHz
             private set
 
@@ -547,6 +624,49 @@ class AndroidUac2PlaybackSessionTest {
                     operations += "restore-configuration:$value"
                     if (configurationRestoreSucceeds) currentConfigurationValue = value
                     if (configurationRestoreSucceeds) 0 else -1
+                }
+
+                request.requestType == 0xa1 && request.request == 0x02 &&
+                    request.index ushr 8 == 8 && request.value ushr 8 == 0x02 -> {
+                    if (request.length == 2) {
+                        operations += "volume-range-header"
+                        writeUnsigned(request.data, 0, 1, byteCount = 2)
+                    } else {
+                        operations += "volume-range-full"
+                        writeUnsigned(request.data, 0, 1, byteCount = 2)
+                        writeSigned16(request.data, 2, -60 * 256)
+                        writeSigned16(request.data, 4, 0)
+                        writeSigned16(request.data, 6, 256)
+                    }
+                    request.length
+                }
+
+                request.requestType == 0xa1 && request.request == 0x01 &&
+                    request.index ushr 8 == 8 && request.value ushr 8 == 0x02 -> {
+                    operations += "volume-current"
+                    writeSigned16(request.data, 0, currentVolumeDb256)
+                    request.length
+                }
+
+                request.requestType == 0xa1 && request.request == 0x01 && request.length == 1 &&
+                    request.index ushr 8 == 8 && request.value ushr 8 == 0x01 -> {
+                    operations += "mute-current"
+                    request.data[0] = if (currentMute) 1 else 0
+                    request.length
+                }
+
+                request.requestType == 0x21 && request.request == 0x01 &&
+                    request.index ushr 8 == 8 && request.value ushr 8 == 0x02 -> {
+                    currentVolumeDb256 = readSigned16(request.data, 0)
+                    operations += "volume-set:$currentVolumeDb256"
+                    request.length
+                }
+
+                request.requestType == 0x21 && request.request == 0x01 && request.length == 1 &&
+                    request.index ushr 8 == 8 && request.value ushr 8 == 0x01 -> {
+                    currentMute = request.data[0].toInt() == 1
+                    operations += "mute-set:$currentMute"
+                    request.length
                 }
 
                 request.requestType == 0xa1 && request.request == 0x01 && request.length == 1 &&
@@ -638,6 +758,14 @@ class AndroidUac2PlaybackSessionTest {
         private fun writeUnsigned(data: ByteArray, offset: Int, value: Long, byteCount: Int = 4) {
             repeat(byteCount) { index -> data[offset + index] = (value ushr (index * 8)).toByte() }
         }
+
+        private fun writeSigned16(data: ByteArray, offset: Int, value: Int) {
+            data[offset] = value.toByte()
+            data[offset + 1] = (value ushr 8).toByte()
+        }
+
+        private fun readSigned16(data: ByteArray, offset: Int): Int =
+            ((data[offset + 1].toInt() and 0xff) shl 8 or (data[offset].toInt() and 0xff)).toShort().toInt()
 
         private fun readUnsigned(data: ByteArray, offset: Int): Long =
             (0 until 4).fold(0L) { result, index ->

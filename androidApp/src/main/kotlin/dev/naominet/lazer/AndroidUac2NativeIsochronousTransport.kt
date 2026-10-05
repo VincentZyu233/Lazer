@@ -38,7 +38,7 @@ internal class AndroidUac2NativeIsochronousTransport(
     override val channelCount: Int = plan.channelCount
     override val bytesPerSample: Int = plan.subslotSizeBytes
     override val bufferSizeInFrames: Long
-    override val supportsHardwareVolume: Boolean = false
+    override val supportsHardwareVolume: Boolean = playbackSession.supportsHardwareVolume
 
     init {
         require(sampleRateHz in 8000..768000) { "UAC2 sample rate is outside the supported USB 2.0 range" }
@@ -175,12 +175,14 @@ internal class AndroidUac2NativeIsochronousTransport(
 
     override fun setHardwareVolume(volume: Float) {
         require(volume.isFinite() && volume in 0f..1f) { "Hardware volume must be between zero and one" }
-        if (volume != 1f) {
-            throw AndroidUac2PcmTransportException(
-                NATIVE_TRANSPORT_NOT_SUPPORTED,
-                false,
-                "This UAC2 session has no verified Feature Unit hardware-volume control; digital gain is disabled",
-            )
+        synchronized(lock) {
+            ensureOpen()
+            ensureHealthy()
+            try {
+                playbackSession.setHardwareVolume(volume)
+            } catch (error: Exception) {
+                throw transportFailure(error)
+            }
         }
     }
 
@@ -280,6 +282,5 @@ internal class AndroidUac2NativeIsochronousTransport(
         const val FLUSH_TIMEOUT_MS = 5_000
         const val DRAIN_TIMEOUT_MS = 10_000
         const val NATIVE_TRANSPORT_IO_ERROR = -1
-        const val NATIVE_TRANSPORT_NOT_SUPPORTED = -12
     }
 }

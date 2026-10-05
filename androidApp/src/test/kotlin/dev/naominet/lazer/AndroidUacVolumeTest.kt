@@ -227,6 +227,15 @@ class AndroidUacVolumeTest {
         assertNull(findAndroidUacPlaybackVolumeControl(uac2Descriptors(masterControls = 0x04)))
         assertNull(findAndroidUacPlaybackVolumeControl(uac2Descriptors(masterControls = 0x08)))
         assertNull(findAndroidUacPlaybackVolumeControl(uac2Descriptors(masterControls = 0x00)))
+        assertEquals(
+            AndroidUacVolumeControl(
+                AndroidUacVersion.Uac2,
+                controlInterfaceNumber = 1,
+                unitId = 5,
+                hasMasterMuteControl = true,
+            ),
+            findAndroidUacPlaybackVolumeControl(uac2Descriptors(masterControls = 0x0f)),
+        )
     }
 
     @Test
@@ -297,19 +306,28 @@ class AndroidUacVolumeTest {
     }
 
     @Test
-    fun `hardware volume only reports SET after GET_CUR readback`() {
-        val transport = FakeTransfer(readBackDb256 = -11 * 256)
+    fun `hardware volume accepts SET only after matching GET_CUR readback`() {
+        val transport = FakeTransfer(readBackDb256 = -12 * 256)
         val volume = AndroidUacHardwareVolume(
             AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 4, unitId = 5),
             transport,
         )
 
-        assertEquals(AndroidUacVolumeValue.Finite(-11 * 256), volume.setAndReadBackDb256(-12 * 256))
+        assertEquals(AndroidUacVolumeValue.Finite(-12 * 256), volume.setAndReadBackDb256(-12 * 256))
         assertEquals(listOf(0x02, 0x02, 0x01, 0x01), transport.requests.map { it.request })
         assertEquals(2, transport.requests[0].length)
         assertEquals(8, transport.requests[1].length)
         assertEquals(0x21, transport.requests[2].requestType)
         assertEquals(0xa1, transport.requests[3].requestType)
+    }
+
+    @Test
+    fun `hardware volume rejects SET when GET_CUR does not match`() {
+        val volume = AndroidUacHardwareVolume(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 4, unitId = 5),
+            FakeTransfer(readBackDb256 = -11 * 256),
+        )
+        assertFailsWith<IllegalStateException> { volume.setAndReadBackDb256(-12 * 256) }
     }
 
     @Test
@@ -322,6 +340,46 @@ class AndroidUacVolumeTest {
 
         assertFailsWith<IllegalStateException> { volume.setAndReadBackDb256(-12 * 256) }
         assertEquals(listOf(0x82, 0x83, 0x84, 0x01), transport.requests.map { it.request })
+    }
+
+    @Test
+    fun `linear player volume maps to nearest advertised decibel step and zero requires mute`() {
+        val oneDbSteps = listOf(AndroidUacVolumeRange(-60 * 256, 0, 256))
+        assertEquals(0, androidUacVolumeDb256ForLinearVolume(1f, oneDbSteps))
+        assertEquals(-6 * 256, androidUacVolumeDb256ForLinearVolume(0.5f, oneDbSteps))
+        assertNull(androidUacVolumeDb256ForLinearVolume(0f, oneDbSteps))
+        assertNull(
+            androidUacVolumeDb256ForLinearVolume(
+                0.0001f,
+                listOf(AndroidUacVolumeRange(-20 * 256, 0, 256)),
+            ),
+        )
+    }
+
+    @Test
+    fun `UAC mute requests require a descriptor-advertised master mute control and verify readback`() {
+        val control = AndroidUacVolumeControl(
+            AndroidUacVersion.Uac2,
+            controlInterfaceNumber = 4,
+            unitId = 5,
+            hasMasterMuteControl = true,
+        )
+        val get = androidUacGetCurrentMuteRequest(control)
+        assertEquals(0xa1, get.requestType)
+        assertEquals(0x01, get.request)
+        assertEquals(0x0100, get.value)
+        assertEquals(0x0504, get.index)
+        assertEquals(1, get.length)
+
+        val transport = FakeTransfer(readBackDb256 = 0, setResult = 1, readBackMute = true)
+        val volume = AndroidUacHardwareVolume(control, transport)
+        volume.setMuteAndReadBack(true)
+        assertEquals(listOf(0x21, 0xa1), transport.requests.map { it.requestType })
+        assertEquals(0x0100, transport.requests[0].value)
+        assertContentEquals(byteArrayOf(1), transport.requests[0].data)
+        assertFailsWith<IllegalArgumentException> {
+            androidUacSetCurrentMuteRequest(control.copy(hasMasterMuteControl = false), true)
+        }
     }
 
     @Test
@@ -423,6 +481,7 @@ class AndroidUacVolumeTest {
     private inner class FakeTransfer(
         private val readBackDb256: Int,
         private val setResult: Int = 2,
+        private val readBackMute: Boolean = false,
         private val uac1Range: AndroidUacVolumeRange = AndroidUacVolumeRange(-60 * 256, 0, 256),
         private val uac2Ranges: List<AndroidUacVolumeRange> = listOf(AndroidUacVolumeRange(-60 * 256, 0, 256)),
     ) : AndroidUsbControlTransfer {
@@ -431,6 +490,10 @@ class AndroidUacVolumeTest {
         override fun transfer(request: AndroidUsbControlRequest, timeoutMillis: Int): Int {
             requests += request.copy(data = request.data.copyOf())
             if (request.requestType == 0x21) return setResult
+            if (request.value ushr 8 == 0x01 && request.length == 1) {
+                request.data[0] = if (readBackMute) 1 else 0
+                return request.length
+            }
             when (request.request) {
                 0x82 -> writeSigned16(request.data, uac1Range.minimumDb256)
                 0x83 -> writeSigned16(request.data, uac1Range.maximumDb256)

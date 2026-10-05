@@ -1,6 +1,7 @@
 package dev.naominet.lazer
 
 import android.hardware.usb.UsbDeviceConnection
+import kotlin.math.roundToInt
 
 internal enum class AndroidUacVersion {
     Uac1,
@@ -13,6 +14,7 @@ internal data class AndroidUacVolumeControl(
     val controlInterfaceNumber: Int,
     val unitId: Int,
     val channelNumber: Int = 0,
+    val hasMasterMuteControl: Boolean = false,
 )
 
 internal data class AndroidUsbControlRequest(
@@ -40,6 +42,25 @@ internal data class AndroidUacVolumeRange(
 
     fun contains(db256: Int): Boolean =
         db256 in minimumDb256..maximumDb256 && (db256 - minimumDb256) % resolutionDb256 == 0
+
+    fun nearestSupported(db256: Int): Int? {
+        if (db256 !in minimumDb256..maximumDb256) return null
+        val steps = ((db256.toLong() - minimumDb256 + resolutionDb256 / 2) / resolutionDb256)
+        return (minimumDb256.toLong() + steps * resolutionDb256).toInt()
+            .takeIf(::contains)
+    }
+}
+
+/** Maps Media3's linear amplitude to the nearest advertised USB volume step, without DSP gain. */
+internal fun androidUacVolumeDb256ForLinearVolume(
+    volume: Float,
+    ranges: List<AndroidUacVolumeRange>,
+): Int? {
+    require(volume.isFinite() && volume in 0f..1f)
+    if (volume == 0f) return null // Silence requires a separate, descriptor-advertised Mute control.
+    val requestedDb256 = (20.0 * kotlin.math.log10(volume.toDouble()) * 256.0).roundToInt()
+    return ranges.mapNotNull { it.nearestSupported(requestedDb256) }
+        .minByOrNull { kotlin.math.abs(it.toLong() - requestedDb256) }
 }
 
 internal sealed interface AndroidUacVolumeValue {
@@ -53,6 +74,7 @@ private data class AndroidUacAudioEntity(
     val sourceIds: List<Int>,
     val isInputTerminal: Boolean = false,
     val hasMasterVolume: Boolean = false,
+    val hasMasterMute: Boolean = false,
 )
 
 /** Accepts only the permission broadcast created for the request that is still awaiting a result. */
@@ -225,21 +247,23 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
                     if (length < 7) return null
                     val unitId = unsigned(offset + 3)
                     val sourceId = unsigned(offset + 4)
-                    val hasMasterVolumeControl = when (version) {
+                    val (hasMasterVolumeControl, hasMasterMuteControl) = when (version) {
                         AndroidUacVersion.Uac1 -> {
                             val controlSize = unsigned(offset + 5)
                             if (controlSize !in 1..4 || length < 7 + controlSize ||
                                 (length - 7) % controlSize != 0
                             ) return null
                             val controls = littleEndian(offset + 6, controlSize)
-                            (controls and UAC1_VOLUME_CONTROL_BIT) != 0
+                            ((controls and UAC1_VOLUME_CONTROL_BIT) != 0) to
+                                ((controls and UAC1_MUTE_CONTROL_BIT) != 0)
                         }
 
                         AndroidUacVersion.Uac2 -> {
                             if (length < 14 || (length - 6) % 4 != 0) return null
                             val masterControls = littleEndian(offset + 5, 4)
-                            ((masterControls ushr UAC2_VOLUME_CONTROL_SHIFT) and 0x3) ==
-                                UAC2_HOST_PROGRAMMABLE
+                            (((masterControls ushr UAC2_VOLUME_CONTROL_SHIFT) and 0x3) ==
+                                UAC2_HOST_PROGRAMMABLE) to
+                                ((masterControls and 0x3) == UAC2_HOST_PROGRAMMABLE)
                         }
                     }
                     if (!registerEntity(
@@ -248,11 +272,17 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
                             AndroidUacAudioEntity(
                                 sourceIds = listOf(sourceId),
                                 hasMasterVolume = hasMasterVolumeControl,
+                                hasMasterMute = hasMasterMuteControl,
                             ),
                         )
                     ) return null
                     if (hasMasterVolumeControl) {
-                        volumeUnits += AndroidUacVolumeControl(version, controlInterface, unitId)
+                        volumeUnits += AndroidUacVolumeControl(
+                            version = version,
+                            controlInterfaceNumber = controlInterface,
+                            unitId = unitId,
+                            hasMasterMuteControl = hasMasterMuteControl,
+                        )
                     }
                 }
 
@@ -518,6 +548,31 @@ internal fun androidUacSetCurrentVolumeRequest(
     )
 }
 
+internal fun androidUacGetCurrentMuteRequest(control: AndroidUacVolumeControl): AndroidUsbControlRequest =
+    AndroidUsbControlRequest(
+        requestType = USB_CLASS_INTERFACE_IN,
+        request = if (control.version == AndroidUacVersion.Uac1) UAC1_GET_CUR else UAC2_CUR,
+        value = (UAC_MUTE_CONTROL_SELECTOR shl 8) or control.channelNumber,
+        index = (control.unitId shl 8) or control.controlInterfaceNumber,
+        data = ByteArray(1),
+        length = 1,
+    )
+
+internal fun androidUacSetCurrentMuteRequest(
+    control: AndroidUacVolumeControl,
+    muted: Boolean,
+): AndroidUsbControlRequest {
+    require(control.hasMasterMuteControl) { "USB Audio Class Feature Unit has no writable master Mute control" }
+    return AndroidUsbControlRequest(
+        requestType = USB_CLASS_INTERFACE_OUT,
+        request = UAC_SET_CUR,
+        value = (UAC_MUTE_CONTROL_SELECTOR shl 8) or control.channelNumber,
+        index = (control.unitId shl 8) or control.controlInterfaceNumber,
+        data = byteArrayOf(if (muted) 1 else 0),
+        length = 1,
+    )
+}
+
 internal interface AndroidUsbControlTransfer {
     fun transfer(request: AndroidUsbControlRequest, timeoutMillis: Int = UAC_CONTROL_TIMEOUT_MILLIS): Int
 }
@@ -569,6 +624,33 @@ internal class AndroidUacHardwareVolume(
         else AndroidUacVolumeValue.Finite(raw)
     }
 
+    fun readCurrentMute(): Boolean? {
+        if (!control.hasMasterMuteControl) return null
+        val request = androidUacGetCurrentMuteRequest(control)
+        check(transfer.transfer(request) == request.length) { "USB Audio Class Mute GET_CUR failed" }
+        return when (request.data[0].toInt() and 0xff) {
+            0 -> false
+            1 -> true
+            else -> error("USB Audio Class Mute GET_CUR returned an invalid value")
+        }
+    }
+
+    fun readVolumeRangesAndVerifyUnity(): List<AndroidUacVolumeRange> = readVolumeRanges().also { ranges ->
+        require(ranges.any { it.contains(0) }) {
+            "USB Audio Class volume range does not include 0 dB unity gain"
+        }
+    }
+
+    fun setMuteAndReadBack(muted: Boolean) {
+        val request = androidUacSetCurrentMuteRequest(control, muted)
+        val sent = setCurrent?.invoke { transfer.transfer(request) } ?: transfer.transfer(request)
+        check(sent == request.length) { "USB Audio Class Mute SET_CUR failed ($sent)" }
+        val accepted = checkNotNull(readCurrentMute()) {
+            "USB Audio Class Feature Unit has no readable master Mute control"
+        }
+        check(accepted == muted) { "USB Audio Class Mute SET_CUR was not accepted" }
+    }
+
     fun setAndReadBackDb256(
         volumeDb256: Int,
         ranges: List<AndroidUacVolumeRange> = readVolumeRanges(),
@@ -579,7 +661,11 @@ internal class AndroidUacHardwareVolume(
         }
         val sent = setCurrent?.invoke { transfer.transfer(request) } ?: transfer.transfer(request)
         check(sent == request.length) { "USB Audio Class SET_CUR failed ($sent)" }
-        return readCurrentVolume()
+        return readCurrentVolume().also { accepted ->
+            check(accepted == AndroidUacVolumeValue.Finite(volumeDb256)) {
+                "USB Audio Class Volume SET_CUR was not accepted"
+            }
+        }
     }
 
     private fun readSignedDb256(request: AndroidUsbControlRequest): Int {
@@ -612,9 +698,11 @@ private const val USB_UAC2_SAMPLE_RATE_CONVERTER = 0x0d
 private const val USB_TERMINAL_TYPE_MASK = 0xff00
 private const val USB_TERMINAL_TYPE_PHYSICAL_OUTPUT = 0x0300
 private const val UAC1_VOLUME_CONTROL_BIT = 0x02
+private const val UAC1_MUTE_CONTROL_BIT = 0x01
 private const val UAC2_VOLUME_CONTROL_SHIFT = 2
 private const val UAC2_HOST_PROGRAMMABLE = 0x03
 private const val UAC_VOLUME_CONTROL_SELECTOR = 0x02
+private const val UAC_MUTE_CONTROL_SELECTOR = 0x01
 private const val USB_CLASS_INTERFACE_OUT = 0x21
 private const val USB_CLASS_INTERFACE_IN = 0xa1
 private const val UAC1_GET_CUR = 0x81

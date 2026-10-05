@@ -104,11 +104,10 @@ internal class AndroidUac2PcmTransportException(
 ) : Exception(message, cause)
 
 /**
- * PCM-only Media3 [AudioOutput] for a UAC2 transport.
- *
- * This is an unintegrated prototype. It has no USB implementation and makes no claim that samples
- * reach a physical DAC unchanged. All volume requests go to the transport's hardware-volume API;
- * no digital gain is applied here.
+ * PCM-only Media3 [AudioOutput] for the direct UAC2 USB transport. All volume requests go to the
+ * transport's verified hardware-volume API; no digital gain is applied here. Float PCM conversion
+ * and any enabled DSP may still alter source samples, so this class alone does not prove bit-perfect
+ * delivery to a physical DAC.
  */
 internal class AndroidUac2Media3AudioOutput(
     config: AudioOutputProvider.OutputConfig,
