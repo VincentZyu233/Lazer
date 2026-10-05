@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 jobs:
-  # Android APK, arm64-v8a only.
+  # Ship arm64-v8a APKs; run the native DSD instrumentation gate natively on x86_64.
   android:
     runs-on: ubuntu-latest
     steps:
@@ -27,10 +27,49 @@ jobs:
       # setup-gradle owns the Gradle wrapper, dependency and project build caches.
       # Do not cache generated APKs or build directories across commits.
       - uses: gradle/actions/setup-gradle@v6
+      - uses: android-actions/setup-android@v3
+      - name: Install Android native build tools
+        run: |
+          sdkmanager --install "ndk;30.0.16248370" "cmake;3.31.6"
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config nasm
+      - name: Enable KVM for the Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
       - name: Test Android unit suite
         run: ./gradlew :androidApp:testDebugUnitTest --stacktrace
       - name: Assemble arm64 release APK
         run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
+      - name: Verify the DSD decoder is packaged
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          apks = glob.glob("androidApp/build/outputs/apk/release/*.apk")
+          if len(apks) != 1:
+              raise SystemExit(f"Expected one release APK, found {len(apks)}")
+          with zipfile.ZipFile(apks[0]) as apk:
+              required = "lib/arm64-v8a/liblazer-audio-dsd.so"
+              if required not in apk.namelist():
+                  raise SystemExit(f"Release APK is missing {required}")
+          print(f"Verified native DSD decoder in {apks[0]}")
+          PY
+      - name: Generate compact Android DSD fixtures
+        run: ./gradlew :androidApp:generateAndroidDsdInstrumentationFixtures --stacktrace
+      - name: Run x86_64 DSD JNI instrumentation tests on API 35
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: ./gradlew :androidApp:connectedDebugAndroidTest -PlazerAbis=x86_64 --stacktrace
       - uses: actions/upload-artifact@v7
         with:
           name: lazer-apk-arm64
@@ -184,6 +223,23 @@ jobs:
             - end "$fixture_dir/end-96k.raw"
           "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" --dop \
             - end "$fixture_dir/end-dop.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd64_test.dsf" 44100 2301 \
+            "$fixture_dir/pull-full.raw" "$fixture_dir/pull-seek.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd64_test.dsf" 0 2301 \
+            "$fixture_dir/pull-auto-full.raw" "$fixture_dir/pull-auto-seek.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd64_test.dsf" 352800 --cancel-only
+          python3 native/lazer-audio/tools/generate_dsf_test_fixtures.py "$fixture_dir" \
+            --duration-ms 100 --rates 128
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd128_test.dsf" 0
+          python3 native/lazer-audio/tools/generate_dff_test_fixtures.py "$fixture_dir" \
+            --duration-ms 4000 --rates 64
+          python3 native/lazer-audio/tools/generate_dst_test_fixtures.py "$fixture_dir" \
+            --frames 300 --rate 64
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dff64_test.dff" 176400 2301 \
+            "$fixture_dir/dff-pull-full.raw" "$fixture_dir/dff-pull-seek.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dff64_mono_odd_payload_test.dff" 176400
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dst64_verbatim.dff" 176400 2301 \
+            "$fixture_dir/dst-pull-full.raw" "$fixture_dir/dst-pull-seek.raw"
           test ! -s "$fixture_dir/end-44k.raw"
           test ! -s "$fixture_dir/end-96k.raw"
           test ! -s "$fixture_dir/end-dop.raw"

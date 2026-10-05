@@ -229,6 +229,8 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
 
     override val supportsPcmTestTone: Boolean get() = true
 
+    override val supportsLocalReplayGain: Boolean get() = true
+
     override val supportsLocalAudioFiles: Boolean get() = true
 
     override val supportsUsbAudioTargetSelection: Boolean get() = true

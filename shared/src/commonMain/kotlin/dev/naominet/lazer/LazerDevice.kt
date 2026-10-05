@@ -96,6 +96,10 @@ interface LazerPlayer {
     fun updateEqualizer(state: LazerEqualizerState) {
     }
 
+    /** Applies local-track loudness normalization where the platform has an app-owned PCM path. */
+    fun updateReplayGainMode(mode: LazerReplayGainMode) {
+    }
+
     fun stopAndClearSession()
 }
 

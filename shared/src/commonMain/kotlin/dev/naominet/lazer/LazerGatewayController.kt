@@ -198,6 +198,8 @@ class LazerGatewayController(private val device: LazerDevice) {
         private set
     var audioQuality by mutableStateOf(settings.audioQuality)
         private set
+    var replayGainMode by mutableStateOf(settings.replayGainMode)
+        private set
     var exclusiveAudio by mutableStateOf(settings.exclusiveAudio)
         private set
     var equalizer by mutableStateOf(settings.equalizer)
@@ -683,6 +685,7 @@ class LazerGatewayController(private val device: LazerDevice) {
                     album = file.album,
                     durationMillis = file.durationMillis.coerceAtLeast(0L),
                     source = LazerTrackSource.LocalFile(file.uri),
+                    replayGain = file.replayGain,
                 )
             }
         if (tracks.isEmpty()) return
@@ -1123,6 +1126,13 @@ class LazerGatewayController(private val device: LazerDevice) {
         if (value !in lazerAudioQualityOptions || value == audioQuality) return
         audioQuality = value
         settings.audioQuality = value
+    }
+
+    fun updateReplayGainMode(mode: LazerReplayGainMode) {
+        if (replayGainMode == mode) return
+        replayGainMode = mode
+        settings.replayGainMode = mode
+        player.updateReplayGainMode(mode)
     }
 
     fun updateExclusiveAudio(enabled: Boolean) {

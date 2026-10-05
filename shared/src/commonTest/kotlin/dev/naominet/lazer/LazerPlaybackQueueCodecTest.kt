@@ -25,6 +25,12 @@ class LazerPlaybackQueueCodecTest {
             coverUrl = "https://example.test/cover.jpg",
             artists = listOf(Artist(id = 100L, name = "周杰伦")),
             translatedTitle = "Nocturne",
+            replayGain = LazerReplayGainTags(
+                trackGainDb = -7.25,
+                trackPeak = 0.82,
+                albumGainDb = -8.5,
+                albumPeak = 0.91,
+            ),
         )
         val local = LazerTrack(
             id = Long.MIN_VALUE + 20L,
@@ -33,6 +39,7 @@ class LazerPlaybackQueueCodecTest {
             album = "Demo",
             durationMillis = 90_000L,
             source = LazerTrackSource.LocalFile("content://provider/document/track-1"),
+            replayGain = LazerReplayGainTags(trackGainDb = 3.0, trackPeak = 0.5),
         )
         val expected = LazerPlaybackQueueSnapshot(
             tracks = listOf(online, local),
@@ -40,14 +47,16 @@ class LazerPlaybackQueueCodecTest {
             mode = LazerPlayMode.Shuffle,
         )
 
-        val restored = LazerPlaybackQueueCodec.decode(LazerPlaybackQueueCodec.encode(expected))
+        val encoded = LazerPlaybackQueueCodec.encode(expected)
+        assertTrue(encoded.contains("\"schemaVersion\":2"))
+        val restored = LazerPlaybackQueueCodec.decode(encoded)
 
         assertEquals(expected, restored)
     }
 
     @Test
     fun `decoder rejects unsupported schema malformed selection and oversized queues`() {
-        assertNull(LazerPlaybackQueueCodec.decode("{\"schemaVersion\":2,\"tracks\":[],\"index\":-1,\"mode\":\"ListLoop\"}"))
+        assertNull(LazerPlaybackQueueCodec.decode("{\"schemaVersion\":3,\"tracks\":[],\"index\":-1,\"mode\":\"ListLoop\"}"))
         assertNull(LazerPlaybackQueueCodec.decode("{\"schemaVersion\":1,\"tracks\":[],\"index\":0,\"mode\":\"ListLoop\"}"))
         assertNull(LazerPlaybackQueueCodec.decode("{not-json"))
 
@@ -57,6 +66,19 @@ class LazerPlaybackQueueCodecTest {
         )
         assertFalse(LazerPlaybackQueue.restoreSnapshot(oversized))
         assertFalse(runCatching { LazerPlaybackQueueCodec.encode(oversized) }.isSuccess)
+    }
+
+    @Test
+    fun `schema one queues restore with replay gain absent`() {
+        val schemaOne = """
+            {"schemaVersion":1,"tracks":[{"id":41,"title":"Legacy","artist":"Artist","album":"Album","durationMillis":90000,"sourceType":"gateway"}],"index":0,"mode":"ListLoop"}
+        """.trimIndent()
+
+        val restored = LazerPlaybackQueueCodec.decode(schemaOne)
+
+        assertEquals(1, restored?.tracks?.size)
+        assertEquals("Legacy", restored?.tracks?.single()?.title)
+        assertNull(restored?.tracks?.single()?.replayGain)
     }
 
     @Test

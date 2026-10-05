@@ -58,6 +58,7 @@ internal data class AndroidMedia3OutputSnapshot(
     val mixerAdvertisesBitPerfectBehavior: Boolean?,
     val mixerPreferenceAccepted: Boolean?,
     val appDspMayModifySamples: Boolean,
+    val replayGainAppliedDb: Double?,
     val directPath: DirectPathSnapshot,
     val outputDataFormat: PlaybackAudioOutputDataSnapshot,
 )
@@ -72,6 +73,7 @@ internal data class AndroidMedia3OutputSnapshot(
 internal class AndroidMedia3AudioOutputProvider(
     context: Context,
     initialEqualizer: LazerEqualizerState = LazerEqualizerState(),
+    initialReplayGainDb: Double = 0.0,
     private val onOutputChanged: (AndroidMedia3OutputSnapshot) -> Unit = {},
 ) : AutoCloseable {
     private val appContext = context.applicationContext
@@ -81,7 +83,7 @@ internal class AndroidMedia3AudioOutputProvider(
     private val closed = AtomicBoolean(false)
     private val releaseStarted = AtomicBoolean(false)
     private val snapshotPublicationGate = AndroidMedia3SnapshotPublicationGate()
-    private val pcmEqualizer = AndroidPcmEqualizer(initialEqualizer)
+    private val pcmEqualizer = AndroidPcmEqualizer(initialEqualizer, initialReplayGainDb)
     @Volatile private var selectedUsbTargetIdentity: String? = AndroidUsbAudioTargetStore(appContext).selectedIdentity
     private val mixerOverrides = linkedMapOf<MixerPreferenceKey, MixerPreferenceOverride>()
     private val externallyModifiedMixerPreferences = mutableSetOf<MixerPreferenceKey>()
@@ -113,7 +115,7 @@ internal class AndroidMedia3AudioOutputProvider(
                     isPcmEqualizerSupportedEncoding(config.encoding) &&
                     !config.isOffload &&
                     !config.isTunneling &&
-                    channelCount in 1..2
+                    channelCount in 1..8
                 ) {
                     AndroidEqualizingAudioOutput(
                         output,
@@ -145,6 +147,17 @@ internal class AndroidMedia3AudioOutputProvider(
 
     fun updateEqualizer(state: LazerEqualizerState) {
         pcmEqualizer.update(state)
+        if (closed.get()) return
+        val active = synchronized(lock) { routeListenerTrack to routeListenerConfig }
+        val track = active.first ?: return
+        val config = active.second ?: return
+        val requested = config.toPlatformTrackFormat() ?: return
+        val decision = chooseUsbRoute(requested)
+        publishTrackSnapshot(track, config, decision, latestSnapshot?.preferredUsbDeviceAccepted)
+    }
+
+    fun updateReplayGainDb(gainDb: Double) {
+        pcmEqualizer.updateReplayGainDb(gainDb)
         if (closed.get()) return
         val active = synchronized(lock) { routeListenerTrack to routeListenerConfig }
         val track = active.first ?: return
@@ -290,6 +303,9 @@ internal class AndroidMedia3AudioOutputProvider(
             mixerAdvertisesBitPerfectBehavior = routeEvidence.mixerAdvertisesBitPerfectBehavior,
             mixerPreferenceAccepted = routeEvidence.mixerPreferenceAccepted,
             appDspMayModifySamples = appDspMayModifySamples,
+            replayGainAppliedDb = pcmEqualizer.replayGainDb().takeIf {
+                it != 0.0 && appDspMayModifySamples
+            },
             directPath = assessAndroidMedia3DirectPath(
                 routedDeviceKnown = routed != null,
                 outputFormat = outputDataFormat,

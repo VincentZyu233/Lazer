@@ -249,6 +249,16 @@ object AndroidPlaybackConnection {
         )
     }
 
+    fun updateReplayGainMode(context: Context, mode: LazerReplayGainMode) {
+        if (snapshot.value.track == null) return
+        dispatch(
+            context,
+            Intent(context, AndroidPlaybackService::class.java)
+                .setAction(AndroidPlaybackService.ACTION_REPLAY_GAIN_CHANGED)
+                .putExtra(AndroidPlaybackService.EXTRA_REPLAY_GAIN_MODE, mode.name),
+        )
+    }
+
     fun stopAndClearSession(context: Context) = dispatch(context, AndroidPlaybackService.ACTION_STOP_AND_CLEAR_SESSION)
 
     fun playPcmTestTone(context: Context, format: LazerPcmTestFormat) = dispatch(
@@ -305,6 +315,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     private var player: ExoPlayer? = null
     private var outputProvider: AndroidMedia3AudioOutputProvider? = null
     private var equalizerState = LazerEqualizerState()
+    private var replayGainMode = LazerReplayGainMode.Off
     private var preparedGeneration: Long? = null
     private var completedGeneration: Long? = null
     /** User intent is kept separately because ExoPlayer can be buffering while it is not isPlaying. */
@@ -393,6 +404,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         AndroidPlaybackConnection.restorePersistedQueue(applicationContext)
         playbackQueueStore = AndroidPlaybackQueueStore(applicationContext)
         equalizerState = gatewaySettings.equalizer
+        replayGainMode = gatewaySettings.replayGainMode
         gatewaySessionStore = AndroidGatewaySessionStore(applicationContext)
         gateway = NeteaseMusicGateway(sessionStore = gatewaySessionStore)
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
@@ -448,6 +460,12 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             ACTION_EQUALIZER_CHANGED -> {
                 equalizerState = parseLazerEqualizer(intent.getStringExtra(EXTRA_EQUALIZER))
                 outputProvider?.updateEqualizer(equalizerState)
+            }
+            ACTION_REPLAY_GAIN_CHANGED -> {
+                replayGainMode = LazerReplayGainMode.entries.firstOrNull {
+                    it.name == intent.getStringExtra(EXTRA_REPLAY_GAIN_MODE)
+                } ?: LazerReplayGainMode.Off
+                outputProvider?.updateReplayGainDb(activeReplayGainResolution().appliedGainDb)
             }
             ACTION_STOP -> stopPlayback()
             ACTION_STOP_AND_CLEAR_SESSION -> stopPlayback(clearSession = true)
@@ -754,7 +772,16 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
     ) {
         preparedGeneration = null
         completedGeneration = null
-        val output = AndroidMedia3AudioOutputProvider(this, equalizerState) { observed ->
+        val replayGainResolution = if (track.source is LazerTrackSource.LocalFile) {
+            resolveLazerReplayGain(track.replayGain, replayGainMode)
+        } else {
+            LazerReplayGainResolution(0.0, LazerReplayGainSource.None)
+        }
+        val output = AndroidMedia3AudioOutputProvider(
+            context = this,
+            initialEqualizer = equalizerState,
+            initialReplayGainDb = replayGainResolution.appliedGainDb,
+        ) { observed ->
             if (generation != loadingGeneration) return@AndroidMedia3AudioOutputProvider
             val format = observed.actualTrackFormat ?: observed.requestedTrackFormat
             LazerPlaybackStateStore.update { state ->
@@ -773,6 +800,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                             mixerAdvertisesBitPerfectBehavior = observed.mixerAdvertisesBitPerfectBehavior,
                             mixerPreferenceAccepted = observed.mixerPreferenceAccepted,
                             appDspMayModifySamples = observed.appDspMayModifySamples,
+                            replayGainAppliedDb = observed.replayGainAppliedDb,
                             directPath = observed.directPath,
                             outputDataFormat = observed.outputDataFormat,
                         ),
@@ -784,7 +812,8 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         val httpFactory = DefaultHttpDataSource.Factory()
             .setUserAgent(mediaRequestHeaders.getValue("User-Agent"))
             .setDefaultRequestProperties(mediaRequestHeaders)
-        val dataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
+        val upstreamDataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
+        val dataSourceFactory = AndroidDsdPcmDataSourceFactory(this, upstreamDataSourceFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val newPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
@@ -1493,6 +1522,15 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         outputProvider = null
     }
 
+    private fun activeReplayGainResolution(): LazerReplayGainResolution {
+        val track = LazerPlaybackStateStore.snapshot.value.track
+        return if (track?.source is LazerTrackSource.LocalFile) {
+            resolveLazerReplayGain(track.replayGain, replayGainMode)
+        } else {
+            LazerReplayGainResolution(0.0, LazerReplayGainSource.None)
+        }
+    }
+
     /**
      * Captures the spectrum of our own playback for the playlist indicator. Optional, and gated on
      * the setting plus the microphone permission the platform demands for [Visualizer] even though
@@ -1600,6 +1638,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val ACTION_USB_AUDIO_TARGET_CHANGED = "dev.naominet.lazer.action.USB_AUDIO_TARGET_CHANGED"
         const val ACTION_AUDIO_LEVELS_CHANGED = "dev.naominet.lazer.action.AUDIO_LEVELS_CHANGED"
         const val ACTION_EQUALIZER_CHANGED = "dev.naominet.lazer.action.EQUALIZER_CHANGED"
+        const val ACTION_REPLAY_GAIN_CHANGED = "dev.naominet.lazer.action.REPLAY_GAIN_CHANGED"
         const val ACTION_PCM_TEST_TONE = "dev.naominet.lazer.action.PCM_TEST_TONE"
         const val ACTION_PCM_TEST_TONE_STOP = "dev.naominet.lazer.action.PCM_TEST_TONE_STOP"
         const val ACTION_STOP = "dev.naominet.lazer.action.STOP"
@@ -1609,6 +1648,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         const val EXTRA_PCM_SAMPLE_RATE = "pcm_sample_rate_hz"
         const val EXTRA_PCM_BIT_DEPTH = "pcm_bit_depth"
         const val EXTRA_EQUALIZER = "equalizer_state"
+        const val EXTRA_REPLAY_GAIN_MODE = "replay_gain_mode"
         const val EXTRA_USB_TARGET_IDENTITY = "usb_target_identity"
         const val EXTRA_USB_TARGET_USER_CHANGE = "usb_target_user_change"
 

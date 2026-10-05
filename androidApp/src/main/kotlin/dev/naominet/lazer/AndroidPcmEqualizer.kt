@@ -18,6 +18,11 @@ import kotlin.math.min
 
 private const val ANDROID_LIMITER_THRESHOLD_DB = -1.0
 private const val ANDROID_LIMITER_RELEASE_SECONDS = 0.12
+private const val ANDROID_MIN_REPLAY_GAIN_DB = -60.0
+private const val ANDROID_MAX_REPLAY_GAIN_DB = 24.0
+
+private fun normalizeAndroidReplayGainDb(value: Double): Double =
+    value.takeIf { it.isFinite() && it in ANDROID_MIN_REPLAY_GAIN_DB..ANDROID_MAX_REPLAY_GAIN_DB } ?: 0.0
 
 internal fun isPcmEqualizerSupportedEncoding(encoding: Int): Boolean = when (encoding) {
     C.ENCODING_PCM_FLOAT,
@@ -36,34 +41,43 @@ internal fun androidPcmDspMayModifySamples(
     encoding: Int,
     offload: Boolean = false,
     tunneling: Boolean = false,
+    replayGainDb: Double = 0.0,
 ): Boolean {
     if (
-        sampleRateHz <= 0 || channelCount !in 1..2 ||
+        sampleRateHz <= 0 || channelCount !in 1..8 ||
         !isPcmEqualizerSupportedEncoding(encoding) || offload || tunneling
     ) return false
 
-    val hasApplicableEq = state.enabled && state.bands.any { band ->
+    val stereoDspSupported = channelCount <= 2
+    val hasApplicableEq = stereoDspSupported && state.enabled && state.bands.any { band ->
         band.enabled && FloatBiquadCoefficients.forBand(band, sampleRateHz) != null
     }
-    val hasPreamp = state.enabled && 10.0.pow(state.preampDb / 20.0) != 1.0
-    return state.limiterEnabled || hasApplicableEq || hasPreamp
+    val hasPreamp = stereoDspSupported && state.enabled && 10.0.pow(state.preampDb / 20.0) != 1.0
+    return replayGainDb.isFinite() && replayGainDb != 0.0 ||
+        stereoDspSupported && state.limiterEnabled || hasApplicableEq || hasPreamp
 }
 
 /**
  * Float PCM equalizer used at Media3's AudioOutput boundary. It leaves input bytes untouched and
  * returns null when bypassed, so the forwarding output can pass the original buffer through.
  */
-internal class AndroidPcmEqualizer(initialState: LazerEqualizerState = LazerEqualizerState()) {
+internal class AndroidPcmEqualizer(
+    initialState: LazerEqualizerState = LazerEqualizerState(),
+    initialReplayGainDb: Double = 0.0,
+) {
     private val requestedState = AtomicReference(initialState.copy(bands = initialState.bands.toList()))
+    private val requestedReplayGainDb = AtomicReference(normalizeAndroidReplayGainDb(initialReplayGainDb))
 
     // All fields below are confined to the ExoPlayer audio output thread.
     private var activeState: LazerEqualizerState? = null
     private var activeSampleRateHz = 0
     private var activeChannelCount = 0
     private var activeEncoding = -1
+    private var activeReplayGainDb = 0.0
     private var coefficients: List<FloatBiquadCoefficients> = emptyList()
     private var states: List<FloatBiquadState> = emptyList()
     private var preamp = 1.0
+    private var replayGainMultiplier = 1.0
     private var processingEnabled = false
     private var limiterThreshold = 1.0
     private var limiterReleaseCoefficient = 0.0
@@ -75,6 +89,12 @@ internal class AndroidPcmEqualizer(initialState: LazerEqualizerState = LazerEqua
         requestedState.set(state.copy(bands = state.bands.toList()))
     }
 
+    fun updateReplayGainDb(gainDb: Double) {
+        requestedReplayGainDb.set(normalizeAndroidReplayGainDb(gainDb))
+    }
+
+    fun replayGainDb(): Double = requestedReplayGainDb.get()
+
     fun mayModifySamples(
         sampleRateHz: Int,
         channelCount: Int,
@@ -83,11 +103,12 @@ internal class AndroidPcmEqualizer(initialState: LazerEqualizerState = LazerEqua
         tunneling: Boolean,
     ): Boolean = androidPcmDspMayModifySamples(
         requestedState.get(), sampleRateHz, channelCount, encoding, offload, tunneling,
+        replayGainDb = requestedReplayGainDb.get(),
     )
 
     /** Returns a writable direct copy with EQ applied, or null when this stream is bypassed. */
     fun processCopy(input: ByteBuffer, sampleRateHz: Int, channelCount: Int, encoding: Int): ByteBuffer? {
-        if (!input.isDirect || sampleRateHz <= 0 || channelCount !in 1..2) return null
+        if (!input.isDirect || sampleRateHz <= 0 || channelCount !in 1..8) return null
         if (!isPcmEqualizerSupportedEncoding(encoding)) return null
         val bytesPerSample = when (encoding) {
             C.ENCODING_PCM_FLOAT, C.ENCODING_PCM_32BIT -> Int.SIZE_BYTES
@@ -96,7 +117,10 @@ internal class AndroidPcmEqualizer(initialState: LazerEqualizerState = LazerEqua
             else -> error("Supported PCM encoding missing byte width: $encoding")
         }
         if (input.remaining() % (bytesPerSample * channelCount) != 0) return null
-        configureIfNeeded(requestedState.get(), sampleRateHz, channelCount, encoding)
+        if (channelCount > 2) {
+            return processMultichannelReplayGain(input, channelCount, encoding)
+        }
+        configureIfNeeded(requestedState.get(), sampleRateHz, channelCount, encoding, requestedReplayGainDb.get())
         if (!processingEnabled) return null
 
         val source = input.duplicate()
@@ -195,6 +219,68 @@ internal class AndroidPcmEqualizer(initialState: LazerEqualizerState = LazerEqua
         return result
     }
 
+    /** Multichannel PCM keeps EQ/limiter bypassed, but still applies tagged ReplayGain. */
+    private fun processMultichannelReplayGain(
+        input: ByteBuffer,
+        channelCount: Int,
+        encoding: Int,
+    ): ByteBuffer? {
+        val gainDb = normalizeAndroidReplayGainDb(requestedReplayGainDb.get())
+        if (gainDb == 0.0) return null
+        val multiplier = 10.0.pow(gainDb / 20.0)
+        val byteCount = input.remaining()
+        val result = copyBuffer?.takeIf { it.capacity() >= byteCount }
+            ?: ByteBuffer.allocateDirect(byteCount).also { copyBuffer = it }
+        result.order(ByteOrder.nativeOrder())
+        result.clear()
+        result.limit(byteCount)
+        result.put(input.duplicate())
+        result.flip()
+
+        when (encoding) {
+            C.ENCODING_PCM_FLOAT -> {
+                val samples = result.asFloatBuffer()
+                for (index in 0 until samples.limit()) {
+                    val inputSample = samples.get(index).toDouble()
+                    val outputSample = if (inputSample.isFinite()) inputSample * multiplier else 0.0
+                    samples.put(index, outputSample.toFloat())
+                }
+            }
+            C.ENCODING_PCM_16BIT -> {
+                val samples = result.asShortBuffer()
+                for (index in 0 until samples.limit()) {
+                    val inputSample = samples.get(index).toDouble() / 32_768.0
+                    val scaled = (if (inputSample.isFinite()) inputSample * multiplier else 0.0) +
+                        (nextDitherUnit() - nextDitherUnit()) / 32_768.0
+                    samples.put(index, (scaled * 32_768.0).roundToInt()
+                        .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort())
+                }
+            }
+            C.ENCODING_PCM_24BIT -> {
+                val sampleCount = byteCount / 3
+                for (index in 0 until sampleCount) {
+                    val byteOffset = index * 3
+                    val inputSample = readPcm24(result, byteOffset).toDouble() / 8_388_608.0
+                    val scaled = (if (inputSample.isFinite()) inputSample * multiplier else 0.0) +
+                        (nextDitherUnit() - nextDitherUnit()) / 8_388_608.0
+                    writePcm24(result, byteOffset, (scaled * 8_388_608.0).roundToInt()
+                        .coerceIn(-8_388_608, 8_388_607))
+                }
+            }
+            C.ENCODING_PCM_32BIT -> {
+                val samples = result.asIntBuffer()
+                for (index in 0 until samples.limit()) {
+                    val inputSample = samples.get(index).toDouble() / 2_147_483_648.0
+                    val scaled = (if (inputSample.isFinite()) inputSample * multiplier else 0.0) +
+                        (nextDitherUnit() - nextDitherUnit()) / 2_147_483_648.0
+                    samples.put(index, (scaled * 2_147_483_648.0).roundToLong()
+                        .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt())
+                }
+            }
+        }
+        return result
+    }
+
     private fun readPcm24(buffer: ByteBuffer, index: Int): Int {
         val first = buffer.get(index).toInt() and 0xff
         val second = buffer.get(index + 1).toInt() and 0xff
@@ -226,33 +312,49 @@ internal class AndroidPcmEqualizer(initialState: LazerEqualizerState = LazerEqua
         activeSampleRateHz = 0
         activeChannelCount = 0
         activeEncoding = -1
+        activeReplayGainDb = 0.0
         coefficients = emptyList()
         states = emptyList()
         processingEnabled = false
         limiterEnvelope = 1.0
     }
 
-    private fun configureIfNeeded(state: LazerEqualizerState, sampleRateHz: Int, channels: Int, encoding: Int) {
+    private fun configureIfNeeded(
+        state: LazerEqualizerState,
+        sampleRateHz: Int,
+        channels: Int,
+        encoding: Int,
+        replayGainDb: Double,
+    ) {
         if (
             activeState == state && activeSampleRateHz == sampleRateHz &&
-            activeChannelCount == channels && activeEncoding == encoding
+            activeChannelCount == channels && activeEncoding == encoding &&
+            activeReplayGainDb == replayGainDb
         ) return
         activeState = state
         activeSampleRateHz = sampleRateHz
         activeChannelCount = channels
         activeEncoding = encoding
+        activeReplayGainDb = replayGainDb
         val enabledBands = if (state.enabled) state.bands.filter(LazerEqBand::enabled) else emptyList()
         coefficients = enabledBands.mapNotNull { FloatBiquadCoefficients.forBand(it, sampleRateHz) }
         states = coefficients.map { FloatBiquadState(channels) }
         preamp = if (state.enabled) 10.0.pow(state.preampDb / 20.0) else 1.0
-        processingEnabled = androidPcmDspMayModifySamples(state, sampleRateHz, channels, encoding)
+        replayGainMultiplier = 10.0.pow(replayGainDb / 20.0)
+        processingEnabled = androidPcmDspMayModifySamples(
+            state,
+            sampleRateHz,
+            channels,
+            encoding,
+            replayGainDb = replayGainDb,
+        )
         limiterThreshold = 10.0.pow(ANDROID_LIMITER_THRESHOLD_DB / 20.0)
         limiterReleaseCoefficient = exp(-1.0 / (ANDROID_LIMITER_RELEASE_SECONDS * sampleRateHz))
         limiterEnvelope = 1.0
     }
 
     private fun transform(input: Double, channel: Int): Double {
-        var sample = input * preamp
+        var sample = input * preamp * replayGainMultiplier
         for (index in coefficients.indices) {
             sample = states[index].process(coefficients[index], sample, channel)
         }

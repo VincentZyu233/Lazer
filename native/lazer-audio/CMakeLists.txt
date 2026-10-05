@@ -38,6 +38,58 @@ option(LAZER_AUDIO_BUILD_PROBE "Build the lazer-audio-probe console harness" OFF
 option(LAZER_AUDIO_TEST_ALLOW_ALSA_NULL
     "Allow the test-only ALSA null PCM route (requires a Linux probe build)" OFF)
 
+if(ANDROID)
+    foreach(_lazer_android_abi IN ITEMS "${ANDROID_ABI}" "${CMAKE_ANDROID_ARCH_ABI}")
+        if(_lazer_android_abi AND NOT _lazer_android_abi MATCHES "^(arm64-v8a|x86_64)$")
+            message(FATAL_ERROR
+                "The Android DSD FFmpeg SDK supports arm64-v8a and x86_64; "
+                "requested ${_lazer_android_abi}.")
+        endif()
+    endforeach()
+    if(ANDROID_PLATFORM MATCHES "^android-([0-9]+)$")
+        set(_lazer_android_api "${CMAKE_MATCH_1}")
+    elseif(ANDROID_PLATFORM MATCHES "^([0-9]+)$")
+        set(_lazer_android_api "${CMAKE_MATCH_1}")
+    elseif(CMAKE_ANDROID_API MATCHES "^[0-9]+$")
+        set(_lazer_android_api "${CMAKE_ANDROID_API}")
+    else()
+        message(FATAL_ERROR "Set ANDROID_PLATFORM to android-24 or newer for the Android DSD target.")
+    endif()
+    if(_lazer_android_api LESS 24)
+        message(FATAL_ERROR "The Android DSD FFmpeg SDK requires API 24 or newer.")
+    endif()
+
+    find_package(Threads REQUIRED)
+    add_library(lazer-audio-dsd SHARED
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+        src/native_dsd_packer.cpp
+        src/dsd_pcm_decoder.cpp
+        src/android_dsd_jni.cpp)
+    target_include_directories(lazer-audio-dsd PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        ${LAZER_FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(lazer-audio-dsd PRIVATE
+        ${LAZER_FFMPEG_LIBRARIES}
+        Threads::Threads)
+    target_compile_features(lazer-audio-dsd PRIVATE cxx_std_20)
+    set_target_properties(lazer-audio-dsd PROPERTIES
+        CXX_EXTENSIONS OFF
+        POSITION_INDEPENDENT_CODE ON)
+
+    if((ANDROID_STL AND NOT ANDROID_STL STREQUAL "c++_static") OR
+       (CMAKE_ANDROID_STL_TYPE AND NOT CMAKE_ANDROID_STL_TYPE STREQUAL "c++_static"))
+        message(FATAL_ERROR
+            "lazer-audio-dsd currently expects the single-library Android c++_static runtime; "
+            "configure with -DANDROID_STL=c++_static.")
+    endif()
+    message(STATUS "Building Android DSD decoder shared library with Android's c++_static runtime")
+    return()
+endif()
+
 set(LAZER_AUDIO_PLATFORM_SOURCES "")
 set(LAZER_AUDIO_PLATFORM_LIBRARIES "")
 if(WIN32)
@@ -489,6 +541,39 @@ if(LAZER_AUDIO_BUILD_PROBE)
         add_custom_command(TARGET lazer-audio-source-probe POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
                     "$<TARGET_FILE_DIR:lazer-audio-source-probe>"
+            VERBATIM)
+    endif()
+
+    # Verify the pull-style bounded DSD -> float-PCM facade used by mobile integrations. This
+    # probe also exercises cancellation while its ring is back-pressured; fixture-driven decode
+    # and seek cases run next to the existing generated DSF source probes in CI.
+    add_executable(lazer-audio-dsd-pcm-probe
+        tools/lazer_audio_dsd_pcm_probe.cpp
+        src/common.cpp
+        src/dff_dsf_reader.cpp
+        src/source.cpp
+        src/dop_packer.cpp
+        src/native_dsd_packer.cpp
+        src/dsd_pcm_decoder.cpp)
+    target_include_directories(lazer-audio-dsd-pcm-probe PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/include"
+        "${CMAKE_CURRENT_LIST_DIR}/src"
+        "${LAZER_FFMPEG_INCLUDE_DIR}")
+    target_link_libraries(lazer-audio-dsd-pcm-probe PRIVATE ${LAZER_FFMPEG_LIBRARIES})
+    target_compile_features(lazer-audio-dsd-pcm-probe PRIVATE cxx_std_20)
+    if(WIN32)
+        target_compile_definitions(lazer-audio-dsd-pcm-probe PRIVATE
+            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    endif()
+    if(MSVC)
+        set_property(TARGET lazer-audio-dsd-pcm-probe PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        target_compile_options(lazer-audio-dsd-pcm-probe PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    if(LAZER_FFMPEG_RUNTIME_FILES)
+        add_custom_command(TARGET lazer-audio-dsd-pcm-probe POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${LAZER_FFMPEG_RUNTIME_FILES}
+                    "$<TARGET_FILE_DIR:lazer-audio-dsd-pcm-probe>"
             VERBATIM)
     endif()
 

@@ -2079,6 +2079,26 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
+                        if (screen.supportsLocalReplayGain) {
+                            val replayGainMode = controller.replayGainMode
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(tr("settings.replay_gain.title"), style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        tr("settings.replay_gain.hint"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                SettingsDropdown(
+                                    options = LazerReplayGainMode.entries,
+                                    selected = replayGainMode,
+                                    label = { mode -> tr("settings.replay_gain.mode.${mode.name.lowercase()}") },
+                                    onSelected = controller::updateReplayGainMode,
+                                )
+                            }
+                        }
                         val equalizer = controller.equalizer
                         Row(
                             modifier = Modifier
@@ -2359,6 +2379,13 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
                         )
+                        playbackOutput.replayGainAppliedDb?.let { gainDb ->
+                            Text(
+                                tr("settings.hifi.output.replay_gain", formatEqualizerGain(gainDb)),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
                         val directPathStatus = when (playbackOutput.directPath.status) {
                             DirectPathStatus.NotRequested -> "not_requested"
                             DirectPathStatus.Eligible -> "eligible"

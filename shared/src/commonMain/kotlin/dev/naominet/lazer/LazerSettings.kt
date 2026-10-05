@@ -166,6 +166,13 @@ class LazerSettingsStore(
         get() = parseLazerEqualizer(preferences.getString(KEY_EQUALIZER, null))
         set(value) = preferences.putString(KEY_EQUALIZER, value.serialize())
 
+    /** Local-file ReplayGain policy. Online Gateway tracks never receive this per-file gain. */
+    var replayGainMode: LazerReplayGainMode
+        get() = LazerReplayGainMode.entries.firstOrNull {
+            it.name == preferences.getString(KEY_REPLAY_GAIN_MODE, null)
+        } ?: LazerReplayGainMode.Off
+        set(value) = preferences.putString(KEY_REPLAY_GAIN_MODE, value.name)
+
     var playbackInterface: LazerPlaybackInterface
         get() = parseLazerPlaybackInterface(preferences.getString(KEY_PLAYBACK_INTERFACE, null))
         set(value) = preferences.putString(KEY_PLAYBACK_INTERFACE, value.name)
@@ -211,6 +218,7 @@ class LazerSettingsStore(
         const val KEY_PLAY_MODE = "playback.mode"
         const val KEY_EXCLUSIVE_AUDIO = "playback.exclusive_audio"
         const val KEY_EQUALIZER = "playback.equalizer"
+        const val KEY_REPLAY_GAIN_MODE = "playback.replay_gain_mode"
         const val KEY_PLAYBACK_INTERFACE = "playback.interface"
         const val KEY_AUDIO_REACTIVE_LEVELS = "playback.audio_reactive_levels"
         const val KEY_HAPTICS_ENABLED = "interaction.haptics_enabled"

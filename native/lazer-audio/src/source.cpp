@@ -328,7 +328,12 @@ int32_t AudioSource::openDffAvio(const LazerAudioOpenParams &params) {
         return LazerAudioErrorSource;
     }
     format_ = FormatContext(opened);
-    return openCommon(params);
+    const int32_t commonResult = openCommon(params);
+    if (commonResult == LazerAudioOk && description_.dsd && description_.rawDsd) {
+        const int64_t bitCount = dffReader_.rawDsdBitCount();
+        if (bitCount > 0) setExactDsdDuration(bitCount, dffReader_.bitRate());
+    }
+    return commonResult;
 }
 
 int32_t AudioSource::openDffDst(const LazerAudioOpenParams &params) {
@@ -380,6 +385,8 @@ int32_t AudioSource::openDffDst(const LazerAudioOpenParams &params) {
     description_.canonicalChannelLayout = channels == 1 || channels == 2;
     description_.decoderFormatMatchesStream = false;
     description_.durationMillis = static_cast<int64_t>(dffReader_.dstFrameCount()) * 1000 / 75;
+    description_.durationSamples = static_cast<int64_t>(dffReader_.dstFrameCount()) *
+        dstSamplesPerFrame_;
 
     durationHintMillis_ = params.duration_hint_millis > 0 ? params.duration_hint_millis : 0;
     fileSizeBytes_ = -1;
@@ -543,6 +550,11 @@ int32_t AudioSource::openCommon(const LazerAudioOpenParams &params) {
     description_.bitrateKbps = static_cast<int32_t>(bitRate / 1000);
     description_.lossless = description_.dsd || codecIsLossless(codecDescriptor_);
     description_.durationMillis = durationMillis;
+    if (audioStream_->duration > 0 && audioStream_->time_base.num > 0 &&
+        audioStream_->time_base.den > 0) {
+        description_.durationSamples = av_rescale_q_rnd(audioStream_->duration,
+            audioStream_->time_base, AVRational{1, description_.sampleRate}, AV_ROUND_NEAR_INF);
+    }
 
     if (description_.sampleRate <= 0 || description_.channels <= 0) {
         lastError_ = "the audio stream reports no sample rate or channel count";
@@ -611,9 +623,10 @@ int32_t AudioSource::openCommon(const LazerAudioOpenParams &params) {
             close();
             return LazerAudioErrorInvalidArgument;
         }
-        description_.durationMillis = av_rescale_q(
-            cueEndSample_ - cueStartSample_, AVRational{1, description_.sampleRate},
-            kMillisTimeBase);
+    description_.durationMillis = av_rescale_q(
+        cueEndSample_ - cueStartSample_, AVRational{1, description_.sampleRate},
+        kMillisTimeBase);
+    description_.durationSamples = cueEndSample_ - cueStartSample_;
     } else {
         cueSegmentMode_ = false;
         physicalSampleCount_ = 0;
@@ -819,6 +832,31 @@ int32_t AudioSource::setTargetFormat(TargetFormat format) {
 
 void AudioSource::requestSeek(int64_t positionMillis) {
     seekRequest_.store(std::max<int64_t>(0, positionMillis), std::memory_order_release);
+}
+
+void AudioSource::setExactDsdDuration(int64_t dsdBitCount, int64_t dsdBitRate) noexcept {
+    if (!description_.dsd || !description_.rawDsd || dsdBitCount <= 0 || dsdBitRate <= 0 ||
+        dsdBitRate > std::numeric_limits<int>::max() || description_.sampleRate <= 0) return;
+    exactDsdBitCount_ = dsdBitCount;
+    exactDsdBitRate_ = dsdBitRate;
+    description_.durationSamples = av_rescale_q_rnd(dsdBitCount,
+        AVRational{1, static_cast<int>(dsdBitRate)},
+        AVRational{1, description_.sampleRate}, AV_ROUND_NEAR_INF);
+    description_.durationMillis = av_rescale_q_rnd(dsdBitCount,
+        AVRational{1, static_cast<int>(dsdBitRate)}, kMillisTimeBase, AV_ROUND_NEAR_INF);
+}
+
+int64_t AudioSource::totalOutputFrames() const noexcept {
+    if (exactDsdBitCount_ > 0 && exactDsdBitRate_ > 0 && target_.sampleRate > 0) {
+        return av_rescale_q_rnd(exactDsdBitCount_,
+            AVRational{1, static_cast<int>(exactDsdBitRate_)},
+            AVRational{1, target_.sampleRate}, AV_ROUND_NEAR_INF);
+    }
+    if (description_.durationSamples <= 0 || description_.sampleRate <= 0 ||
+        target_.sampleRate <= 0) return 0;
+    return av_rescale_q_rnd(description_.durationSamples,
+        AVRational{1, description_.sampleRate}, AVRational{1, target_.sampleRate},
+        AV_ROUND_NEAR_INF);
 }
 
 int32_t AudioSource::applySeek(int64_t positionMillis) {
@@ -1593,6 +1631,8 @@ void AudioSource::close() {
     dstSamplesPerFrame_ = 0;
     dstFrameBytes_.clear();
     description_ = StreamDescription{};
+    exactDsdBitCount_ = 0;
+    exactDsdBitRate_ = 0;
     durationHintMillis_ = 0;
     cueSegmentMode_ = false;
     cueBoundaryReached_ = false;

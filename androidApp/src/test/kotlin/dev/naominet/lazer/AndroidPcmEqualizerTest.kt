@@ -53,6 +53,31 @@ class AndroidPcmEqualizerTest {
     }
 
     @Test
+    fun `multichannel output reports ReplayGain without claiming stereo EQ or limiter`() {
+        val state = LazerEqualizerState(enabled = true, limiterEnabled = true)
+
+        assertFalse(androidPcmDspMayModifySamples(state, 48_000, 6, C.ENCODING_PCM_FLOAT))
+        assertTrue(
+            androidPcmDspMayModifySamples(
+                state,
+                48_000,
+                6,
+                C.ENCODING_PCM_FLOAT,
+                replayGainDb = -6.0,
+            ),
+        )
+        assertFalse(
+            androidPcmDspMayModifySamples(
+                state,
+                48_000,
+                9,
+                C.ENCODING_PCM_FLOAT,
+                replayGainDb = -6.0,
+            ),
+        )
+    }
+
+    @Test
     fun `wrapper accepts float and integer pcm16 24 and 32 only`() {
         assertTrue(isPcmEqualizerSupportedEncoding(C.ENCODING_PCM_FLOAT))
         assertTrue(isPcmEqualizerSupportedEncoding(C.ENCODING_PCM_16BIT))
@@ -69,6 +94,114 @@ class AndroidPcmEqualizerTest {
 
         assertNull(equalizer.processCopy(input, 48_000, 2, C.ENCODING_PCM_FLOAT))
         assertEquals(0, input.position())
+    }
+
+    @Test
+    fun `ReplayGain processes float PCM with EQ and limiter bypassed`() {
+        val gainDb = -6.0
+        val gain = 10.0.pow(gainDb / 20.0)
+        val equalizer = AndroidPcmEqualizer(
+            LazerEqualizerState(enabled = false, limiterEnabled = false),
+            initialReplayGainDb = gainDb,
+        )
+        val input = floatBuffer(0.25f, -0.5f)
+
+        assertTrue(equalizer.mayModifySamples(48_000, 2, C.ENCODING_PCM_FLOAT, false, false))
+        val output = assertNotNull(equalizer.processCopy(input, 48_000, 2, C.ENCODING_PCM_FLOAT))
+            .order(ByteOrder.nativeOrder())
+
+        assertEquals((0.25 * gain).toFloat(), output.getFloat(0), 1e-6f)
+        assertEquals((-0.5 * gain).toFloat(), output.getFloat(Float.SIZE_BYTES), 1e-6f)
+        assertEquals(0.25f, input.getFloat(0))
+        assertEquals(-0.5f, input.getFloat(Float.SIZE_BYTES))
+    }
+
+    @Test
+    fun `ReplayGain zero remains transparent and updates affect following buffers`() {
+        val equalizer = AndroidPcmEqualizer(
+            LazerEqualizerState(enabled = false, limiterEnabled = false),
+        )
+        assertNull(equalizer.processCopy(floatBuffer(0.5f), 48_000, 1, C.ENCODING_PCM_FLOAT))
+
+        equalizer.updateReplayGainDb(-6.0)
+        val first = assertNotNull(
+            equalizer.processCopy(floatBuffer(0.5f), 48_000, 1, C.ENCODING_PCM_FLOAT),
+        ).order(ByteOrder.nativeOrder())
+        assertEquals((0.5 * 10.0.pow(-6.0 / 20.0)).toFloat(), first.getFloat(0), 1e-6f)
+
+        equalizer.updateReplayGainDb(-12.0)
+        val second = assertNotNull(
+            equalizer.processCopy(floatBuffer(0.5f), 48_000, 1, C.ENCODING_PCM_FLOAT),
+        ).order(ByteOrder.nativeOrder())
+        assertEquals((0.5 * 10.0.pow(-12.0 / 20.0)).toFloat(), second.getFloat(0), 1e-6f)
+    }
+
+    @Test
+    fun `multichannel float ReplayGain applies to every channel while stereo DSP stays bypassed`() {
+        val gainDb = -6.0
+        val gain = 10.0.pow(gainDb / 20.0)
+        val equalizer = AndroidPcmEqualizer(
+            LazerEqualizerState(
+                enabled = true,
+                preampDb = 12.0,
+                limiterEnabled = true,
+                bands = listOf(LazerEqBand(1_000.0, gainDb = 6.0)),
+            ),
+            initialReplayGainDb = gainDb,
+        )
+        val input = floatBuffer(0.1f, -0.2f, 0.3f, -0.4f, 0.5f, -0.6f)
+        val originalBytes = ByteArray(input.remaining()).also { input.duplicate().get(it) }
+
+        assertTrue(equalizer.mayModifySamples(48_000, 6, C.ENCODING_PCM_FLOAT, false, false))
+        val output = assertNotNull(equalizer.processCopy(input, 48_000, 6, C.ENCODING_PCM_FLOAT))
+            .order(ByteOrder.nativeOrder())
+
+        for (channel in 0 until 6) {
+            assertEquals(input.getFloat(channel * Float.SIZE_BYTES) * gain.toFloat(),
+                output.getFloat(channel * Float.SIZE_BYTES), 1e-6f)
+        }
+        assertContentEquals(originalBytes, ByteArray(input.remaining()).also { input.duplicate().get(it) })
+    }
+
+    @Test
+    fun `ReplayGain applies to pcm16 packed pcm24 and pcm32 integer output`() {
+        val gain = 10.0.pow(-6.0 / 20.0)
+        val bypassedState = LazerEqualizerState(enabled = false, limiterEnabled = false)
+
+        val output16 = assertNotNull(
+            AndroidPcmEqualizer(bypassedState, -6.0).processCopy(
+                ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
+                    .putShort(16_384).putShort((-16_384).toShort()).flip() as ByteBuffer,
+                48_000,
+                2,
+                C.ENCODING_PCM_16BIT,
+            ),
+        ).order(ByteOrder.nativeOrder())
+        assertTrue(kotlin.math.abs(output16.getShort(0).toInt() - (16_384 * gain).toInt()) <= 1)
+        assertTrue(kotlin.math.abs(output16.getShort(2).toInt() - (-16_384 * gain).toInt()) <= 1)
+
+        val output24 = assertNotNull(
+            AndroidPcmEqualizer(bypassedState, -6.0).processCopy(
+                pcm24Buffer(4_194_304, -4_194_304),
+                48_000,
+                2,
+                C.ENCODING_PCM_24BIT,
+            ),
+        )
+        assertTrue(kotlin.math.abs(readPcm24(output24, 0) - (4_194_304 * gain).toInt()) <= 1)
+        assertTrue(kotlin.math.abs(readPcm24(output24, 3) - (-4_194_304 * gain).toInt()) <= 1)
+
+        val output32 = assertNotNull(
+            AndroidPcmEqualizer(bypassedState, -6.0).processCopy(
+                ByteBuffer.allocateDirect(2 * Int.SIZE_BYTES).order(ByteOrder.nativeOrder())
+                    .putInt(1_073_741_824).putInt(-1_073_741_824).flip() as ByteBuffer,
+                48_000,
+                2,
+                C.ENCODING_PCM_32BIT,
+            ),
+        ).order(ByteOrder.nativeOrder())
+        assertTrue(kotlin.math.abs(output32.getInt(0).toLong() - (1_073_741_824 * gain).toLong()) <= 1L)
+        assertTrue(kotlin.math.abs(output32.getInt(Int.SIZE_BYTES).toLong() - (-1_073_741_824 * gain).toLong()) <= 1L)
     }
 
     @Test

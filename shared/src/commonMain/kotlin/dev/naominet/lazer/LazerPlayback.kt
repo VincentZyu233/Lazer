@@ -34,6 +34,7 @@ data class PlaybackOutputSnapshot(
     val mixerAdvertisesBitPerfectBehavior: Boolean?,
     val mixerPreferenceAccepted: Boolean?,
     val appDspMayModifySamples: Boolean? = null,
+    val replayGainAppliedDb: Double? = null,
     val directPath: DirectPathSnapshot = DirectPathSnapshot(),
     val outputDataFormat: PlaybackAudioOutputDataSnapshot? = null,
 )

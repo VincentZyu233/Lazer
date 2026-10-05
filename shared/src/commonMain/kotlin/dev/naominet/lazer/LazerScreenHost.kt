@@ -78,6 +78,9 @@ interface LazerScreenHost {
     /** Android can exercise an exact PCM output format with a quiet local test tone. */
     val supportsPcmTestTone: Boolean get() = false
 
+    /** Android can apply ReplayGain to decoded local PCM in its AudioOutput provider. */
+    val supportsLocalReplayGain: Boolean get() = false
+
     /** Android can direct ordinary Media3 playback to a selected USB audio output. */
     val supportsUsbAudioTargetSelection: Boolean get() = false
 

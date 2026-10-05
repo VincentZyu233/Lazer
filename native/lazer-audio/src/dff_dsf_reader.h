@@ -30,6 +30,7 @@ public:
     [[nodiscard]] bool isDst() const noexcept { return isDst_; }
     [[nodiscard]] uint32_t bitRate() const noexcept { return bitRate_; }
     [[nodiscard]] int32_t channels() const noexcept { return channels_; }
+    [[nodiscard]] int64_t rawDsdBitCount() const noexcept;
     [[nodiscard]] uint32_t dstFrameRate() const noexcept { return dstFrameRate_; }
     [[nodiscard]] uint32_t dstFrameCount() const noexcept { return dstFrameCount_; }
 

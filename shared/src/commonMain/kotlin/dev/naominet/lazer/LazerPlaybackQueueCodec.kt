@@ -7,7 +7,7 @@ import kotlinx.serialization.json.Json
 
 /** Versioned, platform-neutral representation of the Android queue stored between launches. */
 object LazerPlaybackQueueCodec {
-    private const val SCHEMA_VERSION = 1
+    private const val SCHEMA_VERSION = 2
     private const val MAX_ENCODED_LENGTH = 20 * 1024 * 1024
     private const val MAX_METADATA_FIELD_LENGTH = 16 * 1024
     private const val MAX_TRACK_METADATA_LENGTH = 16 * 1024
@@ -37,7 +37,7 @@ object LazerPlaybackQueueCodec {
         if (serialized.isNullOrBlank() || serialized.length > MAX_ENCODED_LENGTH) return null
         return runCatching {
             val persisted = json.decodeFromString<PersistedQueue>(serialized)
-            if (persisted.schemaVersion != SCHEMA_VERSION) return null
+            if (persisted.schemaVersion !in SUPPORTED_SCHEMA_VERSIONS) return null
             if (persisted.tracks.size > LazerPlaybackQueue.MAX_TRACKS) return null
             val mode = LazerPlayMode.entries.firstOrNull { it.name == persisted.mode } ?: return null
             val tracks = persisted.tracks.map(PersistedTrack::toTrack)
@@ -106,6 +106,7 @@ object LazerPlaybackQueueCodec {
         val translatedTitle: String? = null,
         val sourceType: String = SOURCE_GATEWAY,
         val localUri: String? = null,
+        val replayGain: PersistedReplayGainTags? = null,
     ) {
         constructor(track: LazerTrack) : this(
             id = track.id,
@@ -121,6 +122,7 @@ object LazerPlaybackQueueCodec {
                 is LazerTrackSource.LocalFile -> SOURCE_LOCAL
             },
             localUri = (track.source as? LazerTrackSource.LocalFile)?.uri,
+            replayGain = track.replayGain?.toPersistedReplayGain(),
         )
 
         fun toTrack(): LazerTrack {
@@ -153,9 +155,34 @@ object LazerPlaybackQueueCodec {
                 artists = artists.map { dev.naominet.lazer.gateway.model.Artist(id = it.id, name = it.name) },
                 translatedTitle = translatedTitle,
                 source = source,
+                replayGain = replayGain?.toLazerReplayGain(),
             )
         }
     }
+
+    @Serializable
+    private data class PersistedReplayGainTags(
+        val trackGainDb: Double? = null,
+        val trackPeak: Double? = null,
+        val albumGainDb: Double? = null,
+        val albumPeak: Double? = null,
+    )
+
+    private fun LazerReplayGainTags.toPersistedReplayGain(): PersistedReplayGainTags? =
+        PersistedReplayGainTags(
+            trackGainDb = trackGainDb?.takeIf(Double::isValidLazerReplayGainDb),
+            trackPeak = trackPeak?.takeIf(Double::isValidLazerReplayGainPeak),
+            albumGainDb = albumGainDb?.takeIf(Double::isValidLazerReplayGainDb),
+            albumPeak = albumPeak?.takeIf(Double::isValidLazerReplayGainPeak),
+        ).takeIf { it.trackGainDb != null || it.trackPeak != null || it.albumGainDb != null || it.albumPeak != null }
+
+    private fun PersistedReplayGainTags.toLazerReplayGain(): LazerReplayGainTags? =
+        LazerReplayGainTags(
+            trackGainDb = trackGainDb?.takeIf(Double::isValidLazerReplayGainDb),
+            trackPeak = trackPeak?.takeIf(Double::isValidLazerReplayGainPeak),
+            albumGainDb = albumGainDb?.takeIf(Double::isValidLazerReplayGainDb),
+            albumPeak = albumPeak?.takeIf(Double::isValidLazerReplayGainPeak),
+        ).takeIf { it.trackGainDb != null || it.trackPeak != null || it.albumGainDb != null || it.albumPeak != null }
 
     @Serializable
     private data class PersistedArtist(
@@ -165,4 +192,5 @@ object LazerPlaybackQueueCodec {
 
     private const val SOURCE_GATEWAY = "gateway"
     private const val SOURCE_LOCAL = "local"
+    private val SUPPORTED_SCHEMA_VERSIONS = setOf(1, SCHEMA_VERSION)
 }

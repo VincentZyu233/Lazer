@@ -77,6 +77,8 @@ struct StreamDescription {
     bool canonicalChannelLayout = false;
     bool decoderFormatMatchesStream = false;
     int64_t durationMillis = 0;
+    /* Exact decoded sample-frame count when the container publishes one, otherwise zero. */
+    int64_t durationSamples = 0;
 };
 
 /* A uniquely-owned AVFrame. */

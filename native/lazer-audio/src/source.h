@@ -115,6 +115,11 @@ public:
     }
 
     [[nodiscard]] const StreamDescription &description() const noexcept { return description_; }
+    /* Overrides estimated DSD timing with an authoritative container bit count and bit clock. */
+    void setExactDsdDuration(int64_t dsdBitCount, int64_t dsdBitRate) noexcept;
+    /* Returns the exact output PCM frame count when the container provides an authoritative
+     * sample count; zero means the duration is unknown. */
+    [[nodiscard]] int64_t totalOutputFrames() const noexcept;
     [[nodiscard]] const std::string &lastError() const noexcept { return lastError_; }
     [[nodiscard]] int64_t producedFrames() const noexcept {
         return producedFrames_.load(std::memory_order_acquire);
@@ -181,6 +186,8 @@ private:
     DopPacker dopPacker_{2};
     NativeDsdPacker nativeDsdPacker_{};
     StreamDescription description_{};
+    int64_t exactDsdBitCount_ = 0;
+    int64_t exactDsdBitRate_ = 0;
     int64_t durationHintMillis_ = 0;
     bool cueSegmentMode_ = false;
     bool cueBoundaryReached_ = false;

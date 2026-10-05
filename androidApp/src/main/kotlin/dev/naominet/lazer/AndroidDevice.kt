@@ -97,6 +97,9 @@ class AndroidPlayer(private val context: Context) : LazerPlayer {
     override fun updateEqualizer(state: LazerEqualizerState) =
         AndroidPlaybackConnection.updateEqualizer(context, state)
 
+    override fun updateReplayGainMode(mode: LazerReplayGainMode) =
+        AndroidPlaybackConnection.updateReplayGainMode(context, mode)
+
     override fun stopAndClearSession() = AndroidPlaybackConnection.stopAndClearSession(context)
 }
 

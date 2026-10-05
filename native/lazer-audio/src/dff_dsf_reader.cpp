@@ -86,6 +86,14 @@ DffDsfReader::~DffDsfReader() {
     close();
 }
 
+int64_t DffDsfReader::rawDsdBitCount() const noexcept {
+    if (isDst_ || bytesPerChannel_ == 0 ||
+        bytesPerChannel_ > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / 8U) {
+        return 0;
+    }
+    return static_cast<int64_t>(bytesPerChannel_ * 8U);
+}
+
 bool DffDsfReader::hasDffMagic(const wchar_t *path) {
     if (path == nullptr) return false;
     FILE *file = openWideFileForRead(path);
