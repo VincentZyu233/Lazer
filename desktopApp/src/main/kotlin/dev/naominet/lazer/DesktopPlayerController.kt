@@ -362,14 +362,29 @@ private const val LISTEN_TOGETHER_HEARTBEAT_MILLIS = 10_000L
 private const val LISTEN_TOGETHER_SEEK_TOLERANCE_MILLIS = 4_000L
 private const val MPD_STATUS_POLL_MILLIS = 2_000L
 
-class DesktopPlayerController(
-    private val gateway: NeteaseMusicGateway = createDesktopGateway(),
+/** Runtime overrides used to exercise the real controller-to-native recovery path in JVM tests. */
+internal data class DesktopPlayerControllerTestOverrides(
+    val nativeAudioLibrary: LazerAudioLibrary,
+    val enumerateOutputDevices: suspend () -> List<DesktopAudioOutputDevice>,
+    val awaitRecoveryRetry: suspend (attempt: Int) -> Unit,
+    val localPlaybackQueueStore: DesktopLocalPlaybackQueueStore,
+)
+
+class DesktopPlayerController private constructor(
+    private val gateway: NeteaseMusicGateway,
+    private val testOverrides: DesktopPlayerControllerTestOverrides?,
 ) {
+    constructor(gateway: NeteaseMusicGateway = createDesktopGateway()) : this(gateway, null)
+
+    internal constructor(testOverrides: DesktopPlayerControllerTestOverrides) :
+        this(createDesktopGateway(), testOverrides)
+
     private val controllerJob = SupervisorJob()
     private val scope = CoroutineScope(controllerJob + Dispatchers.Swing)
     private val playlistCache = DesktopPlaylistCache()
     private val localLibraryStore = DesktopLocalAudioLibraryStore()
-    private val localPlaybackQueueStore = DesktopLocalPlaybackQueueStore()
+    private val localPlaybackQueueStore =
+        testOverrides?.localPlaybackQueueStore ?: DesktopLocalPlaybackQueueStore()
     private val localPlaybackQueueSaveMutex = Mutex()
     private val localPlaybackQueueSaveGeneration = AtomicLong(0L)
     private val localPlaybackQueueNeedsFullWrite = AtomicBoolean(false)
@@ -636,7 +651,9 @@ class DesktopPlayerController(
      * The native engine is optional: it needs its DLL and the FFmpeg DLLs beside it. When it is
      * missing, or the listener never turned it on, playback stays on the Java Sound path.
      */
-    private val nativePlayer: DesktopNativeAudioPlayer? = if (LazerAudioLoader.isAvailable) {
+    private val nativePlayer: DesktopNativeAudioPlayer? = if (
+        testOverrides != null || LazerAudioLoader.isAvailable
+    ) {
         DesktopNativeAudioPlayer(
             onProgress = ::handlePlayerProgress,
             onBuffered = ::handlePlayerBuffered,
@@ -655,6 +672,7 @@ class DesktopPlayerController(
             initialBitPerfect = hifiBitPerfect,
             initialDoPOutput = DesktopSettings.hifiDoPOutput,
             initialNativeDsdOutput = hifiNativeDsdOutput,
+            apiOverride = testOverrides?.nativeAudioLibrary,
         )
     } else {
         null
@@ -2322,7 +2340,7 @@ class DesktopPlayerController(
     }
 
     private suspend fun enumerateHifiOutputDevices(): List<DesktopAudioOutputDevice> =
-        withContext(Dispatchers.IO) {
+        testOverrides?.enumerateOutputDevices?.invoke() ?: withContext(Dispatchers.IO) {
             when (resolveDesktopAudioOutputBackend(System.getProperty("os.name").orEmpty())) {
                 DesktopAudioOutputBackend.Wasapi -> DesktopWasapiDeviceCatalog.enumerate()
                 DesktopAudioOutputBackend.Alsa -> DesktopAlsaOutputDeviceCatalog.enumerate()
@@ -2359,7 +2377,9 @@ class DesktopPlayerController(
                     intent = intent,
                     driver = object : DesktopOutputRecoveryDriver {
                         override suspend fun awaitRetry(attempt: Int) {
-                            delay(desktopOutputRecoveryRetryDelayMillis(attempt))
+                            val injectedDelay = testOverrides?.awaitRecoveryRetry
+                            if (injectedDelay != null) injectedDelay(attempt)
+                            else delay(desktopOutputRecoveryRetryDelayMillis(attempt))
                         }
 
                         override fun isRequestCurrent(): Boolean =
