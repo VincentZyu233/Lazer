@@ -250,6 +250,8 @@ OpenHome 断线后的设备重新发现/恢复已完成首版（同 UDN 选择�
 
 Android 设置页现在分开展示应用 DSP 状态、HAL mixer 偏好结果与源到输出链路评估。默认 limiter 开启时，即使 EQ 关闭，Android PCM 输出仍会经过 limiter，并可能执行整数 PCM dither；因此当前状态是 DSP 处理，而不是 bit-perfect 候选。只有 EQ 和 limiter 均旁路、AudioTrack 请求格式与实际格式一致、HAL 报告精确格式及 bit-perfect mixer 行为且接受偏好时，输出侧才通过候选检查。由于 Media3 renderer 输入不一定是解码后的 PCM，且当前没有 DAC 数字回采，源无损性、解码器样本保持和 DAC 实际输入仍属未知；界面不会把 HAL 接受或格式协商成功称为 bit-perfect。相关判定有 Android 单元测试覆盖，但仍需实机检查动态 EQ 状态刷新、Android 版本差异及 USB DAC 路由。
 
+2026-10-05 Android PCM 测试音的临时 bit-perfect mixer preference 现先读取并保存旧值，读取失败时不写系统偏好；停止或 USB 路由失败时，只在当前值仍与本播放器写入值一致时恢复。系统读取/恢复失败会重试一次并记录日志，已被其他组件修改的值会保留。恢复策略由 JVM 单测覆盖；系统 AudioManager 行为与设备拔插仍待 Android 实机验证。
+
 ## 9. 测试与发布矩阵
 
 ALSA 恢复策略可在任意平台单独验证：`cmake --build native/lazer-audio/build --config Release --target lazer-audio-alsa-recovery-probe --parallel 2` 后运行 `ctest --test-dir native/lazer-audio/build -C Release -R '^lazer-audio-alsa-recovery$' --output-on-failure`。探针覆盖永久 `-EAGAIN` 时 PCM 只在重试上限后 prepare 并按序回排 pending 帧，DoP 则在同一上限失败且无 prepare 路径。Windows Release 本轮定向 CTest 为 1/1 通过；这验证平台无关恢复策略，不代表 `output_alsa.cpp` 已在 Linux 编译或真实 ALSA suspend/XRUN 已测试。

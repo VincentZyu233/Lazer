@@ -389,6 +389,72 @@ class AndroidMedia3OutputStateTest {
         assertEquals(MixerPreferenceRestoreResult.REJECTED, result)
         assertEquals(1, clearAttempts)
     }
+
+    @Test
+    fun `mixer restore retries an unavailable read once before restoring owned preference`() {
+        var reads = 0
+        var clears = 0
+        val result = restoreMixerPreferenceWithRetry(
+            readCurrentPreference = {
+                reads += 1
+                if (reads == 1) Result.failure(IllegalStateException("temporary read failure"))
+                else Result.success("player preference")
+            },
+            appliedPreference = "player preference",
+            previousPreference = null,
+            samePreference = { current, applied -> current == applied },
+            clearPreference = {
+                clears += 1
+                true
+            },
+            setPreviousPreference = { error("no previous preference should be set") },
+        )
+
+        assertEquals(MixerPreferenceRestoreResult.RESTORED, result)
+        assertEquals(2, reads)
+        assertEquals(1, clears)
+    }
+
+    @Test
+    fun `mixer restore retries one rejected restore operation`() {
+        var clears = 0
+        val result = restoreMixerPreferenceWithRetry(
+            readCurrentPreference = { Result.success("player preference") },
+            appliedPreference = "player preference",
+            previousPreference = null,
+            samePreference = { current, applied -> current == applied },
+            clearPreference = {
+                clears += 1
+                clears > 1
+            },
+            setPreviousPreference = { error("no previous preference should be set") },
+        )
+
+        assertEquals(MixerPreferenceRestoreResult.RESTORED, result)
+        assertEquals(2, clears)
+    }
+
+    @Test
+    fun `mixer restore leaves an externally changed preference untouched`() {
+        var writes = 0
+        val result = restoreMixerPreferenceWithRetry(
+            readCurrentPreference = { Result.success("external preference") },
+            appliedPreference = "player preference",
+            previousPreference = "original preference",
+            samePreference = { current, applied -> current == applied },
+            clearPreference = {
+                writes += 1
+                true
+            },
+            setPreviousPreference = {
+                writes += 1
+                true
+            },
+        )
+
+        assertEquals(MixerPreferenceRestoreResult.CHANGED_EXTERNALLY, result)
+        assertEquals(0, writes)
+    }
 }
 
 private fun testPcmOutputFormat() = PlaybackAudioOutputDataSnapshot(

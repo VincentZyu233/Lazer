@@ -243,6 +243,40 @@ internal fun <T> restoreMixerPreferenceIfOwned(
     }
 }
 
+/** Retry one time when a system read or restore fails; never retry after ownership changed. */
+internal fun <T> restoreMixerPreferenceWithRetry(
+    readCurrentPreference: () -> Result<T?>,
+    appliedPreference: T,
+    previousPreference: T?,
+    samePreference: (T?, T) -> Boolean,
+    clearPreference: () -> Boolean,
+    setPreviousPreference: (T) -> Boolean,
+): MixerPreferenceRestoreResult {
+    fun restoreOnce(): MixerPreferenceRestoreResult {
+        val current = try {
+            readCurrentPreference()
+        } catch (error: Exception) {
+            Result.failure(error)
+        }
+        return restoreMixerPreferenceIfOwned(
+            currentPreference = current,
+            appliedPreference = appliedPreference,
+            previousPreference = previousPreference,
+            samePreference = samePreference,
+            clearPreference = clearPreference,
+            setPreviousPreference = setPreviousPreference,
+        )
+    }
+
+    val first = restoreOnce()
+    return if (first == MixerPreferenceRestoreResult.UNAVAILABLE ||
+        first == MixerPreferenceRestoreResult.REJECTED) {
+        restoreOnce()
+    } else {
+        first
+    }
+}
+
 internal sealed interface MixerPreferenceApplyResult<out T> {
     data class Applied<T>(val previousPreference: T?) : MixerPreferenceApplyResult<T>
     data object PreviousPreferenceUnavailable : MixerPreferenceApplyResult<Nothing>

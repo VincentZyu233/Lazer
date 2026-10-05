@@ -8,6 +8,7 @@ import android.media.AudioManager
 import android.media.AudioMixerAttributes
 import android.media.AudioTrack
 import android.os.Build
+import android.util.Log
 import androidx.annotation.RequiresApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -82,12 +83,14 @@ internal class AndroidPcmTestToneOutput(context: Context) : AutoCloseable {
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .build()
     private val closed = AtomicBoolean(false)
+    private val mixerPreferenceLock = Any()
 
     @Volatile private var track: AudioTrack? = null
     private var selectedDevice: AudioDeviceInfo? = null
     @Volatile var selectedUsbDeviceId: Int? = null
         private set
     private var oldMixerPreference: AudioMixerAttributes? = null
+    private var appliedMixerPreference: AudioMixerAttributes? = null
     private var mixerPreferenceDevice: AudioDeviceInfo? = null
     private var changedMixerPreference = false
 
@@ -155,19 +158,19 @@ internal class AndroidPcmTestToneOutput(context: Context) : AutoCloseable {
                 reportsBitPerfect = bitPerfectCandidate != null
                 when {
                     bitPerfectCandidate != null -> {
-                        oldMixerPreference = audioManager.getPreferredMixerAttributes(audioAttributes, device)
-                        mixerPreferenceDevice = device
-                        val desired = AudioMixerAttributes.Builder(requested)
-                            .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
-                            .build()
-                        val accepted = runCatching {
-                            audioManager.setPreferredMixerAttributes(audioAttributes, device, desired)
-                        }.getOrDefault(false)
-                        changedMixerPreference = accepted
-                        preferenceStatus = if (accepted) {
-                            LazerMixerPreferenceStatus.Accepted
-                        } else {
-                            LazerMixerPreferenceStatus.Rejected
+                        val desired = runCatching {
+                            AudioMixerAttributes.Builder(requested)
+                                .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
+                                .build()
+                        }.getOrNull()
+                        preferenceStatus = when {
+                            desired == null -> LazerMixerPreferenceStatus.Rejected
+                            else -> when (applyMixerPreference(device, desired)) {
+                                is MixerPreferenceApplyResult.Applied -> LazerMixerPreferenceStatus.Accepted
+                                MixerPreferenceApplyResult.PreviousPreferenceUnavailable ->
+                                    LazerMixerPreferenceStatus.NotAvailable
+                                MixerPreferenceApplyResult.Rejected -> LazerMixerPreferenceStatus.Rejected
+                            }
                         }
                     }
                     exact != null -> preferenceStatus = LazerMixerPreferenceStatus.NotBitPerfect
@@ -198,7 +201,7 @@ internal class AndroidPcmTestToneOutput(context: Context) : AutoCloseable {
                     // test tone useful on Android's default route, without selecting another DAC.
                     selectedDevice = null
                     selectedUsbDeviceId = null
-                    if (changedMixerPreference) restoreMixerPreference()
+                    restoreMixerPreference()
                     preferenceStatus = LazerMixerPreferenceStatus.NotAvailable
                     reportsBitPerfect = null
                 }
@@ -252,24 +255,81 @@ internal class AndroidPcmTestToneOutput(context: Context) : AutoCloseable {
         }
         track = null
         selectedUsbDeviceId = null
-        if (changedMixerPreference) restoreMixerPreference()
+        restoreMixerPreference()
     }
 
     private fun restoreMixerPreference() {
         if (Build.VERSION.SDK_INT < 34) return
-        val device = mixerPreferenceDevice ?: return
-        runCatching {
-            val old = oldMixerPreference
-            if (old == null) {
-                audioManager.clearPreferredMixerAttributes(audioAttributes, device)
-            } else {
-                audioManager.setPreferredMixerAttributes(audioAttributes, device, old)
+        synchronized(mixerPreferenceLock) {
+            if (!changedMixerPreference) return
+            val device = mixerPreferenceDevice ?: return
+            val applied = appliedMixerPreference ?: return
+            val result = restoreMixerPreferenceWithRetry(
+                readCurrentPreference = {
+                    runCatching { audioManager.getPreferredMixerAttributes(audioAttributes, device) }
+                },
+                appliedPreference = applied,
+                previousPreference = oldMixerPreference,
+                samePreference = { current, expected -> current?.hasSameValuesAs(expected) == true },
+                clearPreference = {
+                    audioManager.clearPreferredMixerAttributes(audioAttributes, device)
+                },
+                setPreviousPreference = { previous ->
+                    audioManager.setPreferredMixerAttributes(audioAttributes, device, previous)
+                },
+            )
+            when (result) {
+                MixerPreferenceRestoreResult.RESTORED -> clearMixerPreferenceLease()
+                MixerPreferenceRestoreResult.CHANGED_EXTERNALLY -> {
+                    Log.i(PCM_TEST_TONE_TAG,
+                        "Mixer preference for device ${device.id} changed externally; leaving it in place")
+                    clearMixerPreferenceLease()
+                }
+                MixerPreferenceRestoreResult.UNAVAILABLE -> Log.w(
+                    PCM_TEST_TONE_TAG,
+                    "Could not read mixer preference for device ${device.id} after retry",
+                )
+                MixerPreferenceRestoreResult.REJECTED -> Log.e(
+                    PCM_TEST_TONE_TAG,
+                    "Could not restore mixer preference for device ${device.id} after retry",
+                )
             }
         }
+    }
+
+    @RequiresApi(34)
+    private fun applyMixerPreference(
+        device: AudioDeviceInfo,
+        desired: AudioMixerAttributes,
+    ): MixerPreferenceApplyResult<AudioMixerAttributes> = synchronized(mixerPreferenceLock) {
+        if (closed.get()) return@synchronized MixerPreferenceApplyResult.Rejected
+        val result = captureAndApplyMixerPreference(
+            readPreviousPreference = {
+                audioManager.getPreferredMixerAttributes(audioAttributes, device)
+            },
+            applyDesiredPreference = {
+                audioManager.setPreferredMixerAttributes(audioAttributes, device, desired)
+            },
+        )
+        if (result is MixerPreferenceApplyResult.Applied) {
+            oldMixerPreference = result.previousPreference
+            appliedMixerPreference = desired
+            mixerPreferenceDevice = device
+            changedMixerPreference = true
+        }
+        result
+    }
+
+    private fun clearMixerPreferenceLease() {
         changedMixerPreference = false
         oldMixerPreference = null
+        appliedMixerPreference = null
         mixerPreferenceDevice = null
     }
+
+    @RequiresApi(34)
+    private fun AudioMixerAttributes.hasSameValuesAs(other: AudioMixerAttributes): Boolean =
+        mixerBehavior == other.mixerBehavior && format.toMixerFormat() == other.format.toMixerFormat()
 
     private suspend fun writeFully(output: AudioTrack, bytes: ByteArray) {
         var offset = 0
@@ -343,6 +403,7 @@ internal class AndroidPcmTestToneOutput(context: Context) : AutoCloseable {
     private fun playbackFrames(output: AudioTrack): Long = output.playbackHeadPosition.toLong() and 0xffffffffL
 
     companion object {
+        private const val PCM_TEST_TONE_TAG = "LazerPcmTestTone"
         private const val WRITE_CHUNK_BYTES = 32 * 1024
 
         private val fallbackFormats = listOf(
