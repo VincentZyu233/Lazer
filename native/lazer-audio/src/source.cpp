@@ -714,6 +714,21 @@ int32_t AudioSource::configureResampler() {
         return LazerAudioErrorInvalidArgument;
     }
 
+    if (target_.nativeDsdRawBytes) {
+        if (target_.doP || target_.nativeDsd || !description_.dsd || !description_.rawDsd ||
+            dstDecodedToPcm_ || codec_->sample_fmt != AV_SAMPLE_FMT_DSD ||
+            target_.channels != description_.channels ||
+            (description_.channels != 1 && description_.channels != 2) ||
+            target_.sampleRate != description_.sampleRate || target_.bitsPerSample != 8 ||
+            target_.containerBitsPerSample != 8 ||
+            dsdMultiplierForSampleRate(description_.sampleRate) !=
+                description_.dsdRateMultiplier) {
+            lastError_ = "raw Native DSD queue staging requires exact interleaved DSD byte frames";
+            return LazerAudioErrorUnsupported;
+        }
+        return LazerAudioOk;
+    }
+
     if (target_.nativeDsd) {
         const size_t wordBytes = static_cast<size_t>(target_.containerBitsPerSample / 8);
         const int32_t supportedMultipliers[] = {64, 128, 256, 512, 1024};
@@ -1155,7 +1170,8 @@ int32_t AudioSource::decodePacket(AVPacket *packet, SourceConsumer &consumer) {
 }
 
 int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
-    if ((!target_.doP && !target_.nativeDsd && resampler_ == nullptr) ||
+    if ((!target_.doP && !target_.nativeDsd && !target_.nativeDsdRawBytes &&
+        resampler_ == nullptr) ||
         frame->nb_samples <= 0) return LazerAudioOk;
     if (description_.dsd &&
         ((dstDecodedToPcm_ ? frame->format != AV_SAMPLE_FMT_FLT
@@ -1297,6 +1313,17 @@ int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
             seekOutputFramesToDrop_ = targetOutputIndex - alignedOutputIndex;
             seekOutputTargetMillis_ = -1;
         }
+    }
+
+    if (target_.nativeDsdRawBytes) {
+        if (frame->format != AV_SAMPLE_FMT_DSD || frame->extended_data == nullptr ||
+            frame->extended_data[0] == nullptr) {
+            lastError_ = "raw Native DSD queue staging requires packed DSD decoder frames";
+            return LazerAudioErrorUnsupported;
+        }
+        const uint8_t *input = alignedDsdData.empty()
+            ? frame->extended_data[0] : alignedDsdData[0];
+        return deliverSamples(input, inputSamples, consumer);
     }
 
     if (target_.doP) {

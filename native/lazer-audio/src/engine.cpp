@@ -534,13 +534,24 @@ int32_t Engine::configurePipeline() {
             lastError_ = "the initialized output does not match the raw Native DSD format contract";
             return LazerAudioErrorUnsupported;
         }
-        const int32_t result = currentSource().setTargetFormat(target);
+        TargetFormat rawDsdTarget = target;
+        rawDsdTarget.sampleRate = description.sampleRate;
+        rawDsdTarget.bitsPerSample = 8;
+        rawDsdTarget.containerBitsPerSample = 8;
+        rawDsdTarget.nativeDsd = false;
+        rawDsdTarget.nativeDsdRawBytes = true;
+        rawDsdTarget.nativeDsdBigEndian = true;
+        const int32_t result = currentSource().setTargetFormat(rawDsdTarget);
         if (result != LazerAudioOk) {
             lastError_ = currentSource().lastError();
             return result;
         }
+        nativeDsdPacker_ = NativeDsdPacker(static_cast<size_t>(target.channels),
+            static_cast<size_t>(wordBytes), target.nativeDsdBigEndian);
         dspBypassed_ = false;
         nativeDsdActive_.store(true, std::memory_order_release);
+    } else {
+        nativeDsdPacker_ = NativeDsdPacker{};
     }
     const bool exactContainer = target.containerBitsPerSample == target.bitsPerSample ||
         (target.bitsPerSample == 24 && target.containerBitsPerSample == 32);
@@ -596,7 +607,15 @@ int32_t Engine::configurePipeline() {
     convertScratch_.assign(static_cast<size_t>(wantedFrames) * frameBytes, 0);
     const size_t queuedScratchFrames = std::max(kRenderBlockFrames,
         static_cast<size_t>(std::max(outputSession_.bufferFrames, 1)));
-    queuedPcmScratch_.assign(static_cast<size_t>(queuedScratchFrames) * frameBytes, 0);
+    if (outputSession_.nativeDsd) {
+        const size_t rawFrameBytes = static_cast<size_t>(std::max(target.channels, 1));
+        const size_t wordBytes = static_cast<size_t>(target.containerBitsPerSample / 8);
+        queuedPcmScratch_.assign(queuedScratchFrames * wordBytes * rawFrameBytes, 0);
+        nativeDsdScratch_.assign(queuedScratchFrames * frameBytes, 0);
+    } else {
+        queuedPcmScratch_.assign(static_cast<size_t>(queuedScratchFrames) * frameBytes, 0);
+        nativeDsdScratch_.clear();
+    }
     replayGainCurrentLinear_ = source_->replayGainLinear;
     replayGainTargetLinear_ = source_->replayGainLinear;
     replayGainRampRemainingFrames_ = 0;
@@ -620,6 +639,8 @@ int32_t Engine::queueReader(
     StreamDescription activeDescription;
     bool requireBitPerfect = false;
     bool requireDoP = false;
+    bool requireNativeDsd = false;
+    int32_t dsdOutputMode = LazerAudioDsdOutputConvertToPcm;
     {
         std::lock_guard lifecycleGuard(lifecycleMutex_);
         const int32_t currentState = state_.load(std::memory_order_acquire);
@@ -631,16 +652,13 @@ int32_t Engine::queueReader(
         const uint64_t currentQueueGeneration = queueGeneration_.load(std::memory_order_acquire);
         if (queueGeneration <= currentQueueGeneration) return LazerAudioErrorState;
         generation = sessionGeneration_.load(std::memory_order_acquire);
+        dsdOutputMode = device_.dsd_output_mode;
         requireDoP = dopActive_.load(std::memory_order_acquire);
-        /* Native DSD word packing can carry partial words at track EOF. Until queued transitions
-         * can transfer that packer state, the desktop controller must stop/open at each boundary. */
-        if (nativeDsdActive_.load(std::memory_order_acquire)) {
-            return LazerAudioErrorUnsupported;
-        }
+        requireNativeDsd = nativeDsdActive_.load(std::memory_order_acquire);
         target = requireDoP || dspBypassed_ ? outputSession_.target : floatTarget_;
         if (requireDoP) target.doP = true;
         requireBitPerfect = !requireDoP && dspBypassed_;
-        if (params.replay_gain_db != 0.0 && (requireDoP || requireBitPerfect)) {
+        if (params.replay_gain_db != 0.0 && (requireDoP || requireNativeDsd || requireBitPerfect)) {
             return LazerAudioErrorUnsupported;
         }
         {
@@ -672,6 +690,14 @@ int32_t Engine::queueReader(
     }
 
     const StreamDescription &preparedDescription = prepared->source.description();
+    if ((doPOutputApplies(dsdOutputMode, preparedDescription) && !requireDoP) ||
+        (nativeDsdOutputApplies(dsdOutputMode, preparedDescription) &&
+            !requireNativeDsd)) {
+        /* A queued PCM session may not cross into a direct-DSD policy without reopening the
+         * endpoint; doing so would silently convert the successor through the old pipeline. */
+        abandonPreparation();
+        return LazerAudioErrorUnsupported;
+    }
     if (requireDoP) {
         /* The existing endpoint carries DoP as exact packed 24-bit PCM. Keep one carrier clock,
          * channel layout, and raw DSD rate for the whole session; PCM/DST or a different DSD rate
@@ -697,6 +723,36 @@ int32_t Engine::queueReader(
             abandonPreparation();
             return LazerAudioErrorUnsupported;
         }
+    } else if (requireNativeDsd) {
+        /* Native DSD successors are staged as raw byte frames. The session-level packer remains
+         * owned by Engine so a partial U16/U32 word crosses the seam without 0x69 padding. */
+        const TargetFormat &sessionTarget = outputSession_.target;
+        const bool compatibleRawDsd = outputSession_.nativeDsd && outputSession_.exclusive &&
+            activeDescription.dsd && activeDescription.rawDsd &&
+            preparedDescription.dsd && preparedDescription.rawDsd &&
+            activeDescription.dsdRateMultiplier > 0 &&
+            preparedDescription.dsdRateMultiplier == activeDescription.dsdRateMultiplier &&
+            preparedDescription.sampleRate == activeDescription.sampleRate &&
+            preparedDescription.channels == activeDescription.channels &&
+            (preparedDescription.channels == 1 || preparedDescription.channels == 2);
+        const int32_t wordBytes = sessionTarget.containerBitsPerSample / 8;
+        const bool compatibleWordFormat = sessionTarget.nativeDsd &&
+            (wordBytes == 1 || wordBytes == 2 || wordBytes == 4) &&
+            sessionTarget.bitsPerSample == sessionTarget.containerBitsPerSample &&
+            sessionTarget.channels == preparedDescription.channels &&
+            static_cast<int64_t>(sessionTarget.sampleRate) * wordBytes ==
+                preparedDescription.sampleRate;
+        if (!compatibleRawDsd || !compatibleWordFormat) {
+            abandonPreparation();
+            return LazerAudioErrorUnsupported;
+        }
+        target = sessionTarget;
+        target.sampleRate = preparedDescription.sampleRate;
+        target.bitsPerSample = 8;
+        target.containerBitsPerSample = 8;
+        target.nativeDsd = false;
+        target.nativeDsdRawBytes = true;
+        target.nativeDsdBigEndian = true;
     } else {
         /* Keep the active device clock for the whole session. A different-rate successor must go
          * through the normal stop/open path so exclusive output can renegotiate before that track. */
@@ -752,8 +808,9 @@ int32_t Engine::queueReader(
         nextSource_ = prepared;
         preparingSource_.reset();
     }
-    log_.write(LazerAudioLogDebug,
-        "started bounded PCM prefetch for one compatible successor source");
+    log_.write(LazerAudioLogDebug, requireNativeDsd
+        ? "started bounded raw Native DSD byte prefetch for one compatible successor source"
+        : "started bounded PCM prefetch for one compatible successor source");
     return LazerAudioOk;
 }
 
@@ -802,6 +859,11 @@ int32_t Engine::tryStartQueuedSource(bool &started, std::string &error) {
         }
         candidate = nextSource_;
         boundaryFrame = acceptedFrames_.load(std::memory_order_acquire);
+        if (nativeDsdActive_.load(std::memory_order_acquire) &&
+            nativeDsdPacker_.hasPendingInput()) {
+            /* The first packed successor word also contains the old track's final DSD bytes. */
+            ++boundaryFrame;
+        }
         pendingPresentationReady_.store(false, std::memory_order_release);
         pendingTrackChangedFrame_.store(boundaryFrame, std::memory_order_release);
     }
@@ -859,6 +921,10 @@ int32_t Engine::tryStartQueuedSource(bool &started, std::string &error) {
         pendingPresentationSeekTargetMillis_ = source_->source.seekTargetMillis();
         pendingPresentationSeek_.store(false, std::memory_order_release);
         boundaryFrame = acceptedFrames_.load(std::memory_order_acquire);
+        if (nativeDsdActive_.load(std::memory_order_acquire) &&
+            nativeDsdPacker_.hasPendingInput()) {
+            ++boundaryFrame;
+        }
         pendingTrackChangedFrame_.store(boundaryFrame, std::memory_order_release);
         pendingPresentationReady_.store(true, std::memory_order_release);
     }
@@ -1190,6 +1256,7 @@ bool Engine::isCancelled() const {
 
 void Engine::onSeekApplied() {
     ring_.clearForProducer();
+    if (nativeDsdActive_.load(std::memory_order_acquire)) nativeDsdPacker_.reset();
     resetTimelineForSeek();
     seekFlushRequested_.store(false, std::memory_order_release);
     underrunActive_.store(0, std::memory_order_release);
@@ -1216,6 +1283,32 @@ void Engine::resetTimelineForSeek() {
 
 int32_t Engine::accept(const uint8_t *bytes, int32_t frameCount) {
     if (frameCount <= 0) return 0;
+    if (nativeDsdActive_.load(std::memory_order_acquire)) {
+        const size_t wordBytes = static_cast<size_t>(outputSession_.target.containerBitsPerSample / 8);
+        const size_t outputFrameBytes = static_cast<size_t>(outputSession_.target.frameBytes());
+        if (wordBytes == 0 || outputFrameBytes == 0 || bytes == nullptr) return 0;
+        const size_t possibleFrames = (static_cast<size_t>(frameCount) + wordBytes) / wordBytes;
+        const size_t scratchFrames = possibleFrames;
+        if (nativeDsdScratch_.size() < scratchFrames * outputFrameBytes) {
+            nativeDsdScratch_.resize(scratchFrames * outputFrameBytes);
+        }
+        const size_t outputCapacityFrames = std::min(scratchFrames,
+            static_cast<size_t>(std::max(ring_.writableFrames(), 0)));
+        const NativeDsdPackResult packed = nativeDsdPacker_.pack(bytes,
+            static_cast<size_t>(frameCount), nativeDsdScratch_.data(), outputCapacityFrames);
+        if (packed.producedOutputFrames > 0) {
+            const int32_t written = ring_.write(nativeDsdScratch_.data(),
+                static_cast<int32_t>(packed.producedOutputFrames));
+            if (written > 0) acceptedFrames_.fetch_add(written, std::memory_order_release);
+        }
+        if (packed.status == NativeDsdPackStatus::InvalidChannelCount ||
+            packed.status == NativeDsdPackStatus::InvalidWordBytes ||
+            packed.status == NativeDsdPackStatus::InvalidArgument ||
+            packed.status == NativeDsdPackStatus::SizeOverflow) {
+            return 0;
+        }
+        return static_cast<int32_t>(packed.consumedInputFrames);
+    }
     if (volumeDirty_.exchange(false, std::memory_order_acq_rel)) {
         dsp_.setVolume(volume_.load(std::memory_order_acquire),
             static_cast<int32_t>(volumeRampMillis_.load(std::memory_order_acquire)));
@@ -1294,6 +1387,7 @@ void Engine::pumpLoop() {
     const auto flushForSeek = [this] {
         if (!seekFlushRequested_.load(std::memory_order_acquire)) return;
         ring_.clearForProducer();
+        if (nativeDsdActive_.load(std::memory_order_acquire)) nativeDsdPacker_.reset();
         resetTimelineForSeek();
         underrunActive_.store(0, std::memory_order_release);
         seekFlushRequested_.store(false, std::memory_order_release);
@@ -1315,7 +1409,9 @@ void Engine::pumpLoop() {
             reachedEof = active->source.reachedEndOfStream();
             sourceError = active->source.lastError();
         } else {
-            const int32_t frameBytes = std::max(outputSession_.target.frameBytes(), 1);
+            const int32_t frameBytes = nativeDsdActive_.load(std::memory_order_acquire)
+                ? std::max(outputSession_.target.channels, 1)
+                : std::max(outputSession_.target.frameBytes(), 1);
             const int32_t scratchFrames = static_cast<int32_t>(queuedPcmScratch_.size() /
                 static_cast<size_t>(frameBytes));
             while (!cancelled_.load(std::memory_order_acquire)) {
@@ -1368,6 +1464,41 @@ void Engine::pumpLoop() {
             return;
         }
         if (!started) {
+            if (nativeDsdActive_.load(std::memory_order_acquire)) {
+                while (nativeDsdPacker_.hasPendingInput() &&
+                    !cancelled_.load(std::memory_order_acquire)) {
+                    if (ring_.writableFrames() == 0) {
+                        sleepIdle();
+                        continue;
+                    }
+                    const NativeDsdPackResult flushed = nativeDsdPacker_.flush(
+                        nativeDsdScratch_.data(), 1);
+                    if (flushed.status != NativeDsdPackStatus::Ok ||
+                        flushed.producedOutputFrames != 1) {
+                        pumpFinished_.store(true, std::memory_order_release);
+                        const std::string error =
+                            "the final Native DSD word could not be padded at session EOF";
+                        setError(error, LazerAudioErrorDecode);
+                        endedRaised_.store(true, std::memory_order_release);
+                        publishTerminal(LazerAudioEventFailed, LazerAudioErrorDecode,
+                            currentPositionMillis());
+                        return;
+                    }
+                    const int32_t written = ring_.write(nativeDsdScratch_.data(), 1);
+                    if (written != 1) {
+                        pumpFinished_.store(true, std::memory_order_release);
+                        const std::string error =
+                            "the output ring rejected the final Native DSD word";
+                        setError(error, LazerAudioErrorDevice);
+                        endedRaised_.store(true, std::memory_order_release);
+                        publishTerminal(LazerAudioEventFailed, LazerAudioErrorDevice,
+                            currentPositionMillis());
+                        return;
+                    }
+                    acceptedFrames_.fetch_add(1, std::memory_order_release);
+                }
+                if (cancelled_.load(std::memory_order_acquire)) break;
+            }
             if (active->queueGeneration != 0 &&
                 pendingPresentationReady_.load(std::memory_order_acquire)) {
                 /* Keep the engine pump alive until the activated successor has crossed its

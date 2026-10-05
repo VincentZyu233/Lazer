@@ -35,6 +35,8 @@ struct TargetFormat {
     /* Raw DSD bytes are grouped into exact ALSA DSD_U8/U16/U32 native words. */
     bool nativeDsd = false;
     bool nativeDsdBigEndian = true;
+    /* Raw interleaved DSD byte frames for the Engine's session-level Native DSD packer. */
+    bool nativeDsdRawBytes = false;
 
     [[nodiscard]] bool isFloat() const noexcept { return bitsPerSample == 0; }
     [[nodiscard]] int32_t frameBytes() const noexcept {

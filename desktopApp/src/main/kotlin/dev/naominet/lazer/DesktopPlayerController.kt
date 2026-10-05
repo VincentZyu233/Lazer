@@ -773,26 +773,23 @@ class DesktopPlayerController(
         val requestGeneration = gaplessRequestGeneration.incrementAndGet()
         player?.clearQueuedNext()
         if (player == null || token == 0L || currentTrack == null) return
-        val nativeDsdSessionExpected = hifiStreamInfo?.isNativeDsdOutput == true ||
-            (hifiNativeDsdOutput && currentTrack.isLocalFile &&
-                (currentTrack.playbackSource as? DesktopTrackSource.LocalFile)?.let { source ->
-                    isDsdLocalAudioFile(File(source.absolutePath))
-                } == true)
-        if (nativeDsdSessionExpected) return
         val successor = nextTrackForGapless(currentTrack) ?: return
         if (currentTrack.isLocalFile || successor.isLocalFile) {
             val nextGain = resolveDesktopReplayGain(successor.replayGain, replayGainMode).appliedGainDb
             val doPOutputActive = hifiStreamInfo?.isDoPOutput == true
+            val nativeDsdOutputActive = hifiStreamInfo?.isNativeDsdOutput == true
             if (!canQueueDesktopLocalGaplessSuccessor(
                     currentTrack,
                     successor,
                     doPOutputActive = doPOutputActive,
+                    nativeDsdOutputActive = nativeDsdOutputActive,
                 ) ||
                 gaplessRequestGeneration.get() != requestGeneration ||
                 activePlaybackToken.get() != token || nowPlaying?.id != currentTrack.id ||
                 (!hifiEngineEnabled && !currentTrack.isLocalFile)
             ) return
             val localKind = when {
+                nativeDsdOutputActive -> "local-dsd-native"
                 doPOutputActive -> "local-dsd-dop"
                 isContiguousDesktopCueSuccessor(currentTrack, successor) -> "local-cue"
                 else -> "local-file"

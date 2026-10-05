@@ -3,6 +3,8 @@ package dev.naominet.lazer
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.nio.file.Files
 
 class DesktopCueGaplessTest {
     @Test
@@ -90,6 +92,67 @@ class DesktopCueGaplessTest {
     }
 
     @Test
+    fun `native DSD queues only active unsegmented local raw DSF and DFF`() {
+        val dffPath = Files.createTempFile("native-gapless-raw-", ".dff")
+        val dstPath = Files.createTempFile("native-gapless-dst-", ".dff")
+        try {
+            Files.write(dffPath, dffFixture(compression = "DSD "))
+            Files.write(dstPath, dffFixture(compression = "DST "))
+            val current = localTrack(id = 41, path = "/music/01.dsf")
+            val rawDff = localTrack(id = 42, path = dffPath.toString())
+
+            // A DSD filename or Native DSD preference alone does not prove an active native stream.
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(current, rawDff))
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                rawDff,
+                nativeDsdOutputActive = false,
+            ))
+            assertTrue(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                rawDff,
+                nativeDsdOutputActive = true,
+            ))
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                localTrack(id = 43, path = dstPath.toString()),
+                nativeDsdOutputActive = true,
+            ))
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                cueTrack(id = 44, number = 2, start = 75, end = 150),
+                nativeDsdOutputActive = true,
+            ))
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                localTrack(id = 45, path = "/music/03.wav"),
+                nativeDsdOutputActive = true,
+            ))
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                rawDff.copy(playbackSource = DesktopTrackSource.Remote),
+                nativeDsdOutputActive = true,
+            ))
+            assertFalse(canQueueDesktopLocalGaplessSuccessor(
+                current,
+                rawDff.copy(
+                    playbackSource = DesktopTrackSource.LocalFile(
+                        absolutePath = dffPath.toString(),
+                        cueSheetPath = "/music/album.cue",
+                        cueTrackNumber = 2,
+                        cueStartFrame75 = 75,
+                        cueEndFrame75 = 150,
+                    ),
+                ),
+                nativeDsdOutputActive = true,
+            ))
+        } finally {
+            Files.deleteIfExists(dffPath)
+            Files.deleteIfExists(dstPath)
+        }
+    }
+
+    @Test
     fun `CUE gapless still requires adjacent ranges and allows per-track ReplayGain`() {
         val first = cueTrack(id = 21, number = 1, start = 0, end = 75)
         val successor = cueTrack(id = 22, number = 2, start = 75, end = 150)
@@ -134,4 +197,28 @@ class DesktopCueGaplessTest {
         cueStartFrame75 = start,
         cueEndFrame75 = end,
     )
+
+    private fun dffFixture(compression: String): ByteArray {
+        fun chunk(id: String, payload: ByteArray): ByteArray = ByteArrayOutputStream().apply {
+            write(id.toByteArray(Charsets.US_ASCII))
+            writeLongBigEndian(payload.size.toLong())
+            write(payload)
+            if (payload.size % 2 != 0) write(0)
+        }.toByteArray()
+
+        val properties = "SND ".toByteArray(Charsets.US_ASCII) + chunk(
+            "CMPR",
+            compression.toByteArray(Charsets.US_ASCII) + byteArrayOf(0),
+        )
+        val formData = "DSD ".toByteArray(Charsets.US_ASCII) + chunk("PROP", properties)
+        return ByteArrayOutputStream().apply {
+            write("FRM8".toByteArray(Charsets.US_ASCII))
+            writeLongBigEndian(formData.size.toLong())
+            write(formData)
+        }.toByteArray()
+    }
+
+    private fun ByteArrayOutputStream.writeLongBigEndian(value: Long) {
+        for (shift in 56 downTo 0 step 8) write((value ushr shift).toInt() and 0xff)
+    }
 }

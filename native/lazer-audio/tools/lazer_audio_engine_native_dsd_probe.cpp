@@ -46,8 +46,19 @@ void append64(std::vector<uint8_t> &bytes, uint64_t value) {
     }
 }
 
-std::vector<uint8_t> makeStereoDsf(uint64_t durationMillis = 1000) {
-    const uint64_t bitCount = static_cast<uint64_t>(kDsdByteClock) * 8 * durationMillis / 1000;
+uint8_t dsdPatternByte(int32_t channel, uint64_t index, uint8_t seed) {
+    if (seed == 0) {
+        const uint8_t even = channel == 0 ? 0xAA : 0x33;
+        const uint8_t odd = channel == 0 ? 0x55 : 0xCC;
+        return (index & 1u) == 0 ? even : odd;
+    }
+    return static_cast<uint8_t>(seed + channel * 53 + index * 17);
+}
+
+std::vector<uint8_t> makeStereoDsf(uint64_t durationMillis = 1000, uint8_t seed = 0,
+    int32_t multiplier = 64) {
+    const uint64_t dsdByteClock = static_cast<uint64_t>(44'100) * multiplier / 8;
+    const uint64_t bitCount = dsdByteClock * 8 * durationMillis / 1000;
     const uint64_t audioBytesPerChannel = (bitCount + 7) / 8;
     const uint64_t blocks = (audioBytesPerChannel + kDsfBlockBytes - 1) / kDsfBlockBytes;
     const uint64_t paddedBytesPerChannel = blocks * kDsfBlockBytes;
@@ -67,7 +78,7 @@ std::vector<uint8_t> makeStereoDsf(uint64_t durationMillis = 1000) {
     append32(bytes, 0); // raw DSD
     append32(bytes, 2); // stereo channel type
     append32(bytes, kStereo);
-    append32(bytes, kDsdByteClock * 8); // DSD bit rate in DSF metadata
+    append32(bytes, static_cast<uint32_t>(dsdByteClock * 8)); // DSD bit rate in DSF metadata
     append32(bytes, 8); // MSB first
     append64(bytes, bitCount);
     append32(bytes, kDsfBlockBytes);
@@ -80,9 +91,7 @@ std::vector<uint8_t> makeStereoDsf(uint64_t durationMillis = 1000) {
         auto &samples = channels[static_cast<size_t>(channel)];
         samples.resize(static_cast<size_t>(paddedBytesPerChannel), 0x69);
         for (uint64_t index = 0; index < audioBytesPerChannel; ++index) {
-            const uint8_t even = channel == 0 ? 0xAA : 0x33;
-            const uint8_t odd = channel == 0 ? 0x55 : 0xCC;
-            samples[static_cast<size_t>(index)] = ((index & 1u) == 0) ? even : odd;
+            samples[static_cast<size_t>(index)] = dsdPatternByte(channel, index, seed);
         }
     }
     for (uint64_t block = 0; block < blocks; ++block) {
@@ -93,6 +102,30 @@ std::vector<uint8_t> makeStereoDsf(uint64_t durationMillis = 1000) {
                 samples.begin() + static_cast<std::ptrdiff_t>(offset + kDsfBlockBytes));
         }
     }
+    return bytes;
+}
+
+std::vector<uint8_t> makeStereoPcmWav() {
+    constexpr uint32_t sampleRate = 44'100;
+    constexpr uint16_t channels = 2;
+    constexpr uint16_t bitsPerSample = 16;
+    constexpr uint32_t frameCount = 4'410;
+    constexpr uint32_t dataBytes = frameCount * channels * (bitsPerSample / 8);
+    std::vector<uint8_t> bytes;
+    bytes.reserve(44 + dataBytes);
+    bytes.insert(bytes.end(), {'R', 'I', 'F', 'F'});
+    append32(bytes, 36 + dataBytes);
+    bytes.insert(bytes.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+    append32(bytes, 16);
+    append16(bytes, 1);
+    append16(bytes, channels);
+    append32(bytes, sampleRate);
+    append32(bytes, sampleRate * channels * (bitsPerSample / 8));
+    append16(bytes, channels * (bitsPerSample / 8));
+    append16(bytes, bitsPerSample);
+    bytes.insert(bytes.end(), {'d', 'a', 't', 'a'});
+    append32(bytes, dataBytes);
+    bytes.resize(bytes.size() + dataBytes, 0);
     return bytes;
 }
 
@@ -129,6 +162,42 @@ LazerAudioReader asReader(MemoryReader &reader) {
     return LazerAudioReader{readBytes, seekBytes, readerLength, nullptr, &reader, nullptr};
 }
 
+class RawDsdCaptureConsumer final : public SourceConsumer {
+public:
+    int32_t accept(const uint8_t *bytes, int32_t frames) override {
+        if (bytes == nullptr || frames <= 0) return 0;
+        const size_t count = static_cast<size_t>(frames) * channels;
+        bytes_.insert(bytes_.end(), bytes, bytes + count);
+        return frames;
+    }
+    bool shouldPump() const override { return true; }
+    bool isCancelled() const override { return false; }
+
+    int32_t channels = kStereo;
+    std::vector<uint8_t> bytes_;
+};
+
+bool decodeRawDsd(const std::vector<uint8_t> &encoded, std::vector<uint8_t> &rawBytes) {
+    MemoryReader reader(encoded);
+    const LazerAudioReader input = asReader(reader);
+    AudioSource source(nullptr);
+    const LazerAudioOpenParams params{sizeof(LazerAudioOpenParams), 0, 0};
+    if (source.prepareReader(input) != LazerAudioOk ||
+        source.openReader(input, params) != LazerAudioOk) return false;
+    TargetFormat target;
+    target.sampleRate = source.description().sampleRate;
+    target.channels = source.description().channels;
+    target.bitsPerSample = 8;
+    target.containerBitsPerSample = 8;
+    target.nativeDsdRawBytes = true;
+    if (source.setTargetFormat(target) != LazerAudioOk) return false;
+    RawDsdCaptureConsumer consumer;
+    consumer.channels = target.channels;
+    if (source.pump(consumer) != LazerAudioOk || !source.reachedEndOfStream()) return false;
+    rawBytes = std::move(consumer.bytes_);
+    return rawBytes.size() % static_cast<size_t>(target.channels) == 0;
+}
+
 struct Capture {
     std::mutex mutex;
     std::condition_variable changed;
@@ -136,20 +205,52 @@ struct Capture {
     AudioOutputSession session{};
     std::vector<uint8_t> bytes;
     int32_t openCount = 0;
+    int32_t startCount = 0;
+    int32_t closeCount = 0;
     int32_t writeCount = 0;
+    std::vector<int32_t> events;
     bool invalidWrite = false;
 };
 
+void onEvent(void *opaque, int32_t event, int32_t, int64_t) {
+    auto *capture = static_cast<Capture *>(opaque);
+    if (capture == nullptr) return;
+    {
+        std::lock_guard guard(capture->mutex);
+        capture->events.push_back(event);
+    }
+    capture->changed.notify_all();
+}
+
 class NativeDsdCaptureOutput final : public AudioOutput {
 public:
-    NativeDsdCaptureOutput(std::shared_ptr<Capture> capture, bool wrongClock)
-        : capture_(std::move(capture)), wrongClock_(wrongClock) {}
+    NativeDsdCaptureOutput(std::shared_ptr<Capture> capture, bool wrongClock,
+        bool allowPcm = false, int32_t startupDelayMillis = 0)
+        : capture_(std::move(capture)), wrongClock_(wrongClock), allowPcm_(allowPcm),
+          startupDelayMillis_(startupDelayMillis) {}
 
     int32_t open(const AudioOutputRequest &request, const StreamDescription &source,
         AudioOutputSession &session, std::string &error, LogProxy *) override {
         std::lock_guard guard(capture_->mutex);
         capture_->request = request;
         ++capture_->openCount;
+        if (allowPcm_ && !source.dsd && !request.requireNativeDsd) {
+            TargetFormat target;
+            target.sampleRate = source.sampleRate;
+            target.channels = source.channels;
+            target.bitsPerSample = 16;
+            target.containerBitsPerSample = 16;
+            session.target = target;
+            session.engineFormat = PcmFormat{target.sampleRate, target.channels};
+            session.formatSelection = LazerAudioFormatSelectionSharedMix;
+            session.periodFrames = 128;
+            session.bufferFrames = 512;
+            session.writeMode = OutputWriteMode::Variable;
+            session.queueDepthAvailable = true;
+            capture_->session = session;
+            open_ = true;
+            return LazerAudioOk;
+        }
         if (!request.requireNativeDsd || !request.exclusive || request.bitPerfect ||
             !request.desired.nativeDsd || request.desired.doP || !source.dsd || !source.rawDsd ||
             source.sampleRate != kDsdByteClock || source.channels != kStereo) {
@@ -178,8 +279,18 @@ public:
         return LazerAudioOk;
     }
 
-    void close() override { open_.store(false, std::memory_order_release); }
-    int32_t start(std::string &) override { return open_ ? LazerAudioOk : LazerAudioErrorState; }
+    void close() override {
+        open_.store(false, std::memory_order_release);
+        std::lock_guard guard(capture_->mutex);
+        ++capture_->closeCount;
+    }
+    int32_t start(std::string &) override {
+        if (!open_) return LazerAudioErrorState;
+        startedAt_ = std::chrono::steady_clock::now();
+        std::lock_guard guard(capture_->mutex);
+        ++capture_->startCount;
+        return LazerAudioOk;
+    }
     int32_t stop(std::string &) override { return LazerAudioOk; }
     int32_t reset(std::string &) override { return LazerAudioOk; }
 
@@ -188,7 +299,14 @@ public:
         return OutputWaitResult::Ready;
     }
 
-    int32_t writableFrames(std::string &) override { return 32; }
+    int32_t writableFrames(std::string &) override {
+        if (startupDelayMillis_ > 0 && startedAt_ != std::chrono::steady_clock::time_point{} &&
+            std::chrono::steady_clock::now() - startedAt_ <
+                std::chrono::milliseconds(startupDelayMillis_)) {
+            return 0;
+        }
+        return 32;
+    }
     int32_t queuedFrames(std::string &) override { return 0; }
     OutputDrainResult drain(std::string &) override { return OutputDrainResult::Drained; }
 
@@ -200,7 +318,8 @@ public:
         }
         std::lock_guard guard(capture_->mutex);
         capture_->bytes.insert(capture_->bytes.end(), bytes,
-            bytes + static_cast<size_t>(frames) * kNativeFrameBytes);
+            bytes + static_cast<size_t>(frames) *
+                static_cast<size_t>(capture_->session.target.frameBytes()));
         ++capture_->writeCount;
         capture_->changed.notify_all();
         return frames;
@@ -213,6 +332,9 @@ public:
 private:
     std::shared_ptr<Capture> capture_;
     bool wrongClock_ = false;
+    bool allowPcm_ = false;
+    int32_t startupDelayMillis_ = 0;
+    std::chrono::steady_clock::time_point startedAt_{};
     std::atomic<bool> open_{false};
 };
 
@@ -338,6 +460,188 @@ int runWrongClockCase() {
     return 0;
 }
 
+int runNativeModeChangeRejectionCase() {
+    MemoryReader pcmReader(makeStereoPcmWav());
+    MemoryReader dsdReader(makeStereoDsf(100, 0x68));
+    const LazerAudioReader pcmInput = asReader(pcmReader);
+    const LazerAudioReader dsdInput = asReader(dsdReader);
+    auto capture = std::make_shared<Capture>();
+
+    LazerAudioEngineConfig config{};
+    config.abi_version = LAZER_AUDIO_ABI_VERSION;
+    config.struct_size = sizeof(config);
+    config.device.dsd_output_mode = LazerAudioDsdOutputRequireNative;
+    Engine *engine = Engine::create(config,
+        std::make_unique<NativeDsdCaptureOutput>(capture, false, true));
+    if (engine == nullptr) return fail("Native DSD mode-guard engine creation failed");
+
+    const LazerAudioOpenParams params{sizeof(LazerAudioOpenParams), 0, 0};
+    if (engine->open(nullptr, &pcmInput, params) != LazerAudioOk) {
+        std::cerr << "PCM-session open error: " << engine->lastError() << '\n';
+        engine->destroy();
+        return fail("PCM did not open in a RequireNative policy session");
+    }
+    if (engine->queueReader(1, dsdInput, params) != LazerAudioErrorUnsupported) {
+        engine->destroy();
+        return fail("raw DSD successor was accepted into an active PCM session under RequireNative");
+    }
+    engine->destroy();
+
+    std::lock_guard guard(capture->mutex);
+    if (capture->openCount != 1 || capture->session.nativeDsd ||
+        capture->session.target.bitsPerSample != 16) {
+        return fail("RequireNative mode-change rejection reopened or changed the active PCM session");
+    }
+    std::cout << "PASS: RequireNative rejects PCM→Native DSD queue mode changes without reopening the PCM session\n";
+    return 0;
+}
+
+std::vector<uint8_t> packExpectedNativeDsd(const std::vector<uint8_t> &rawBytes) {
+    NativeDsdPacker packer(kStereo, 4, true);
+    const size_t inputFrames = rawBytes.size() / kStereo;
+    const size_t capacityFrames = (inputFrames + 3) / 4 + 1;
+    std::vector<uint8_t> packed(capacityFrames * kNativeFrameBytes);
+    const NativeDsdPackResult result = packer.pack(rawBytes.data(), inputFrames,
+        packed.data(), capacityFrames);
+    if (result.status == NativeDsdPackStatus::OutputFull ||
+        result.consumedInputFrames != inputFrames) return {};
+    packed.resize(result.producedOutputFrames * kNativeFrameBytes);
+    if (packer.hasPendingInput()) {
+        const size_t offset = packed.size();
+        packed.resize(offset + kNativeFrameBytes);
+        const NativeDsdPackResult flushed = packer.flush(packed.data() + offset, 1);
+        if (flushed.status != NativeDsdPackStatus::Ok || flushed.producedOutputFrames != 1) {
+            return {};
+        }
+    }
+    return packed;
+}
+
+bool waitForEvent(const std::shared_ptr<Capture> &capture, int32_t event) {
+    std::unique_lock guard(capture->mutex);
+    return capture->changed.wait_for(guard, std::chrono::seconds(10), [&capture, event] {
+        return std::find(capture->events.begin(), capture->events.end(), event) !=
+            capture->events.end();
+    });
+}
+
+int runNativeDsdGaplessCase() {
+    /* A ends two bytes into a U32 word. B must complete that word directly; only final EOF may
+     * append the 0x69 idle pattern. */
+    MemoryReader firstReader(makeStereoDsf(1002, 0x12));
+    MemoryReader successorReader(makeStereoDsf(1000, 0xA5));
+    MemoryReader incompatibleReader(makeStereoDsf(40, 0xD1, 128));
+    const LazerAudioReader firstInput = asReader(firstReader);
+    const LazerAudioReader successorInput = asReader(successorReader);
+    const LazerAudioReader incompatibleInput = asReader(incompatibleReader);
+    auto capture = std::make_shared<Capture>();
+
+    LazerAudioEngineConfig config{};
+    config.abi_version = LAZER_AUDIO_ABI_VERSION;
+    config.struct_size = sizeof(config);
+    config.device.dsd_output_mode = LazerAudioDsdOutputRequireNative;
+    /* Keep the fake device not-ready briefly after start so the real Engine/decoder threads can
+     * stage both short tracks in the ring. The session fits in that ring; playback then checks the
+     * exact seam bytes without racing the renderer against an unrealistically instant endpoint. */
+    config.device.buffer_millis = 2500;
+    config.events.on_event = onEvent;
+    config.events.context = capture.get();
+    Engine *engine = Engine::create(config,
+        std::make_unique<NativeDsdCaptureOutput>(capture, false, false, 100));
+    if (engine == nullptr) return fail("Native DSD gapless engine creation failed");
+
+    const LazerAudioOpenParams params{sizeof(LazerAudioOpenParams), 0, 0};
+    if (engine->open(nullptr, &firstInput, params) != LazerAudioOk) {
+        std::cerr << "gapless open error: " << engine->lastError() << '\n';
+        engine->destroy();
+        return fail("first raw DSD source did not open for Native DSD gapless");
+    }
+    LazerAudioOpenParams incompatibleParams = params;
+    if (engine->queueReader(1, incompatibleInput, incompatibleParams) !=
+        LazerAudioErrorUnsupported) {
+        engine->destroy();
+        return fail("a DSD128 successor was accepted into the active DSD64 Native DSD session");
+    }
+    LazerAudioOpenParams replayGainParams = params;
+    replayGainParams.replay_gain_db = 1.0;
+    if (engine->queueReader(2, successorInput, replayGainParams) !=
+        LazerAudioErrorUnsupported) {
+        engine->destroy();
+        return fail("non-zero ReplayGain was accepted for a Native DSD successor");
+    }
+    if (engine->queueReader(3, successorInput, params) != LazerAudioOk) {
+        std::cerr << "gapless queue error: " << engine->lastError() << '\n';
+        engine->destroy();
+        return fail("compatible raw DSD successor was rejected");
+    }
+    if (engine->play() != LazerAudioOk || !waitForEvent(capture, LazerAudioEventEnded)) {
+        std::cerr << "gapless play error: " << engine->lastError() << '\n';
+        engine->destroy();
+        return fail("Native DSD gapless session did not end cleanly");
+    }
+    engine->destroy();
+
+    std::vector<uint8_t> captured;
+    std::vector<int32_t> events;
+    int32_t openCount = 0;
+    int32_t startCount = 0;
+    bool invalidWrite = false;
+    {
+        std::lock_guard guard(capture->mutex);
+        captured = capture->bytes;
+        events = capture->events;
+        openCount = capture->openCount;
+        startCount = capture->startCount;
+        invalidWrite = capture->invalidWrite;
+    }
+    std::vector<uint8_t> raw;
+    std::vector<uint8_t> successorRaw;
+    if (!decodeRawDsd(firstReader.bytes, raw) ||
+        !decodeRawDsd(successorReader.bytes, successorRaw)) {
+        return fail("could not independently decode raw DSD bytes for the gapless reference");
+    }
+    raw.insert(raw.end(), successorRaw.begin(), successorRaw.end());
+    const std::vector<uint8_t> expected = packExpectedNativeDsd(raw);
+    if (expected.empty() || std::search(captured.begin(), captured.end(), expected.begin(),
+        expected.end()) == captured.end()) {
+        size_t bestOffset = 0;
+        size_t bestMatched = 0;
+        for (size_t offset = 0; offset < captured.size(); ++offset) {
+            size_t matched = 0;
+            while (matched < expected.size() && offset + matched < captured.size() &&
+                captured[offset + matched] == expected[matched]) {
+                ++matched;
+            }
+            if (matched > bestMatched) {
+                bestOffset = offset;
+                bestMatched = matched;
+            }
+        }
+        std::cerr << "gapless captured bytes=" << captured.size()
+            << " expected contiguous payload=" << expected.size()
+            << " best prefix=" << bestMatched << " at captured offset=" << bestOffset;
+        if (bestMatched < expected.size() && bestOffset + bestMatched < captured.size()) {
+            std::cerr << " mismatch expected=0x" << std::hex
+                << static_cast<int>(expected[bestMatched]) << " captured=0x"
+                << static_cast<int>(captured[bestOffset + bestMatched]) << std::dec;
+        }
+        std::cerr << '\n';
+        return fail("Native DSD A→B payload was not contiguous or had seam padding");
+    }
+    const int32_t trackChanges = static_cast<int32_t>(std::count(events.begin(), events.end(),
+        LazerAudioEventTrackChanged));
+    const int32_t ended = static_cast<int32_t>(std::count(events.begin(), events.end(),
+        LazerAudioEventEnded));
+    const auto track = std::find(events.begin(), events.end(), LazerAudioEventTrackChanged);
+    const auto end = std::find(events.begin(), events.end(), LazerAudioEventEnded);
+    if (openCount != 1 || startCount != 1 || invalidWrite || trackChanges != 1 || ended != 1 ||
+        track == events.end() || end == events.end() || track >= end) {
+        return fail("Native DSD gapless session lifecycle or track/ended event order was incorrect");
+    }
+    std::cout << "PASS: compatible raw DSD successors share one U32_BE session; the partial word crosses the seam without idle padding, incompatible rate/ReplayGain are rejected, and TrackChanged precedes Ended\n";
+    return 0;
+}
+
 } // namespace
 
 namespace lazer::audio {
@@ -347,5 +651,7 @@ std::unique_ptr<AudioOutput> createPlatformAudioOutput() { return nullptr; }
 int main() {
     if (runNativeDsdCase() != 0) return 1;
     if (runWrongClockCase() != 0) return 1;
+    if (runNativeModeChangeRejectionCase() != 0) return 1;
+    if (runNativeDsdGaplessCase() != 0) return 1;
     return 0;
 }

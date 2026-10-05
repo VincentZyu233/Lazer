@@ -127,6 +127,8 @@ private:
     LazerAudioDeviceConfig device_{};
     AudioOutputSession outputSession_{};
     TargetFormat floatTarget_{};
+    /* One packer spans a complete Native DSD output session, including queued source boundaries. */
+    NativeDsdPacker nativeDsdPacker_{};
     bool dspBypassed_ = false;
     /* Pump-thread-only per-source ReplayGain ramp; starts at the opened track's gain and retargets
      * only after the queued successor has been activated at the producer-side frame boundary. */
@@ -149,6 +151,7 @@ private:
     /* Reused by the pump thread so a DSP block never allocates per frame. */
     std::vector<uint8_t> convertScratch_;
     std::vector<uint8_t> queuedPcmScratch_;
+    std::vector<uint8_t> nativeDsdScratch_;
 
     /* Render-side accounting, reset whenever the producer flushes the ring for a seek. */
     std::atomic<int64_t> renderedFrames_{0};
