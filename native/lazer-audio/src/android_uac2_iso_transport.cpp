@@ -1,10 +1,21 @@
 #include "android_uac2_iso_transport.h"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <utility>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace lazer::android_uac2 {
 namespace {
@@ -17,6 +28,67 @@ constexpr std::size_t kMaximumQueueBytes = 16u * 1024u * 1024u;
 constexpr std::uint8_t kMaxConsecutiveInvalidFeedback = 4;
 constexpr std::uint8_t kHighSpeedFeedbackPacketsPerTransfer = 8;
 constexpr std::uint8_t kFullSpeedFeedbackPacketsPerTransfer = 4;
+constexpr std::size_t kMaximumOutstandingSessions = 4;
+constexpr std::chrono::milliseconds kDefaultStopTimeout{500};
+constexpr std::chrono::milliseconds kStopRetryInterval{50};
+constexpr std::chrono::milliseconds kEventErrorInitialBackoff{10};
+constexpr std::chrono::milliseconds kEventErrorMaximumBackoff{250};
+
+struct SessionRegistry final {
+    std::mutex mutex;
+    std::array<IsoTransportSession*, kMaximumOutstandingSessions> quarantined{};
+    std::size_t reserved_sessions = 0;
+};
+
+SessionRegistry* Registry() {
+    // A process-lifetime registry deliberately retains quarantined sessions until process exit.
+    static SessionRegistry* const registry = new SessionRegistry();
+    return registry;
+}
+
+bool ReserveSessionSlot() {
+    auto* registry = Registry();
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    if (registry->reserved_sessions >= kMaximumOutstandingSessions) return false;
+    ++registry->reserved_sessions;
+    return true;
+}
+
+void ReleaseSessionSlot() noexcept {
+    auto* registry = Registry();
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    if (registry->reserved_sessions > 0) --registry->reserved_sessions;
+}
+
+bool RetainQuarantinedSession(IsoTransportSession* session) noexcept {
+    if (session == nullptr) return false;
+    auto* registry = Registry();
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    for (auto& quarantined : registry->quarantined) {
+        if (quarantined == nullptr) {
+            quarantined = session;
+            return true;
+        }
+    }
+    return false;
+}
+
+int DuplicateFd(const int fd) noexcept {
+#if defined(_WIN32)
+    return _dup(fd);
+#else
+    return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+#endif
+}
+
+void CloseFd(const int fd) noexcept {
+    if (fd < 0) return;
+#if defined(_WIN32)
+    _close(fd);
+#else
+    close(fd);
+#endif
+}
 
 std::string UsbErrorText(const char* operation, const int code) {
     std::ostringstream text;
@@ -32,18 +104,54 @@ std::uint32_t ReadLittleEndian(const unsigned char* bytes, const std::size_t cou
 
 } // namespace
 
-IsoTransportSession::IsoTransportSession(const int borrowed_usb_fd) noexcept
-    : borrowed_usb_fd_(borrowed_usb_fd) {}
+IsoTransportSession::IsoTransportSession(
+    const int borrowed_usb_fd,
+    const int owned_usb_fd) noexcept
+    : borrowed_usb_fd_(borrowed_usb_fd), owned_usb_fd_(owned_usb_fd) {}
 
-std::unique_ptr<IsoTransportSession> IsoTransportSession::Open(
+IsoTransportSession::Pointer IsoTransportSession::Open(
     const int borrowed_usb_fd,
     std::string* error) {
+    Pointer session;
     if (borrowed_usb_fd < 0) {
         if (error != nullptr) *error = "UsbDeviceConnection returned an invalid file descriptor";
-        return nullptr;
+        return session;
     }
 
-    auto session = std::unique_ptr<IsoTransportSession>(new IsoTransportSession(borrowed_usb_fd));
+    try {
+        if (!ReserveSessionSlot()) {
+            if (error != nullptr) {
+                *error = "Too many native UAC2 sessions are active or quarantined; refusing another USB open";
+            }
+            return session;
+        }
+    } catch (const std::exception& exception) {
+        if (error != nullptr) *error = std::string("Could not reserve native UAC2 session state: ") + exception.what();
+        return session;
+    } catch (...) {
+        if (error != nullptr) *error = "Could not reserve native UAC2 session state";
+        return session;
+    }
+
+    const int owned_usb_fd = DuplicateFd(borrowed_usb_fd);
+    if (owned_usb_fd < 0) {
+        const int error_code = errno;
+        ReleaseSessionSlot();
+        if (error != nullptr) {
+            *error = std::string("Could not duplicate UsbDeviceConnection FD: ") + std::strerror(error_code);
+        }
+        return session;
+    }
+
+    try {
+        session.reset(new IsoTransportSession(borrowed_usb_fd, owned_usb_fd));
+    } catch (...) {
+        CloseFd(owned_usb_fd);
+        ReleaseSessionSlot();
+        if (error != nullptr) *error = "Could not allocate native UAC2 transport session";
+        return session;
+    }
+
     const libusb_init_option option{
         .option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
         .value = {.ival = 0},
@@ -51,26 +159,55 @@ std::unique_ptr<IsoTransportSession> IsoTransportSession::Open(
     int result = libusb_init_context(&session->context_, &option, 1);
     if (result < 0) {
         if (error != nullptr) *error = UsbErrorText("libusb_init_context", result);
+        session->Close(0);
         return nullptr;
     }
 
     result = libusb_wrap_sys_device(
         session->context_,
-        static_cast<intptr_t>(borrowed_usb_fd),
+        static_cast<intptr_t>(owned_usb_fd),
         &session->device_handle_);
     if (result < 0 || session->device_handle_ == nullptr) {
         if (error != nullptr) *error = UsbErrorText("libusb_wrap_sys_device", result);
-        if (session->context_ != nullptr) {
-            libusb_exit(session->context_);
-            session->context_ = nullptr;
-        }
+        session->Close(0);
         return nullptr;
     }
     return session;
 }
 
 IsoTransportSession::~IsoTransportSession() {
-    Close();
+    // Active sessions are owned by Pointer. Its deleter quarantines this object if Close cannot
+    // prove callback quiescence; reaching the destructor with outstanding work would be a bug.
+    const bool closed = Close(0);
+    if (!closed) std::terminate();
+}
+
+void IsoTransportSession::Deleter::operator()(IsoTransportSession* session) const noexcept {
+    if (session == nullptr) return;
+    if (session->quarantine_required_.load(std::memory_order_acquire)) {
+        if (RetainQuarantinedSession(session)) return;
+        // The open-time reservation makes this unreachable. Leaking is safer than freeing memory
+        // that an in-flight libusb callback may still reference.
+        return;
+    }
+    if (!session->Close(0)) {
+        session->quarantine_required_.store(true, std::memory_order_release);
+        if (RetainQuarantinedSession(session)) return;
+        return;
+    }
+    delete session;
+}
+
+std::size_t IsoTransportSession::QuarantinedSessionCount() noexcept {
+    auto* registry = Registry();
+    std::lock_guard<std::mutex> lock(registry->mutex);
+    std::size_t count = 0;
+    for (const auto* session : registry->quarantined) if (session != nullptr) ++count;
+    return count;
+}
+
+std::size_t IsoTransportSession::MaximumSessionCount() noexcept {
+    return kMaximumOutstandingSessions;
 }
 
 int IsoTransportSession::Start(const NativeStreamConfig& config, std::string* error) {
@@ -84,6 +221,7 @@ int IsoTransportSession::Start(const NativeStreamConfig& config, std::string* er
         return LIBUSB_ERROR_BUSY;
     }
     fatal_error_ = LIBUSB_SUCCESS;
+    cancellation_error_ = LIBUSB_SUCCESS;
     last_error_.clear();
     invalid_feedback_count_ = 0;
     underrun_packets_ = 0;
@@ -566,6 +704,10 @@ bool IsoTransportSession::Flush(const std::uint32_t timeout_ms) {
 }
 
 bool IsoTransportSession::Stop(const bool drain, const std::uint32_t timeout_ms) {
+    const auto started_at = std::chrono::steady_clock::now();
+    const auto deadline = started_at + (timeout_ms == 0
+        ? kDefaultStopTimeout
+        : std::chrono::milliseconds(timeout_ms));
     std::unique_lock<std::mutex> lock(mutex_);
     bool drained = true;
     if (drain && stream_started_ && fatal_error_ >= 0) {
@@ -586,8 +728,7 @@ bool IsoTransportSession::Stop(const bool drain, const std::uint32_t timeout_ms)
         };
         bool finished = drained_predicate();
         if (!finished && timeout_ms != 0) {
-            finished = changed_.wait_for(
-                lock, std::chrono::milliseconds(timeout_ms), drained_predicate);
+            finished = changed_.wait_until(lock, deadline, drained_predicate);
         }
         drained = finished && queue_size_ == 0 && in_flight_data_count_ == 0 && fatal_error_ >= 0;
     } else if (drain && fatal_error_ < 0) {
@@ -602,9 +743,31 @@ bool IsoTransportSession::Stop(const bool drain, const std::uint32_t timeout_ms)
     stopping_ = true;
     flushing_ = false;
     CancelAllLocked();
-    // libusb cancellation is asynchronous. Keep both the transfer buffers and the borrowed Android
-    // descriptor alive until every cancellation callback has returned to this event loop.
-    changed_.wait(lock, [this] { return in_flight_count_ == 0; });
+    // Cancellation can fail or callbacks may never arrive after an event-loop error. Retry
+    // transient cancellation failures, but never free callback-owned storage without proof that
+    // every submitted transfer has returned.
+    while (in_flight_count_ != 0) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) break;
+        const auto retry_deadline = std::min(deadline, now + kStopRetryInterval);
+        changed_.wait_until(lock, retry_deadline, [this] { return in_flight_count_ == 0; });
+        if (in_flight_count_ != 0 && std::chrono::steady_clock::now() < deadline) {
+            CancelAllLocked();
+        }
+    }
+    if (in_flight_count_ != 0) {
+        if (fatal_error_ >= 0) fatal_error_ = LIBUSB_ERROR_TIMEOUT;
+        if (last_error_.empty()) {
+            last_error_ = "Timed out waiting for libusb transfer callbacks; native session was quarantined";
+        } else {
+            last_error_ += "; callbacks did not quiesce before the shutdown deadline";
+        }
+        accepting_writes_ = false;
+        quarantine_required_.store(true, std::memory_order_release);
+        changed_.notify_all();
+        return false;
+    }
+
     event_loop_exit_ = true;
     lock.unlock();
     if (context_ != nullptr) libusb_interrupt_event_handler(context_);
@@ -622,17 +785,22 @@ bool IsoTransportSession::Stop(const bool drain, const std::uint32_t timeout_ms)
     queue_read_offset_ = 0;
     queue_size_ = 0;
     changed_.notify_all();
-    return drained;
+    return drained && fatal_error_ >= 0 && cancellation_error_ >= 0;
 }
 
-void IsoTransportSession::Close() noexcept {
-    Stop(false, 0);
+bool IsoTransportSession::Close(const std::uint32_t timeout_ms) noexcept {
+    if (quarantine_required_.load(std::memory_order_acquire)) return false;
+    Stop(false, timeout_ms);
     std::lock_guard<std::mutex> lock(mutex_);
-    if (closed_) return;
+    if (closed_) return true;
+    if (in_flight_count_ != 0 || stream_started_ || event_thread_.joinable()) {
+        quarantine_required_.store(true, std::memory_order_release);
+        return false;
+    }
     closed_ = true;
     if (device_handle_ != nullptr) {
-        // libusb_close() releases only the wrapped handle. The Java UsbDeviceConnection still owns
-        // borrowed_usb_fd_ and must be closed by its caller after this method returns.
+        // libusb_close() does not close the sys_dev descriptor. Close our duplicate only after all
+        // callbacks have returned; the Android UsbDeviceConnection still owns borrowed_usb_fd_.
         libusb_close(device_handle_);
         device_handle_ = nullptr;
     }
@@ -640,6 +808,12 @@ void IsoTransportSession::Close() noexcept {
         libusb_exit(context_);
         context_ = nullptr;
     }
+    CloseFd(owned_usb_fd_);
+    if (session_slot_reserved_) {
+        session_slot_reserved_ = false;
+        ReleaseSessionSlot();
+    }
+    return true;
 }
 
 int IsoTransportSession::underrun_packets() const noexcept {
@@ -761,17 +935,30 @@ void IsoTransportSession::HandleTransferComplete(
 }
 
 void IsoTransportSession::EventLoop() noexcept {
+    auto error_backoff = kEventErrorInitialBackoff;
     while (true) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (quarantine_required_.load(std::memory_order_acquire) && in_flight_count_ == 0) {
+                // The quarantined state must outlive this thread object, but no callback remains.
+                // Exit the event pump to avoid a permanent polling thread; the retained session,
+                // transfer storage, libusb handle/context, and duplicated FD remain untouched.
+                event_loop_exit_ = true;
+            }
             if (event_loop_exit_ && in_flight_count_ == 0) break;
         }
         timeval timeout{0, 50'000};
         const int result = libusb_handle_events_timeout_completed(context_, &timeout, nullptr);
         if (result < 0 && result != LIBUSB_ERROR_INTERRUPTED) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            MarkFailedLocked(result, "libusb event handling");
-            changed_.notify_all();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                MarkFailedLocked(result, "libusb event handling");
+                changed_.notify_all();
+            }
+            std::this_thread::sleep_for(error_backoff);
+            error_backoff = std::min(error_backoff * 2, kEventErrorMaximumBackoff);
+        } else {
+            error_backoff = kEventErrorInitialBackoff;
         }
     }
 }
@@ -828,13 +1015,30 @@ int IsoTransportSession::PrepareAndSubmitDataLocked(TransferSlot* slot) noexcept
     return result;
 }
 
-void IsoTransportSession::CancelAllLocked() noexcept {
+int IsoTransportSession::CancelAllLocked() noexcept {
+    int first_error = LIBUSB_SUCCESS;
+    const auto cancel_slot = [this, &first_error](TransferSlot* slot) {
+        if (slot == nullptr || !slot->in_flight || slot->transfer == nullptr) return;
+        const int result = libusb_cancel_transfer(slot->transfer);
+        // NOT_FOUND means libusb no longer has a cancellable request; its completion callback may
+        // already be queued, so retain storage until that callback updates in_flight_count_.
+        if (result < 0 && result != LIBUSB_ERROR_NOT_FOUND) {
+            if (first_error == LIBUSB_SUCCESS) first_error = result;
+            RecordCancellationFailureLocked(result);
+        }
+    };
     for (const auto& slot : data_transfers_) {
-        if (slot->in_flight && slot->transfer != nullptr) libusb_cancel_transfer(slot->transfer);
+        cancel_slot(slot.get());
     }
-    if (feedback_transfer_ != nullptr && feedback_transfer_->in_flight &&
-        feedback_transfer_->transfer != nullptr) {
-        libusb_cancel_transfer(feedback_transfer_->transfer);
+    cancel_slot(feedback_transfer_.get());
+    return first_error;
+}
+
+void IsoTransportSession::RecordCancellationFailureLocked(const int error) noexcept {
+    if (cancellation_error_ >= 0) cancellation_error_ = error;
+    if (fatal_error_ >= 0) fatal_error_ = error;
+    if (last_error_.empty()) {
+        last_error_ = UsbErrorText("Cancelling libusb transfer", error);
     }
 }
 

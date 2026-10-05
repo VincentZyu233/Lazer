@@ -203,6 +203,92 @@ class AndroidUac2StreamingDescriptorsTest {
     }
 
     @Test
+    fun `direct clock selector path retains ordered pins and source controls`() {
+        val parsed = assertNotNull(
+            parseAndroidUac2PlaybackAltSettings(
+                playbackConfiguration(
+                    altSettings = listOf(playbackAltSetting(alt = 1, feedback = false)),
+                    clockEntity = clockSource(3) + clockSource(4, frequencyControl = 3) +
+                        clockSelector(id = 6, sourceIds = listOf(3, 4), selectionControl = 3),
+                    terminalClockId = 6,
+                ),
+            ),
+        ).single()
+
+        assertEquals(6, parsed.clockSelector?.clockSelectorId)
+        assertEquals(AndroidUac2ClockFrequencyAccess.HostProgrammable, parsed.clockSelector?.selectionAccess)
+        assertEquals(listOf(1, 2), parsed.clockSourceCandidates.map { it.pin })
+        assertEquals(listOf(3, 4), parsed.clockSourceCandidates.map { it.clockSource.clockSourceId })
+        assertEquals(1, parsed.clockSourceCandidates.first().clockSource.controlInterfaceNumber)
+        val plan = assertNotNull(resolveAndroidUac2PcmCandidatePlan(listOf(parsed), 96_000, 2, 2, 16))
+        assertEquals(parsed.clockSelector, plan.clockSelector)
+        assertEquals(parsed.clockSourceCandidates, plan.clockSourceCandidates)
+        assertNull(
+            planAndroidUac2PcmPlayback(
+                parsed,
+                96_000,
+                listOf(AndroidUac2ClockFrequencyRange(96_000, 96_000, 0)),
+            ),
+        )
+    }
+
+    @Test
+    fun `clock selector requests expose one byte selection control and planner fails closed`() {
+        val selector = AndroidUac2ClockSelector(
+            controlInterfaceNumber = 1,
+            clockSelectorId = 6,
+            selectionAccess = AndroidUac2ClockFrequencyAccess.HostProgrammable,
+        )
+        val candidates = listOf(
+            AndroidUac2ClockSelectorCandidate(1, AndroidUac2ClockSource(1, 3, AndroidUac2ClockFrequencyAccess.ReadOnly)),
+            AndroidUac2ClockSelectorCandidate(2, AndroidUac2ClockSource(1, 4, AndroidUac2ClockFrequencyAccess.ReadOnly)),
+        )
+        val only44k1 = listOf(AndroidUac2ClockFrequencyRange(44_100, 44_100, 0))
+        val only96k = listOf(AndroidUac2ClockFrequencyRange(96_000, 96_000, 0))
+        val get = androidUac2ClockSelectorGetCurrentPinRequest(selector)
+        val set = androidUac2ClockSelectorSetCurrentPinRequest(selector, 2, candidates.size)
+
+        assertEquals(0xa1, get.requestType)
+        assertEquals(0x01, get.request)
+        assertEquals(0x0100, get.value)
+        assertEquals(0x0601, get.index)
+        assertEquals(1, get.length)
+        assertEquals(0x21, set.requestType)
+        assertEquals(0x01, set.request)
+        assertEquals(0x0100, set.value)
+        assertEquals(0x0601, set.index)
+        assertEquals(listOf(2), set.data.map { it.toInt() and 0xff })
+        assertEquals(2, parseAndroidUac2ClockSelectorCurrentPin(byteArrayOf(2), 2))
+        assertFailsWith<IllegalArgumentException> { parseAndroidUac2ClockSelectorCurrentPin(byteArrayOf(0), 2) }
+
+        val current = planAndroidUac2ClockSelectorSelection(
+            selector, candidates, currentPin = 2,
+            supportedRangesByPin = mapOf(1 to only44k1, 2 to only96k), sampleRateHz = 96_000,
+        )
+        assertEquals(2, current?.pin)
+        assertEquals(4, current?.clockSource?.clockSourceId)
+        val switched = planAndroidUac2ClockSelectorSelection(
+            selector, candidates, currentPin = 1,
+            supportedRangesByPin = mapOf(1 to only44k1, 2 to only96k), sampleRateHz = 96_000,
+        )
+        assertEquals(2, switched?.pin)
+
+        val readOnlySelector = selector.copy(selectionAccess = AndroidUac2ClockFrequencyAccess.ReadOnly)
+        assertNull(
+            planAndroidUac2ClockSelectorSelection(
+                readOnlySelector,
+                candidates,
+                currentPin = 1,
+                supportedRangesByPin = mapOf(1 to only44k1, 2 to only96k),
+                sampleRateHz = 96_000,
+            ),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            androidUac2ClockSelectorSetCurrentPinRequest(readOnlySelector, 2, candidates.size)
+        }
+    }
+
+    @Test
     fun `clock source range parses 44 point 1 and 96 kilohertz discrete subranges`() {
         val response = clockRangeResponse(
             Triple(44_100L, 44_100L, 0L),
@@ -341,16 +427,40 @@ class AndroidUac2StreamingDescriptorsTest {
     }
 
     @Test
-    fun `streaming parser fails closed for indirect clocks and unsupported PCM containers`() {
-        assertNull(
-            parseAndroidUac2PlaybackAltSettings(
-                playbackConfiguration(
-                    altSettings = listOf(playbackAltSetting(alt = 1, feedback = false)),
-                    clockEntity = clockSelector(id = 3, sourceId = 9),
-                    terminalClockId = 3,
-                ),
-            ),
-        )
+    fun `streaming parser fails closed for malformed cyclic missing and nested clock selector paths`() {
+        val altSettings = listOf(playbackAltSetting(alt = 1, feedback = false))
+        assertNull(parseAndroidUac2PlaybackAltSettings(playbackConfiguration(
+            altSettings = altSettings,
+            clockEntity = clockSource(3) + clockSelector(id = 6, sourceIds = listOf(3, 9)),
+            terminalClockId = 6,
+        )))
+        assertNull(parseAndroidUac2PlaybackAltSettings(playbackConfiguration(
+            altSettings = altSettings,
+            clockEntity = clockSource(3) + clockSelector(id = 6, sourceIds = listOf(6)),
+            terminalClockId = 6,
+        )))
+        assertNull(parseAndroidUac2PlaybackAltSettings(playbackConfiguration(
+            altSettings = altSettings,
+            clockEntity = clockSource(3) + clockSelector(id = 6, sourceIds = listOf(3), selectionControl = 0),
+            terminalClockId = 6,
+        )))
+        assertNull(parseAndroidUac2PlaybackAltSettings(playbackConfiguration(
+            altSettings = altSettings,
+            clockEntity = clockSource(3) + clockSelector(id = 6, sourceIds = listOf(3), selectionControl = 0x05),
+            terminalClockId = 6,
+        )))
+        val truncatedSelector = clockSelector(id = 6, sourceIds = listOf(3)).copyOf(7)
+        assertNull(parseAndroidUac2PlaybackAltSettings(playbackConfiguration(
+            altSettings = altSettings,
+            clockEntity = clockSource(3) + truncatedSelector,
+            terminalClockId = 6,
+        )))
+        assertNull(parseAndroidUac2PlaybackAltSettings(playbackConfiguration(
+            altSettings = altSettings,
+            clockEntity = clockSource(3) + clockSelector(id = 6, sourceIds = listOf(3, 7)) +
+                clockSelector(id = 7, sourceIds = listOf(3)),
+            terminalClockId = 6,
+        )))
         assertNull(
             parseAndroidUac2PlaybackAltSettings(
                 playbackConfiguration(
@@ -457,8 +567,14 @@ class AndroidUac2StreamingDescriptorsTest {
         frequencyControl: Int = 1,
     ): ByteArray = bytes(8, 0x24, 0x0a, id, 0x03, frequencyControl, 0, 0)
 
-    private fun clockSelector(id: Int, sourceId: Int): ByteArray =
-        bytes(8, 0x24, 0x0b, id, 1, sourceId, 1, 0)
+    private fun clockSelector(
+        id: Int,
+        sourceIds: List<Int>,
+        selectionControl: Int = 1,
+    ): ByteArray = bytes(
+        7 + sourceIds.size, 0x24, 0x0b, id, sourceIds.size,
+        *sourceIds.toIntArray(), selectionControl, 0,
+    )
 
     private fun inputTerminal(id: Int, clockId: Int): ByteArray = bytes(
         17, 0x24, 0x02, id, 0x01, 0x01, 0, clockId, 2,

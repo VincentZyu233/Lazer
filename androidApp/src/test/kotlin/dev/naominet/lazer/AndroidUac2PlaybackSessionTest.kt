@@ -84,6 +84,97 @@ class AndroidUac2PlaybackSessionTest {
     }
 
     @Test
+    fun `selector keeps current pin when its source advertises the requested rate`() {
+        val gateway = FakeGateway(currentClockHz = 44_100).apply {
+            currentClockSelectorPin = 2
+            clockRangesBySourceId = selectorRanges()
+            currentClockBySourceId[4] = 96_000
+        }
+        val session = newSession(gateway, plan = selectorPlan())
+
+        session.openAndConfigure()
+
+        assertEquals(AndroidUac2PlaybackSessionState.ConfiguredNotStreaming, session.state)
+        assertEquals(2, gateway.currentClockSelectorPin)
+        assertTrue(gateway.setSelectorRequests.isEmpty())
+        assertTrue(gateway.operations.contains("range-full:4"))
+        session.close()
+        assertTrue(gateway.setSelectorRequests.isEmpty())
+    }
+
+    @Test
+    fun `selector switches only to advertised source and restores source rate then original pin`() {
+        val gateway = FakeGateway(currentClockHz = 44_100).apply {
+            clockRangesBySourceId = selectorRanges()
+            currentClockBySourceId[4] = 44_100
+        }
+        val session = newSession(gateway, plan = selectorPlan())
+
+        session.openAndConfigure()
+        assertEquals(2, gateway.currentClockSelectorPin)
+        assertEquals(96_000, gateway.currentClockBySourceId[4])
+        session.close()
+
+        assertEquals(listOf(2, 1), gateway.setSelectorRequests)
+        assertEquals(1, gateway.currentClockSelectorPin)
+        assertEquals(44_100, gateway.currentClockBySourceId[4])
+        assertTrue(gateway.operations.indexOf("clock-set:4:44100") < gateway.operations.indexOf("selector-set:1"))
+        assertTrue(gateway.operations.indexOf("selector-set:1") < gateway.operations.indexOf("restore-configuration:3"))
+    }
+
+    @Test
+    fun `selector and selected source are restored after later configuration failure`() {
+        val gateway = FakeGateway(currentClockHz = 44_100).apply {
+            clockRangesBySourceId = selectorRanges()
+            currentClockBySourceId[4] = 44_100
+            setAlternateSucceeds = false
+        }
+        val session = newSession(gateway, plan = selectorPlan())
+
+        assertFailsWith<IllegalStateException> { session.openAndConfigure() }
+
+        assertEquals(AndroidUac2PlaybackSessionState.Failed, session.state)
+        assertEquals(listOf(2, 1), gateway.setSelectorRequests)
+        assertEquals(1, gateway.currentClockSelectorPin)
+        assertEquals(44_100, gateway.currentClockBySourceId[4])
+    }
+
+    @Test
+    fun `read only selector cannot switch away from a source without requested rate`() {
+        val gateway = FakeGateway(currentClockHz = 44_100).apply {
+            clockRangesBySourceId = selectorRanges()
+        }
+        val session = newSession(
+            gateway,
+            plan = selectorPlan(AndroidUac2ClockFrequencyAccess.ReadOnly),
+        )
+
+        assertFailsWith<IllegalStateException> { session.openAndConfigure() }
+
+        assertEquals(1, gateway.currentClockSelectorPin)
+        assertTrue(gateway.setSelectorRequests.isEmpty())
+        assertTrue(gateway.setClockRequests.isEmpty())
+    }
+
+    @Test
+    fun `detach does not send selector or clock restoration controls`() {
+        val gateway = FakeGateway(currentClockHz = 44_100).apply {
+            clockRangesBySourceId = selectorRanges()
+        }
+        val session = newSession(gateway, plan = selectorPlan())
+        session.openAndConfigure()
+        val selectorWritesBeforeDetach = gateway.setSelectorRequests.size
+        val clockWritesBeforeDetach = gateway.operations.count { it.startsWith("clock-set:") }
+
+        session.onDeviceDetached()
+
+        assertEquals(2, gateway.currentClockSelectorPin)
+        assertEquals(selectorWritesBeforeDetach, gateway.setSelectorRequests.size)
+        assertEquals(clockWritesBeforeDetach, gateway.operations.count { it.startsWith("clock-set:") })
+        assertEquals(AndroidUac2PlaybackSessionState.Detached, session.state)
+    }
+
+    @Test
     fun `permission and open failures do not claim interfaces`() {
         val deniedGateway = FakeGateway(currentClockHz = 44_100).apply { permission = false }
         val deniedSession = newSession(deniedGateway)
@@ -304,10 +395,32 @@ class AndroidUac2PlaybackSessionTest {
     private fun newSession(
         gateway: FakeGateway,
         access: AndroidUac2ClockFrequencyAccess = AndroidUac2ClockFrequencyAccess.HostProgrammable,
+        plan: AndroidUac2PlaybackStreamPlan = testPlan(access),
     ) = AndroidUac2PlaybackSession(
         device = ReflectionHelpers.newInstance(UsbDevice::class.java),
-        plan = testPlan(access),
+        plan = plan,
         gateway = gateway,
+    )
+
+    private fun selectorPlan(
+        selectionAccess: AndroidUac2ClockFrequencyAccess = AndroidUac2ClockFrequencyAccess.HostProgrammable,
+    ) = testPlan().copy(
+        clockSelector = AndroidUac2ClockSelector(1, 6, selectionAccess),
+        clockSourceCandidates = listOf(
+            AndroidUac2ClockSelectorCandidate(
+                1,
+                AndroidUac2ClockSource(1, 3, AndroidUac2ClockFrequencyAccess.HostProgrammable),
+            ),
+            AndroidUac2ClockSelectorCandidate(
+                2,
+                AndroidUac2ClockSource(1, 4, AndroidUac2ClockFrequencyAccess.HostProgrammable),
+            ),
+        ),
+    )
+
+    private fun selectorRanges() = mapOf(
+        3 to listOf(Triple(44_100L, 44_100L, 0L)),
+        4 to listOf(Triple(44_100L, 44_100L, 0L), Triple(96_000L, 96_000L, 0L)),
     )
 
     private fun testPlan(
@@ -350,6 +463,10 @@ class AndroidUac2PlaybackSessionTest {
         val connection: UsbDeviceConnection = ReflectionHelpers.newInstance(UsbDeviceConnection::class.java)
         val operations = mutableListOf<String>()
         val setClockRequests = mutableListOf<Long>()
+        val setSelectorRequests = mutableListOf<Int>()
+        val currentClockBySourceId = mutableMapOf<Int, Long>()
+        var clockRangesBySourceId: Map<Int, List<Triple<Long, Long, Long>>> = emptyMap()
+        var currentClockSelectorPin = 1
         var permission = true
         var openSucceeds = true
         var configurationSucceeds = true
@@ -432,32 +549,58 @@ class AndroidUac2PlaybackSessionTest {
                     if (configurationRestoreSucceeds) 0 else -1
                 }
 
+                request.requestType == 0xa1 && request.request == 0x01 && request.length == 1 &&
+                    request.index ushr 8 == 6 -> {
+                    operations += "selector-current"
+                    request.data[0] = currentClockSelectorPin.toByte()
+                    request.length
+                }
+
+                request.requestType == 0x21 && request.request == 0x01 && request.length == 1 &&
+                    request.index ushr 8 == 6 -> {
+                    val pin = request.data[0].toInt() and 0xff
+                    operations += "selector-set:$pin"
+                    setSelectorRequests += pin
+                    currentClockSelectorPin = pin
+                    request.length
+                }
+
                 request.requestType == 0xa1 && request.request == 0x02 && request.length == 2 -> {
-                    operations += "range-header"
-                    writeUnsigned(request.data, 0, 1, byteCount = 2)
+                    val sourceId = request.index ushr 8
+                    operations += if (sourceId == 3) "range-header" else "range-header:$sourceId"
+                    val count = clockRangesBySourceId[sourceId]?.size ?: 1
+                    writeUnsigned(request.data, 0, count.toLong(), byteCount = 2)
                     request.length
                 }
 
                 request.requestType == 0xa1 && request.request == 0x02 -> {
-                    operations += "range-full"
-                    writeUnsigned(request.data, 0, 1)
-                    writeUnsigned(request.data, 2, 44_100)
-                    writeUnsigned(request.data, 6, 192_000)
-                    writeUnsigned(request.data, 10, 1)
+                    val sourceId = request.index ushr 8
+                    operations += if (sourceId == 3) "range-full" else "range-full:$sourceId"
+                    val ranges = clockRangesBySourceId[sourceId] ?: listOf(Triple(44_100L, 192_000L, 1L))
+                    writeUnsigned(request.data, 0, ranges.size.toLong(), byteCount = 2)
+                    ranges.forEachIndexed { index, (minimum, maximum, resolution) ->
+                        val offset = 2 + index * 12
+                        writeUnsigned(request.data, offset, minimum)
+                        writeUnsigned(request.data, offset + 4, maximum)
+                        writeUnsigned(request.data, offset + 8, resolution)
+                    }
                     request.length
                 }
 
                 request.requestType == 0xa1 && request.request == 0x01 -> {
-                    operations += "clock-current"
-                    writeUnsigned(request.data, 0, currentClockHz)
+                    val sourceId = request.index ushr 8
+                    operations += if (sourceId == 3) "clock-current" else "clock-current:$sourceId"
+                    writeUnsigned(request.data, 0, currentClockBySourceId[sourceId] ?: currentClockHz)
                     request.length
                 }
 
                 request.requestType == 0x21 && request.request == 0x01 -> {
+                    val sourceId = request.index ushr 8
                     val requestedHz = readUnsigned(request.data, 0)
-                    operations += "clock-set:$requestedHz"
+                    operations += if (sourceId == 3) "clock-set:$requestedHz" else "clock-set:$sourceId:$requestedHz"
                     setClockRequests += requestedHz
-                    currentClockHz = if (requestedHz == rejectClockRate) 48_000 else requestedHz
+                    val acceptedHz = if (requestedHz == rejectClockRate) 48_000 else requestedHz
+                    if (sourceId == 3) currentClockHz = acceptedHz else currentClockBySourceId[sourceId] = acceptedHz
                     request.length
                 }
 

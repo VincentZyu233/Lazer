@@ -13,7 +13,6 @@ import androidx.media3.exoplayer.audio.AudioOutputProvider
 import androidx.media3.exoplayer.audio.AudioTrackAudioOutputProvider
 import androidx.media3.exoplayer.audio.ForwardingAudioOutputProvider
 import java.io.IOException
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Explicit Android USB UAC2 PCM output. It never falls back to AudioTrack: unsupported formats,
@@ -30,14 +29,18 @@ internal class AndroidUac2DirectAudioOutputProvider(
     private val appContext = context.applicationContext
     private val usbManager = appContext.getSystemService(Context.USB_SERVICE) as UsbManager
     private val delegate = AudioTrackAudioOutputProvider.Builder(appContext).build()
-    private val closed = AtomicBoolean(false)
-    private val activeLock = Any()
-    private var activeTransport: AndroidUac2NativeIsochronousTransport? = null
+    private val lifecycle = AndroidUac2DirectOutputLifecycle<AndroidUac2NativeIsochronousTransport>(
+        closeTransport = { transport, detached ->
+            if (detached) transport.onDeviceDetached() else transport.close()
+        },
+    )
     private val outputProvider = object : ForwardingAudioOutputProvider(delegate) {
         override fun getFormatSupport(
             config: AudioOutputProvider.FormatConfig,
         ): AudioOutputProvider.FormatSupport {
-            if (closed.get() || config.format.channelCount != ANDROID_UAC2_DIRECT_CHANNEL_COUNT) {
+            if (!lifecycle.isAvailable ||
+                config.format.channelCount != ANDROID_UAC2_DIRECT_CHANNEL_COUNT
+            ) {
                 return AudioOutputProvider.FormatSupport.UNSUPPORTED
             }
             return androidUac2DirectPcmFormatSupport(config)
@@ -48,34 +51,25 @@ internal class AndroidUac2DirectAudioOutputProvider(
         ): AudioOutputProvider.OutputConfig = createOutputConfig(config)
 
         override fun getAudioOutput(config: AudioOutputProvider.OutputConfig): AudioOutput = try {
-            check(!closed.get()) { "USB direct-output provider is closed" }
-            val transport = synchronized(activeLock) {
-                // Media3 may recreate its output after a format change. Release the old USB owner
-                // before claiming the new stream tuple.
-                activeTransport?.close()
-                activeTransport = null
-                createTransport(config).also { activeTransport = it }
-            }
-            val output = AndroidUac2Media3AudioOutput(config, transport)
-            onOutputConfigured(
-                config,
-                requireNotNull(usbManager.deviceList[deviceId]).productName?.toString().orEmpty(),
-                transport.bytesPerSample * 8,
+            lifecycle.createOutput(
+                createTransport = { createTransport(config) },
+                createAudioOutput = { transport ->
+                    AndroidUac2Media3AudioOutput(config, transport).also {
+                        onOutputConfigured(
+                            config,
+                            requireNotNull(usbManager.deviceList[deviceId]).productName?.toString().orEmpty(),
+                            transport.bytesPerSample * 8,
+                        )
+                    }
+                },
             )
-            output
         } catch (error: Throwable) {
-            runCatching { closeActiveTransport(detached = false) }
             runCatching { onOutputFailed(error) }
             throw AudioOutputProvider.InitializationException(error)
         }
 
         override fun release() {
-            if (!closed.compareAndSet(false, true)) return
-            try {
-                super.release()
-            } finally {
-                closeActiveTransport(detached = false)
-            }
+            lifecycle.closeProvider { super.release() }
         }
     }
 
@@ -84,23 +78,11 @@ internal class AndroidUac2DirectAudioOutputProvider(
     /** Close native callbacks before the service releases the Media3 player. */
     fun onDeviceDetached(detachedDeviceId: String) {
         if (detachedDeviceId != deviceId) return
-        closeActiveTransport(detached = true)
+        lifecycle.onDeviceDetached()
     }
 
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        try {
-            delegate.release()
-        } finally {
-            closeActiveTransport(detached = false)
-        }
-    }
-
-    private fun closeActiveTransport(detached: Boolean) {
-        val transport = synchronized(activeLock) {
-            activeTransport.also { activeTransport = null }
-        } ?: return
-        if (detached) transport.onDeviceDetached() else transport.close()
+        lifecycle.closeProvider { delegate.release() }
     }
 
     private fun createOutputConfig(

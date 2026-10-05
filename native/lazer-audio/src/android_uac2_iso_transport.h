@@ -5,6 +5,7 @@
 #include <libusb.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -43,7 +44,14 @@ struct NativeStreamConfig final {
  */
 class IsoTransportSession final {
 public:
-    static std::unique_ptr<IsoTransportSession> Open(int borrowed_usb_fd, std::string* error);
+    struct Deleter final {
+        void operator()(IsoTransportSession* session) const noexcept;
+    };
+    using Pointer = std::unique_ptr<IsoTransportSession, Deleter>;
+
+    static Pointer Open(int borrowed_usb_fd, std::string* error);
+    static std::size_t QuarantinedSessionCount() noexcept;
+    static std::size_t MaximumSessionCount() noexcept;
 
     IsoTransportSession(const IsoTransportSession&) = delete;
     IsoTransportSession& operator=(const IsoTransportSession&) = delete;
@@ -54,7 +62,10 @@ public:
     void SetPlaying(bool playing) noexcept;
     bool Flush(std::uint32_t timeout_ms);
     bool Stop(bool drain, std::uint32_t timeout_ms);
-    void Close() noexcept;
+    // Returns true only when callback quiescence was proven and libusb plus the native duplicate
+    // of Android's descriptor were closed. On timeout it retains all transfer/session state; the
+    // Pointer deleter quarantines the object instead of freeing anything callbacks may reference.
+    bool Close(std::uint32_t timeout_ms = 500) noexcept;
 
     int underrun_packets() const noexcept;
     int error_code() const noexcept;
@@ -75,7 +86,7 @@ private:
         bool in_flight = false;
     };
 
-    explicit IsoTransportSession(int borrowed_usb_fd) noexcept;
+    IsoTransportSession(int borrowed_usb_fd, int owned_usb_fd) noexcept;
 
     static void LIBUSB_CALL OnTransferComplete(libusb_transfer* transfer) noexcept;
     void HandleTransferComplete(TransferSlot* slot, libusb_transfer* transfer) noexcept;
@@ -86,7 +97,8 @@ private:
         const NativeStreamConfig& config,
         UsbSpeed speed,
         std::string* error);
-    void CancelAllLocked() noexcept;
+    int CancelAllLocked() noexcept;
+    void RecordCancellationFailureLocked(int error) noexcept;
     void MarkFailedLocked(int error, const char* operation) noexcept;
     void ReleaseStreamResourcesLocked() noexcept;
     std::size_t QueuedBytesLocked() const noexcept;
@@ -95,6 +107,7 @@ private:
     void CopyFromQueueLocked(unsigned char* destination, std::size_t length) noexcept;
 
     const int borrowed_usb_fd_;
+    const int owned_usb_fd_;
     libusb_context* context_ = nullptr;
     libusb_device_handle* device_handle_ = nullptr;
     std::thread event_thread_;
@@ -118,6 +131,7 @@ private:
     std::chrono::steady_clock::time_point last_playback_progress_{};
     int underrun_packets_ = 0;
     int fatal_error_ = LIBUSB_SUCCESS;
+    int cancellation_error_ = LIBUSB_SUCCESS;
     std::string last_error_;
     bool stream_started_ = false;
     bool accepting_writes_ = false;
@@ -127,6 +141,8 @@ private:
     bool stopping_ = false;
     bool event_loop_exit_ = false;
     bool closed_ = false;
+    std::atomic<bool> quarantine_required_{false};
+    bool session_slot_reserved_ = true;
 };
 
 } // namespace lazer::android_uac2

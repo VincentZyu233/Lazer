@@ -7,17 +7,59 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace lazer::uac2_transport_probe {
 void ResetFakeLibusbState();
 int CloseCount();
 int ExitCount();
 int ClosedFdCount();
+void SetCancelFailures(int count);
+void SetEventFailures(int count);
+int FreedTransferCount();
+int LiveTransferCount();
+int CallbackCount();
+int EventErrorCount();
+int CancelErrorCount();
+int PendingTransferCount();
+int WrappedFd();
 } // namespace lazer::uac2_transport_probe
 
 namespace {
 
 using lazer::android_uac2::IsoTransportSession;
 using lazer::android_uac2::NativeStreamConfig;
+
+int OpenDummyFd() {
+#if defined(_WIN32)
+    return _open("NUL", _O_RDONLY);
+#else
+    return open("/dev/null", O_RDONLY | O_CLOEXEC);
+#endif
+}
+
+bool IsFdOpen(const int fd) {
+    if (fd < 0) return false;
+#if defined(_WIN32)
+    return _get_osfhandle(fd) != -1;
+#else
+    return fcntl(fd, F_GETFD) != -1;
+#endif
+}
+
+int CloseDummyFd(const int fd) {
+#if defined(_WIN32)
+    return _close(fd);
+#else
+    return close(fd);
+#endif
+}
 
 bool Check(const bool condition, const char* message) {
     if (condition) return true;
@@ -62,14 +104,20 @@ NativeStreamConfig TestStreamConfig() {
 int main() {
     using namespace lazer::uac2_transport_probe;
     ResetFakeLibusbState();
+    std::cout << "phase: normal stream" << std::endl;
 
     std::string error;
-    auto session = IsoTransportSession::Open(42, &error);
+    const int original_fd = OpenDummyFd();
+    std::cout << "normal: opened original fd" << std::endl;
+    if (!Check(original_fd >= 0, "Could not create a dummy authorized device descriptor")) return 1;
+    auto session = IsoTransportSession::Open(original_fd, &error);
+    std::cout << "normal: wrapped duplicate" << std::endl;
     if (!Check(session != nullptr, error.empty() ? "Could not wrap borrowed USB descriptor" : error.c_str())) return 1;
 
     const auto config = TestStreamConfig();
     if (!Check(session->Start(config, &error) == 0,
                error.empty() ? "Could not start USB 2.0 async PCM stream" : error.c_str())) return 1;
+    std::cout << "normal: started stream" << std::endl;
 
     // The transport starts paused. Writes are accepted into its bounded queue but no queued frame
     // may become audible or advance the playhead before SetPlaying(true).
@@ -77,6 +125,7 @@ int main() {
     const int first_write = session->Write(first_audio.data(), first_audio.size(), 0);
     if (!Check(first_write == static_cast<int>(first_audio.size()),
                "Paused stream should accept complete PCM frames into its queue")) return 1;
+    std::cout << "normal: wrote paused frames" << std::endl;
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     if (!Check(session->played_frames_since_flush() == 0,
                "Paused stream must not report queued frames as played")) return 1;
@@ -85,8 +134,10 @@ int main() {
     if (!Check(WaitFor([&] { return session->played_frames_since_flush() > 0; },
                        std::chrono::milliseconds(500)),
                "Playing stream did not complete PCM data packets")) return 1;
+    std::cout << "normal: played frames" << std::endl;
     session->SetPlaying(false);
     if (!Check(session->Flush(1000), "Flush should wait for submitted packets and reset the epoch")) return 1;
+    std::cout << "normal: flushed" << std::endl;
     if (!Check(session->played_frames_since_flush() == 0,
                "Flush should reset the completed-frame playhead")) return 1;
 
@@ -100,25 +151,131 @@ int main() {
     const std::uint8_t one_frame[4] = {0, 0, 0, 0};
     if (!Check(session->Write(one_frame, sizeof(one_frame), 0) == 0,
                "A full PCM queue should report zero accepted frames")) return 1;
+    std::cout << "normal: filled queue" << std::endl;
 
     // Stop-after-drain must transmit all accepted payload frames, and the same wrapped session
     // must support a later start/flush cycle without reopening or reconfiguring the USB device.
     if (!Check(session->Stop(true, 2000), "Drain stop did not complete all queued PCM frames")) return 1;
+    std::cout << "normal: drained" << std::endl;
     if (!Check(session->played_frames_since_flush() == queue_bytes / 4u,
                "Drain stop playhead should count every queued PCM frame exactly once")) return 1;
     if (!Check(session->Start(config, &error) == 0,
                error.empty() ? "Could not restart after a completed drain" : error.c_str())) return 1;
+    std::cout << "normal: restarted" << std::endl;
     if (!Check(session->Flush(1000), "Restarted stream flush should succeed")) return 1;
     if (!Check(session->played_frames_since_flush() == 0,
                "Restarted stream flush should leave a fresh frame epoch")) return 1;
     if (!Check(session->Stop(false, 1000), "Immediate stop should cancel and drain callbacks")) return 1;
+    std::cout << "normal: stopped" << std::endl;
 
-    session->Close();
+    std::cout << "normal: closing native session" << std::endl;
+    if (!Check(session->Close(1000), "Native close should quiesce the normal fake stream")) return 1;
+    std::cout << "normal: native session closed" << std::endl;
     if (!Check(CloseCount() == 1 && ExitCount() == 1,
                "Native close should release its libusb handle and context once")) return 1;
+    std::cout << "normal: counters" << std::endl;
     if (!Check(ClosedFdCount() == 0,
                "libusb_close must leave the Java-owned USB file descriptor open")) return 1;
+    std::cout << "normal: libusb fd ownership" << std::endl;
+    const int normal_wrapped_fd = WrappedFd();
+    if (!Check(IsFdOpen(original_fd) && normal_wrapped_fd != original_fd,
+               "Healthy native close should leave the Java-owned original FD open")) return 1;
+    session.reset();
+    std::cout << "normal: native pointer released" << std::endl;
+    if (!Check(CloseDummyFd(original_fd) == 0,
+               "Java should be able to close its original FD after native close")) return 1;
 
-    std::cout << "UAC2 transport lifecycle, pacing, bounded write, flush and drain checks passed\n";
+    std::cout << "phase: transient cancellation errors" << std::endl;
+    const int cancel_failure_fd = OpenDummyFd();
+    if (!Check(cancel_failure_fd >= 0, "Could not create a descriptor for cancellation retry test")) return 1;
+    auto cancel_failure_session = IsoTransportSession::Open(cancel_failure_fd, &error);
+    if (!Check(cancel_failure_session != nullptr,
+               error.empty() ? "Could not open cancellation retry session" : error.c_str())) return 1;
+    if (!Check(cancel_failure_session->Start(config, &error) == 0,
+               error.empty() ? "Could not start cancellation retry stream" : error.c_str())) return 1;
+    if (!Check(WaitFor([&] { return PendingTransferCount() >= 5; }, std::chrono::milliseconds(500)),
+               "Cancellation retry stream did not submit feedback and PCM transfers")) return 1;
+    SetCancelFailures(2);
+    const int frees_before_cancel_retry = FreedTransferCount();
+    if (!Check(cancel_failure_session->Close(1000),
+               "Transient cancellation errors should still close after callbacks quiesce")) return 1;
+    if (!Check(CancelErrorCount() == 2 && FreedTransferCount() - frees_before_cancel_retry >= 5,
+               "Cancel return failures should be observed while completed callbacks release transfers safely")) return 1;
+    const int cancel_retry_duplicate_fd = WrappedFd();
+    cancel_failure_session.reset();
+    if (!Check(IsFdOpen(cancel_failure_fd) && cancel_retry_duplicate_fd != cancel_failure_fd,
+               "Clean close after transient cancellation errors should preserve Java's original FD")) return 1;
+    if (!Check(CloseDummyFd(cancel_failure_fd) == 0,
+               "Java should be able to close its original FD after cancellation retries")) return 1;
+
+    std::cout << "phase: persistent event/cancel errors" << std::endl;
+    // Simulate a kernel/libusb failure where cancellation itself fails and the event pump keeps
+    // returning errors. Close must return by its deadline, quarantine every callback-owned object,
+    // and retain a duplicate of the Android-owned descriptor after Java closes its original.
+    const int fault_original_fd = OpenDummyFd();
+    if (!Check(fault_original_fd >= 0, "Could not create a descriptor for fault injection")) return 1;
+    auto fault_session = IsoTransportSession::Open(fault_original_fd, &error);
+    if (!Check(fault_session != nullptr, error.empty() ? "Could not open fault-injection session" : error.c_str())) return 1;
+    if (!Check(fault_session->Start(config, &error) == 0,
+               error.empty() ? "Could not start fault-injection stream" : error.c_str())) return 1;
+    if (!Check(WaitFor([&] { return PendingTransferCount() > 0; }, std::chrono::milliseconds(200)),
+               "Fault-injection stream did not submit a transfer")) return 1;
+
+    SetCancelFailures(-1);
+    SetEventFailures(-1);
+    if (!Check(WaitFor([&] { return EventErrorCount() > 0; }, std::chrono::milliseconds(200)),
+               "Fake libusb event-error injection was not observed")) return 1;
+
+    const int frees_before_quarantine = FreedTransferCount();
+    const auto close_started = std::chrono::steady_clock::now();
+    const bool fault_closed = fault_session->Close(150);
+    const auto close_elapsed = std::chrono::steady_clock::now() - close_started;
+    if (!Check(!fault_closed && close_elapsed < std::chrono::milliseconds(500),
+               "Close should return within its bounded callback-quiescence deadline")) return 1;
+    fault_session.reset(); // The custom deleter transfers ownership to process-lifetime quarantine.
+    if (!Check(IsoTransportSession::QuarantinedSessionCount() == 1,
+               "Unquiesced native session should be retained in quarantine")) return 1;
+    if (!Check(FreedTransferCount() == frees_before_quarantine && LiveTransferCount() > 0,
+               "Quarantine must preserve all transfer allocations and buffers")) return 1;
+    if (!Check(CloseCount() == 2 && ExitCount() == 2,
+               "Quarantined session must keep its libusb handle and context open")) return 1;
+
+    const int quarantined_duplicate_fd = WrappedFd();
+    const int original_close_result = CloseDummyFd(fault_original_fd); // Model Java closing UsbDeviceConnection.
+    if (!Check(original_close_result == 0 && IsFdOpen(quarantined_duplicate_fd),
+               "Closing Java's original FD must not invalidate quarantined libusb's duplicate")) return 1;
+
+    // Once the injected event error is removed, callbacks may quiesce, but the last-resort policy
+    // still retains their storage until process exit. The open-session cap prevents unbounded
+    // accumulation across repeated hardware failures.
+    SetCancelFailures(0);
+    SetEventFailures(0);
+    std::cout << "phase: callback recovery" << std::endl;
+    if (!Check(WaitFor([&] { return PendingTransferCount() == 0; }, std::chrono::milliseconds(1000)),
+               "Event pump did not resume after clearing the injected failure")) return 1;
+    if (!Check(FreedTransferCount() == frees_before_quarantine && IsFdOpen(quarantined_duplicate_fd),
+               "Quarantined storage and duplicate FD must remain retained after callbacks quiesce")) return 1;
+
+    const int cap_original_fd = OpenDummyFd();
+    std::cout << "phase: quarantine cap" << std::endl;
+    if (!Check(cap_original_fd >= 0, "Could not create descriptor for quarantine-cap test")) return 1;
+    std::vector<IsoTransportSession::Pointer> capacity_sessions;
+    for (std::size_t index = 1; index < IsoTransportSession::MaximumSessionCount(); ++index) {
+        auto capacity_session = IsoTransportSession::Open(cap_original_fd, &error);
+        if (!Check(capacity_session != nullptr,
+                   error.empty() ? "Session cap rejected an available quarantine slot" : error.c_str())) return 1;
+        capacity_sessions.push_back(std::move(capacity_session));
+    }
+    auto over_capacity = IsoTransportSession::Open(cap_original_fd, &error);
+    if (!Check(over_capacity == nullptr && IsoTransportSession::QuarantinedSessionCount() == 1,
+               "Open must fail once active plus quarantined sessions reach the configured cap")) return 1;
+    for (auto& capacity_session : capacity_sessions) {
+        if (!Check(capacity_session->Close(200), "Idle capped session should close cleanly")) return 1;
+        capacity_session.reset();
+    }
+    if (!Check(CloseDummyFd(cap_original_fd) == 0,
+               "Java should be able to close the cap-test original FD")) return 1;
+
+    std::cout << "UAC2 transport lifecycle, bounded teardown, quarantine and FD ownership checks passed\n";
     return 0;
 }

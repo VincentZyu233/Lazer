@@ -15,6 +15,8 @@ internal data class AndroidUac2PlaybackAltSetting(
     val validBitResolution: Int,
     val dataEndpoint: AndroidUac2IsochronousEndpoint,
     val feedbackEndpoint: AndroidUac2IsochronousEndpoint?,
+    val clockSelector: AndroidUac2ClockSelector? = null,
+    val clockSourceCandidates: List<AndroidUac2ClockSelectorCandidate> = emptyList(),
 )
 
 /** The endpoint packet size excludes the high-speed transaction multiplier encoded in wMaxPacketSize. */
@@ -32,6 +34,23 @@ internal data class AndroidUac2ClockSource(
     val controlInterfaceNumber: Int,
     val clockSourceId: Int,
     val frequencyAccess: AndroidUac2ClockFrequencyAccess,
+)
+
+/** One input pin on a directly linked UAC2 Clock Selector, numbered from one per the spec. */
+internal data class AndroidUac2ClockSelectorCandidate(
+    val pin: Int,
+    val clockSource: AndroidUac2ClockSource,
+)
+
+internal data class AndroidUac2ClockSelector(
+    val controlInterfaceNumber: Int,
+    val clockSelectorId: Int,
+    val selectionAccess: AndroidUac2ClockFrequencyAccess,
+)
+
+internal data class AndroidUac2ClockSelection(
+    val pin: Int,
+    val clockSource: AndroidUac2ClockSource,
 )
 
 internal enum class AndroidUac2ClockFrequencyAccess {
@@ -81,6 +100,8 @@ internal data class AndroidUac2PlaybackStreamPlan(
     val validBitResolution: Int,
     val dataEndpoint: AndroidUac2IsochronousEndpoint,
     val feedbackEndpoint: AndroidUac2IsochronousEndpoint?,
+    val clockSelector: AndroidUac2ClockSelector? = null,
+    val clockSourceCandidates: List<AndroidUac2ClockSelectorCandidate> = emptyList(),
 )
 
 /** Resolves a stream only when the requested rate is explicitly advertised by the device clock. */
@@ -89,6 +110,7 @@ internal fun planAndroidUac2PcmPlayback(
     sampleRateHz: Long,
     supportedRanges: List<AndroidUac2ClockFrequencyRange>,
 ): AndroidUac2PlaybackStreamPlan? {
+    if (alternate.clockSelector != null) return null // Requires the session's multi-source selector planner.
     if (sampleRateHz <= 0 || supportedRanges.none { it.contains(sampleRateHz) }) return null
     if (alternate.dataEndpoint.synchronizationType == USB_ISO_SYNC_ASYNCHRONOUS &&
         alternate.feedbackEndpoint == null
@@ -107,6 +129,77 @@ internal fun planAndroidUac2PcmPlayback(
         validBitResolution = alternate.validBitResolution,
         dataEndpoint = alternate.dataEndpoint,
         feedbackEndpoint = alternate.feedbackEndpoint,
+        clockSelector = alternate.clockSelector,
+        clockSourceCandidates = alternate.clockSourceCandidates,
+    )
+}
+
+/** Picks the current selector input when possible; switching requires a writable selector. */
+internal fun planAndroidUac2ClockSelectorSelection(
+    selector: AndroidUac2ClockSelector,
+    candidates: List<AndroidUac2ClockSelectorCandidate>,
+    currentPin: Int,
+    supportedRangesByPin: Map<Int, List<AndroidUac2ClockFrequencyRange>>,
+    sampleRateHz: Long,
+): AndroidUac2ClockSelection? {
+    if (sampleRateHz <= 0 || candidates.isEmpty() ||
+        candidates.map { it.pin } != (1..candidates.size).toList()
+    ) {
+        return null
+    }
+    val candidateByPin = candidates.associateBy(AndroidUac2ClockSelectorCandidate::pin)
+    val current = candidateByPin[currentPin] ?: return null
+    if (supportedRangesByPin[currentPin].orEmpty().any { it.contains(sampleRateHz) }) {
+        return AndroidUac2ClockSelection(current.pin, current.clockSource)
+    }
+    if (selector.selectionAccess != AndroidUac2ClockFrequencyAccess.HostProgrammable) return null
+    return candidates.firstOrNull { candidate ->
+        candidate.pin != currentPin &&
+            supportedRangesByPin[candidate.pin].orEmpty().any { it.contains(sampleRateHz) }
+    }?.let { AndroidUac2ClockSelection(it.pin, it.clockSource) }
+}
+
+/** Builds Clock Selector Control GET_CUR (one-based input pin number). */
+internal fun androidUac2ClockSelectorGetCurrentPinRequest(
+    selector: AndroidUac2ClockSelector,
+): AndroidUsbControlRequest = androidUac2ClockSelectorRequest(selector, USB_CLASS_INTERFACE_IN, UAC2_GET_CUR)
+
+/** Builds SET_CUR only when the selector advertises a host-programmable Selection Control. */
+internal fun androidUac2ClockSelectorSetCurrentPinRequest(
+    selector: AndroidUac2ClockSelector,
+    pin: Int,
+    candidateCount: Int,
+): AndroidUsbControlRequest {
+    require(selector.selectionAccess == AndroidUac2ClockFrequencyAccess.HostProgrammable) {
+        "Clock Selector Selection Control is read-only"
+    }
+    require(pin in 1..candidateCount && candidateCount <= 0xff) { "Clock Selector input pin is out of range" }
+    return androidUac2ClockSelectorRequest(selector, USB_CLASS_INTERFACE_OUT, UAC2_SET_CUR).also {
+        it.data[0] = pin.toByte()
+    }
+}
+
+internal fun parseAndroidUac2ClockSelectorCurrentPin(response: ByteArray, candidateCount: Int): Int {
+    require(response.size == 1) { "Clock Selector GET_CUR response must be one byte" }
+    val pin = response[0].toInt() and 0xff
+    require(pin in 1..candidateCount) { "Clock Selector GET_CUR returned an invalid pin" }
+    return pin
+}
+
+private fun androidUac2ClockSelectorRequest(
+    selector: AndroidUac2ClockSelector,
+    requestType: Int,
+    request: Int,
+): AndroidUsbControlRequest {
+    require(selector.controlInterfaceNumber in 0..0xff) { "AudioControl interface number is out of range" }
+    require(selector.clockSelectorId in 1..0xff) { "Clock Selector ID must be nonzero" }
+    return AndroidUsbControlRequest(
+        requestType = requestType,
+        request = request,
+        value = UAC2_CLOCK_SELECTOR_CONTROL_SELECTOR shl 8,
+        index = (selector.clockSelectorId shl 8) or selector.controlInterfaceNumber,
+        data = ByteArray(1),
+        length = 1,
     )
 }
 
@@ -114,8 +207,8 @@ internal fun planAndroidUac2PcmPlayback(
  * Parses bounded raw USB descriptors returned by `UsbDeviceConnection.getRawDescriptors()`.
  * Android can return a Device Descriptor followed by multiple configurations; each configuration
  * is parsed independently and the configuration value is retained for later interface claims.
- * Malformed or ambiguous descriptors return null. Clock Selectors and Clock Multipliers are
- * deliberately not mistaken for Clock Sources: indirect links fail closed in this slice.
+ * Malformed or ambiguous descriptors return null. One direct Clock Selector → Clock Source hop
+ * is supported; Clock Multipliers and nested selectors fail closed.
  */
 internal fun parseAndroidUac2PlaybackAltSettings(
     descriptors: ByteArray,
@@ -483,6 +576,7 @@ private fun parseControlFunction(interfaceDescriptor: UsbInterfaceBuilder): Pars
     val entitySubtypes = mutableMapOf<Int, Int>()
     val inputTerminals = mutableMapOf<Int, Uac2InputTerminal>()
     val clockSources = mutableMapOf<Int, AndroidUac2ClockSource>()
+    val clockSelectors = mutableMapOf<Int, ParsedUac2ClockSelector>()
     for (descriptor in interfaceDescriptor.classSpecificInterfaces) {
         if (descriptor.subtype == UAC_AC_HEADER) continue
         val bytes = descriptor.bytes
@@ -529,6 +623,20 @@ private fun parseControlFunction(interfaceDescriptor: UsbInterfaceBuilder): Pars
                     entitySubtypes.putIfAbsent(id, descriptor.subtype) != null
                 ) return null
                 if ((0 until inputClockCount).any { bytes.u8(5 + it) == 0 }) return null
+                val rawSelectionControl = bytes.u8(5 + inputClockCount)
+                if (rawSelectionControl and UAC2_CLOCK_SELECTOR_RESERVED_CONTROL_MASK != 0) return null
+                val selectionControl = rawSelectionControl and UAC2_CLOCK_SELECTOR_SELECTION_CONTROL_MASK
+                val selectionAccess = when (selectionControl) {
+                    UAC2_CONTROL_READ_ONLY -> AndroidUac2ClockFrequencyAccess.ReadOnly
+                    UAC2_CONTROL_READ_WRITE -> AndroidUac2ClockFrequencyAccess.HostProgrammable
+                    else -> null // Selection must be readable so the current pin can be verified.
+                }
+                if (selectionAccess == null) return null
+                clockSelectors[id] = ParsedUac2ClockSelector(
+                    clockSelectorId = id,
+                    inputClockSourceIds = (0 until inputClockCount).map { bytes.u8(5 + it) },
+                    selectionAccess = selectionAccess,
+                )
             }
 
             UAC_AC_CLOCK_MULTIPLIER -> {
@@ -549,7 +657,8 @@ private fun parseControlFunction(interfaceDescriptor: UsbInterfaceBuilder): Pars
         }
     }
     if (inputTerminals.values.any { terminal -> terminal.clockSourceId !in entitySubtypes }) return null
-    return ParsedUac2ControlFunction(interfaceDescriptor.number, inputTerminals, clockSources, entitySubtypes)
+    if (clockSelectors.values.any { selector -> selector.inputClockSourceIds.any { it !in entitySubtypes } }) return null
+    return ParsedUac2ControlFunction(interfaceDescriptor.number, inputTerminals, clockSources, clockSelectors, entitySubtypes)
 }
 
 private fun associatedControlInterface(
@@ -602,12 +711,35 @@ private fun parsePlaybackAltSetting(
         return null
     }
     val clockEntitySubtype = controlFunction.entitySubtypes[inputTerminal.clockSourceId] ?: return null
-    if (clockEntitySubtype != UAC_AC_CLOCK_SOURCE) {
-        // Fails closed for indirect Clock Selector/Multiplier links rather than treating their
-        // entity IDs as Clock Source IDs.
-        return null
+    val clockSelector: AndroidUac2ClockSelector?
+    val clockSource: AndroidUac2ClockSource
+    val clockSourceCandidates: List<AndroidUac2ClockSelectorCandidate>
+    when (clockEntitySubtype) {
+        UAC_AC_CLOCK_SOURCE -> {
+            clockSource = controlFunction.clockSources[inputTerminal.clockSourceId] ?: return null
+            clockSelector = null
+            clockSourceCandidates = emptyList()
+        }
+
+        UAC_AC_CLOCK_SELECTOR -> {
+            val parsedSelector = controlFunction.clockSelectors[inputTerminal.clockSourceId] ?: return null
+            val sources = parsedSelector.inputClockSourceIds.mapIndexed { index, sourceId ->
+                if (controlFunction.entitySubtypes[sourceId] != UAC_AC_CLOCK_SOURCE) return null
+                val source = controlFunction.clockSources[sourceId] ?: return null
+                AndroidUac2ClockSelectorCandidate(index + 1, source)
+            }
+            if (sources.isEmpty()) return null
+            clockSource = sources.first().clockSource
+            clockSelector = AndroidUac2ClockSelector(
+                controlInterfaceNumber = controlFunction.interfaceNumber,
+                clockSelectorId = parsedSelector.clockSelectorId,
+                selectionAccess = parsedSelector.selectionAccess,
+            )
+            clockSourceCandidates = sources
+        }
+
+        else -> return null
     }
-    val clockSource = controlFunction.clockSources[inputTerminal.clockSourceId] ?: return null
 
     val isochronousOutData = interfaceDescriptor.endpoints.filter {
         it.isIsochronous && it.direction == UsbEndpointDirection.Out && it.usageType == USB_ISO_USAGE_DATA
@@ -635,6 +767,8 @@ private fun parsePlaybackAltSetting(
         validBitResolution = validBitResolution,
         dataEndpoint = isochronousOutData.single().toPublicEndpoint(),
         feedbackEndpoint = feedbackEndpoints.singleOrNull()?.toPublicEndpoint(),
+        clockSelector = clockSelector,
+        clockSourceCandidates = clockSourceCandidates,
     )
 }
 
@@ -752,7 +886,14 @@ private data class ParsedUac2ControlFunction(
     val interfaceNumber: Int,
     val inputTerminals: Map<Int, Uac2InputTerminal>,
     val clockSources: Map<Int, AndroidUac2ClockSource>,
+    val clockSelectors: Map<Int, ParsedUac2ClockSelector>,
     val entitySubtypes: Map<Int, Int>,
+)
+
+private data class ParsedUac2ClockSelector(
+    val clockSelectorId: Int,
+    val inputClockSourceIds: List<Int>,
+    val selectionAccess: AndroidUac2ClockFrequencyAccess,
 )
 
 private const val USB_CLASS_INTERFACE_IN = 0xa1
@@ -786,6 +927,9 @@ private const val UAC2_CLOCK_FREQUENCY_CONTROL_MASK = 0x03
 private const val UAC2_CONTROL_READ_ONLY = 0x01
 private const val UAC2_CONTROL_READ_WRITE = 0x03
 private const val UAC2_CLOCK_FREQUENCY_CONTROL_SELECTOR = 0x01
+private const val UAC2_CLOCK_SELECTOR_CONTROL_SELECTOR = 0x01
+private const val UAC2_CLOCK_SELECTOR_SELECTION_CONTROL_MASK = 0x03
+private const val UAC2_CLOCK_SELECTOR_RESERVED_CONTROL_MASK = 0xfc
 private const val UAC2_GET_RANGE = 0x02
 private const val UAC2_GET_CUR = 0x01
 private const val UAC2_SET_CUR = 0x01

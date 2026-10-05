@@ -33,6 +33,15 @@ bool g_interrupted = false;
 int g_close_count = 0;
 int g_exit_count = 0;
 int g_closed_fd_count = 0;
+int g_freed_transfer_count = 0;
+int g_live_transfer_count = 0;
+int g_callback_count = 0;
+int g_event_error_count = 0;
+int g_cancel_error_count = 0;
+int g_cancel_failures_remaining = 0;
+int g_event_failures_remaining = 0;
+int g_fault_error_code = LIBUSB_ERROR_IO;
+int g_wrapped_fd = -1;
 libusb_device g_device;
 
 const unsigned char kStreamingExtra[] = {
@@ -147,6 +156,10 @@ int LIBUSB_CALL libusb_wrap_sys_device(
     if (handle == nullptr) return LIBUSB_ERROR_NO_MEM;
     handle->wrapped_fd = sys_dev;
     handle->device = &g_device;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_wrapped_fd = static_cast<int>(sys_dev);
+    }
     *device_handle = handle;
     return LIBUSB_SUCCESS;
 }
@@ -175,11 +188,20 @@ libusb_transfer* LIBUSB_CALL libusb_alloc_transfer(const int iso_packets) {
     const auto bytes = sizeof(libusb_transfer) +
         static_cast<std::size_t>(iso_packets) * sizeof(libusb_iso_packet_descriptor);
     auto* transfer = static_cast<libusb_transfer*>(std::calloc(1, bytes));
-    if (transfer != nullptr) transfer->num_iso_packets = iso_packets;
+    if (transfer != nullptr) {
+        transfer->num_iso_packets = iso_packets;
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ++g_live_transfer_count;
+    }
     return transfer;
 }
 
 void LIBUSB_CALL libusb_free_transfer(libusb_transfer* transfer) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ++g_freed_transfer_count;
+        --g_live_transfer_count;
+    }
     std::free(transfer);
 }
 
@@ -199,6 +221,11 @@ int LIBUSB_CALL libusb_cancel_transfer(libusb_transfer* transfer) {
     if (transfer == nullptr) return LIBUSB_ERROR_INVALID_PARAM;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_cancel_failures_remaining < 0 || g_cancel_failures_remaining > 0) {
+            if (g_cancel_failures_remaining > 0) --g_cancel_failures_remaining;
+            ++g_cancel_error_count;
+            return g_fault_error_code;
+        }
         g_cancelled[transfer] = true;
         if (std::find(g_pending.begin(), g_pending.end(), transfer) == g_pending.end() &&
             g_dispatching.find(transfer) == g_dispatching.end()) {
@@ -216,6 +243,11 @@ int LIBUSB_CALL libusb_handle_events_timeout_completed(
     libusb_transfer* transfer = nullptr;
     {
         std::unique_lock<std::mutex> lock(g_mutex);
+        if (g_event_failures_remaining < 0 || g_event_failures_remaining > 0) {
+            if (g_event_failures_remaining > 0) --g_event_failures_remaining;
+            ++g_event_error_count;
+            return g_fault_error_code;
+        }
         if (g_pending.empty() && !g_interrupted) {
             const auto wait_duration = timeout == nullptr
                 ? std::chrono::milliseconds(1)
@@ -247,6 +279,7 @@ int LIBUSB_CALL libusb_handle_events_timeout_completed(
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_dispatching.erase(transfer);
+        ++g_callback_count;
     }
     return LIBUSB_SUCCESS;
 }
@@ -294,6 +327,15 @@ void ResetFakeLibusbState() {
     g_close_count = 0;
     g_exit_count = 0;
     g_closed_fd_count = 0;
+    g_freed_transfer_count = 0;
+    g_live_transfer_count = 0;
+    g_callback_count = 0;
+    g_event_error_count = 0;
+    g_cancel_error_count = 0;
+    g_cancel_failures_remaining = 0;
+    g_event_failures_remaining = 0;
+    g_fault_error_code = LIBUSB_ERROR_IO;
+    g_wrapped_fd = -1;
 }
 
 int CloseCount() {
@@ -309,6 +351,51 @@ int ExitCount() {
 int ClosedFdCount() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_closed_fd_count;
+}
+
+void SetCancelFailures(const int count) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_cancel_failures_remaining = count;
+}
+
+void SetEventFailures(const int count) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_event_failures_remaining = count;
+}
+
+int FreedTransferCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_freed_transfer_count;
+}
+
+int LiveTransferCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_live_transfer_count;
+}
+
+int CallbackCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_callback_count;
+}
+
+int EventErrorCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_event_error_count;
+}
+
+int CancelErrorCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_cancel_error_count;
+}
+
+int PendingTransferCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return static_cast<int>(g_pending.size() + g_dispatching.size());
+}
+
+int WrappedFd() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_wrapped_fd;
 }
 
 } // namespace lazer::uac2_transport_probe

@@ -43,6 +43,8 @@ internal fun resolveAndroidUac2PcmCandidatePlan(
         validBitResolution = alternate.validBitResolution,
         dataEndpoint = alternate.dataEndpoint,
         feedbackEndpoint = alternate.feedbackEndpoint,
+        clockSelector = alternate.clockSelector,
+        clockSourceCandidates = alternate.clockSourceCandidates,
     )
 }
 

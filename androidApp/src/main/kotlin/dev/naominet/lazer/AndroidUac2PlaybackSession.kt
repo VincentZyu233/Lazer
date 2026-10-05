@@ -198,8 +198,12 @@ internal class AndroidUac2PlaybackSession(
 ) : AutoCloseable {
     private val claimedInterfaces = linkedSetOf<Int>()
     private var clockRanges: List<AndroidUac2ClockFrequencyRange> = emptyList()
+    private var activeClockSource: AndroidUac2ClockSource? = null
+    private var activeClockSelector: AndroidUac2ClockSelector? = null
+    private var originalClockSelectorPin: Int? = null
     private var originalClockFrequencyHz: Long? = null
     private var clockWriteMayHaveChangedValue = false
+    private var selectorWriteMayHaveChangedValue = false
     private var streamingAlternateMayBeSelected = false
     private var previousConfigurationValue: Int? = null
     private var configurationMayHaveChanged = false
@@ -254,19 +258,11 @@ internal class AndroidUac2PlaybackSession(
                 alternateSetting = 0,
             )
 
-            val clockSource = AndroidUac2ClockSource(
-                controlInterfaceNumber = plan.controlInterfaceNumber,
-                clockSourceId = plan.clockSourceId,
-                frequencyAccess = plan.clockFrequencyAccess,
-            )
-            clockRanges = readClockRanges(clockSource)
-            check(clockRanges.any { it.contains(plan.sampleRateHz) }) {
-                "Clock Source does not advertise ${plan.sampleRateHz} Hz"
-            }
-
+            val clockSource = resolveClockSourceForRequestedRate()
+            activeClockSource = clockSource
             originalClockFrequencyHz = readCurrentClockFrequency(clockSource)
             if (originalClockFrequencyHz != plan.sampleRateHz) {
-                check(plan.clockFrequencyAccess == AndroidUac2ClockFrequencyAccess.HostProgrammable) {
+                check(clockSource.frequencyAccess == AndroidUac2ClockFrequencyAccess.HostProgrammable) {
                     "Clock Source is read-only at ${originalClockFrequencyHz} Hz; " +
                         "it cannot be configured for ${plan.sampleRateHz} Hz"
                 }
@@ -357,6 +353,63 @@ internal class AndroidUac2PlaybackSession(
         return parseAndroidUac2ClockSourceFrequencyRanges(rangeRequest.data, subRangeCount)
     }
 
+    private fun resolveClockSourceForRequestedRate(): AndroidUac2ClockSource {
+        val selector = plan.clockSelector
+        if (selector == null) {
+            val source = AndroidUac2ClockSource(
+                controlInterfaceNumber = plan.controlInterfaceNumber,
+                clockSourceId = plan.clockSourceId,
+                frequencyAccess = plan.clockFrequencyAccess,
+            )
+            clockRanges = readClockRanges(source)
+            check(clockRanges.any { it.contains(plan.sampleRateHz) }) {
+                "Clock Source does not advertise ${plan.sampleRateHz} Hz"
+            }
+            return source
+        }
+
+        val candidates = plan.clockSourceCandidates
+        check(candidates.isNotEmpty()) { "Clock Selector has no supported Clock Source inputs" }
+        activeClockSelector = selector
+        val currentPin = readCurrentClockSelectorPin(selector, candidates.size)
+        originalClockSelectorPin = currentPin
+        val rangesByPin = candidates.associate { candidate ->
+            candidate.pin to readClockRanges(candidate.clockSource)
+        }
+        val selection = planAndroidUac2ClockSelectorSelection(
+            selector = selector,
+            candidates = candidates,
+            currentPin = currentPin,
+            supportedRangesByPin = rangesByPin,
+            sampleRateHz = plan.sampleRateHz,
+        ) ?: throw IllegalStateException(
+            "No permitted Clock Selector input advertises ${plan.sampleRateHz} Hz",
+        )
+
+        if (selection.pin != currentPin) {
+            // A short or failed write may still have switched the device. Restore the original pin
+            // during rollback/close and verify its readback before releasing the control interface.
+            selectorWriteMayHaveChangedValue = true
+            val request = androidUac2ClockSelectorSetCurrentPinRequest(selector, selection.pin, candidates.size)
+            check(transfer(request) == request.length) { "Clock Selector SET_CUR failed" }
+            val acceptedPin = readCurrentClockSelectorPin(selector, candidates.size)
+            check(acceptedPin == selection.pin) {
+                "Clock Selector accepted input $acceptedPin instead of ${selection.pin}"
+            }
+        }
+        clockRanges = checkNotNull(rangesByPin[selection.pin])
+        check(clockRanges.any { it.contains(plan.sampleRateHz) }) {
+            "Selected Clock Source does not advertise ${plan.sampleRateHz} Hz"
+        }
+        return selection.clockSource
+    }
+
+    private fun readCurrentClockSelectorPin(selector: AndroidUac2ClockSelector, candidateCount: Int): Int {
+        val request = androidUac2ClockSelectorGetCurrentPinRequest(selector)
+        check(transfer(request) == request.length) { "Clock Selector GET_CUR failed" }
+        return parseAndroidUac2ClockSelectorCurrentPin(request.data, candidateCount)
+    }
+
     private fun readCurrentConfiguration(): Int {
         val request = AndroidUsbControlRequest(
             requestType = USB_STANDARD_DEVICE_IN,
@@ -417,9 +470,9 @@ internal class AndroidUac2PlaybackSession(
 
         if (restoreDeviceFormat && clockWriteMayHaveChangedValue) {
             val originalFrequency = originalClockFrequencyHz
-            if (originalFrequency != null) {
+            val source = activeClockSource
+            if (originalFrequency != null && source != null) {
                 attempt {
-                    val source = plan.toClockSource()
                     setClockFrequency(source, originalFrequency)
                     check(readCurrentClockFrequency(source) == originalFrequency) {
                         "Clock Source did not restore its original $originalFrequency Hz rate"
@@ -428,6 +481,25 @@ internal class AndroidUac2PlaybackSession(
             }
         }
         clockWriteMayHaveChangedValue = false
+
+        if (restoreDeviceFormat && selectorWriteMayHaveChangedValue) {
+            val selector = activeClockSelector
+            val originalPin = originalClockSelectorPin
+            if (selector != null && originalPin != null) {
+                attempt {
+                    val request = androidUac2ClockSelectorSetCurrentPinRequest(
+                        selector,
+                        originalPin,
+                        plan.clockSourceCandidates.size,
+                    )
+                    check(transfer(request) == request.length) { "Clock Selector restore SET_CUR failed" }
+                    check(readCurrentClockSelectorPin(selector, plan.clockSourceCandidates.size) == originalPin) {
+                        "Clock Selector did not restore its original input $originalPin"
+                    }
+                }
+            }
+        }
+        selectorWriteMayHaveChangedValue = false
 
         if (restoreDeviceFormat && configurationMayHaveChanged) {
             val previousConfiguration = previousConfigurationValue
@@ -470,12 +542,6 @@ internal class AndroidUac2PlaybackSession(
         attempt { gateway.closeConnection(activeConnection) }
         connection = null
     }
-
-    private fun AndroidUac2PlaybackStreamPlan.toClockSource() = AndroidUac2ClockSource(
-        controlInterfaceNumber = controlInterfaceNumber,
-        clockSourceId = clockSourceId,
-        frequencyAccess = clockFrequencyAccess,
-    )
 
     private fun AndroidUac2PlaybackSessionState.isTerminal(): Boolean =
         this == AndroidUac2PlaybackSessionState.Failed ||

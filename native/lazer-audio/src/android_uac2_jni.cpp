@@ -23,11 +23,11 @@ using lazer::android_uac2::SynchronizationType;
 using lazer::android_uac2::UsbSpeed;
 
 struct BridgeSession final {
-    explicit BridgeSession(std::unique_ptr<IsoTransportSession> value) noexcept
+    explicit BridgeSession(IsoTransportSession::Pointer value) noexcept
         : session(std::move(value)) {}
 
     std::mutex api_mutex;
-    std::unique_ptr<IsoTransportSession> session;
+    IsoTransportSession::Pointer session;
 };
 
 std::mutex g_sessions_mutex;
