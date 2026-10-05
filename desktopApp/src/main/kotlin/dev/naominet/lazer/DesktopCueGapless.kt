@@ -6,7 +6,7 @@ import java.nio.file.Path
 
 /**
  * A queued CUE segment is safe to join only when it directly follows the active segment in the
- * same parsed sheet and both segments read the same physical lossless source.
+ * same parsed sheet and the represented audio ranges meet at a source boundary.
  */
 internal fun isContiguousDesktopCueSuccessor(current: TrackItem, successor: TrackItem): Boolean {
     if (current.id == successor.id) return false
@@ -15,7 +15,7 @@ internal fun isContiguousDesktopCueSuccessor(current: TrackItem, successor: Trac
     val currentSheet = currentSource.cueSheetPath ?: return false
     val nextSheet = nextSource.cueSheetPath ?: return false
     if (currentSource.cueTrackNumber == null || nextSource.cueTrackNumber == null ||
-        nextSource.cueTrackNumber <= currentSource.cueTrackNumber
+        nextSource.cueTrackNumber != currentSource.cueTrackNumber + 1
     ) return false
 
     val sameSource = runCatching {
@@ -28,8 +28,10 @@ internal fun isContiguousDesktopCueSuccessor(current: TrackItem, successor: Trac
     }.getOrDefault(false)
     val end = currentSource.cueEndFrame75
     val nextEnd = nextSource.cueEndFrame75
-    return sameSource && sameSheet && end >= 0L && end == nextSource.cueStartFrame75 &&
-        currentSource.cueStartFrame75 < end &&
+    val sameFileBoundary = sameSource && end >= 0L && end == nextSource.cueStartFrame75
+    val nextFileBoundary = !sameSource && end == -1L && nextSource.cueStartFrame75 == 0L
+    return sameSheet && (sameFileBoundary || nextFileBoundary) &&
+        currentSource.cueStartFrame75 < (if (end >= 0L) end else Long.MAX_VALUE) &&
         (nextEnd == -1L || nextEnd > nextSource.cueStartFrame75)
 }
 

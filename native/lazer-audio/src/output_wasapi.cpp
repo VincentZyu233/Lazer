@@ -147,6 +147,18 @@ int32_t selectionForPcmCandidate(wasapi::PcmCandidateTier tier) {
     return LazerAudioFormatSelectionUnknown;
 }
 
+wasapi::PcmCandidateResult classifyExclusiveFormatResult(HRESULT result) {
+    if (result == S_OK) return wasapi::PcmCandidateResult::Accepted;
+    if (result == AUDCLNT_E_UNSUPPORTED_FORMAT) return wasapi::PcmCandidateResult::FormatRejected;
+    return wasapi::PcmCandidateResult::FatalFailure;
+}
+
+wasapi::PcmCandidateResult classifyInitializeResult(HRESULT result) {
+    if (SUCCEEDED(result)) return wasapi::PcmCandidateResult::Accepted;
+    if (result == AUDCLNT_E_UNSUPPORTED_FORMAT) return wasapi::PcmCandidateResult::FormatRejected;
+    return wasapi::PcmCandidateResult::FatalFailure;
+}
+
 }  // namespace
 
 WasapiOutput::~WasapiOutput() {
@@ -262,8 +274,36 @@ int32_t WasapiOutput::open(const AudioOutputRequest &request, const StreamDescri
     bool usingFloat = false;
     uint32_t chosenBits = 16;
     int32_t formatSelection = LazerAudioFormatSelectionUnknown;
+    bool streamInitialized = false;
     const AUDCLNT_SHAREMODE shareMode =
         request.exclusive ? AUDCLNT_SHAREMODE_EXCLUSIVE : AUDCLNT_SHAREMODE_SHARED;
+
+    /* GetDevicePeriod reports 100-nanosecond units, which is what Initialize wants, so the periods
+     * are read as REFERENCE_TIME rather than a frame count. */
+    REFERENCE_TIME defaultPeriod = 0;
+    REFERENCE_TIME minimumPeriod = 0;
+    audioClient->GetDevicePeriod(&defaultPeriod, &minimumPeriod);
+    uint64_t periodHundredNanos = std::max<uint64_t>(
+        std::max<uint64_t>(defaultPeriod, minimumPeriod), 10000);
+    const REFERENCE_TIME exclusivePeriod = static_cast<REFERENCE_TIME>(periodHundredNanos);
+    constexpr DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+
+    auto activateFreshAudioClient = [&]() -> HRESULT {
+        if (audioClient != nullptr) {
+            audioClient->Release();
+            audioClient = nullptr;
+            audioClient_ = nullptr;
+        }
+        IAudioClient *freshClient = nullptr;
+        const HRESULT activation = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+            reinterpret_cast<void **>(&freshClient));
+        if (FAILED(activation) || freshClient == nullptr) {
+            return FAILED(activation) ? activation : E_FAIL;
+        }
+        audioClient = freshClient;
+        audioClient_ = freshClient;
+        return S_OK;
+    };
 
     if (request.requireDoP) {
         WAVEFORMATEXTENSIBLE candidate{};
@@ -293,21 +333,107 @@ int32_t WasapiOutput::open(const AudioOutputRequest &request, const StreamDescri
             source.integerPcm,
         };
         const wasapi::PcmMixFormat pcmMix{mixFormat->nSamplesPerSec};
-        const auto selected = wasapi::selectExclusivePcmCandidate(pcmSource, pcmMix,
-            request.bitPerfect, [&](const wasapi::PcmCandidate &candidate) {
+        HRESULT candidateFailure = S_OK;
+        const wasapi::PcmCandidateSelection selection = wasapi::negotiateExclusivePcmCandidate(
+            pcmSource, pcmMix, request.bitPerfect,
+            [&](const wasapi::PcmCandidate &candidate) {
                 WAVEFORMATEXTENSIBLE extensible{};
                 WAVEFORMATEX legacy{};
                 const WAVEFORMATEX *format = makePcmCandidateFormat(
                     candidate, mixFormat, extensible, legacy);
-                if (format == nullptr || audioClient->IsFormatSupported(
-                    AUDCLNT_SHAREMODE_EXCLUSIVE, format, nullptr) != S_OK) {
-                    return false;
+                if (format == nullptr) {
+                    candidateFailure = E_INVALIDARG;
+                    return wasapi::PcmCandidateResult::FatalFailure;
+                }
+                const HRESULT supported = audioClient->IsFormatSupported(
+                    AUDCLNT_SHAREMODE_EXCLUSIVE, format, nullptr);
+                const wasapi::PcmCandidateResult supportResult =
+                    classifyExclusiveFormatResult(supported);
+                if (supportResult == wasapi::PcmCandidateResult::FatalFailure) {
+                    candidateFailure = supported;
+                }
+                return supportResult;
+            }, [&](const wasapi::PcmCandidate &candidate) {
+                WAVEFORMATEXTENSIBLE extensible{};
+                WAVEFORMATEX legacy{};
+                const WAVEFORMATEX *format = makePcmCandidateFormat(
+                    candidate, mixFormat, extensible, legacy);
+                if (format == nullptr) {
+                    candidateFailure = E_INVALIDARG;
+                    return wasapi::PcmCandidateResult::FatalFailure;
                 }
                 copyFormat(chosen, format);
-                return chosen != nullptr;
+                if (chosen == nullptr) {
+                    candidateFailure = E_OUTOFMEMORY;
+                    return wasapi::PcmCandidateResult::FatalFailure;
+                }
+
+                const wasapi::PcmCandidateInitializeOutcome initialization =
+                    wasapi::initializePcmCandidateWithAlignedRetry(candidate,
+                        static_cast<int64_t>(exclusivePeriod),
+                        [&](const wasapi::PcmCandidate &, int64_t duration) {
+                            const REFERENCE_TIME referenceDuration = static_cast<REFERENCE_TIME>(duration);
+                            const HRESULT initialized = audioClient->Initialize(shareMode, streamFlags,
+                                referenceDuration, referenceDuration, chosen, nullptr);
+                            candidateFailure = initialized;
+                            return classifyInitializeResult(initialized) ==
+                                    wasapi::PcmCandidateResult::FormatRejected
+                                ? wasapi::PcmCandidateResult::FormatRejected
+                                : initialized == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED
+                                    ? wasapi::PcmCandidateResult::BufferSizeNotAligned
+                                    : classifyInitializeResult(initialized);
+                        }, [&](const wasapi::PcmCandidate &alignedCandidate) -> std::optional<int64_t> {
+                            UINT32 alignedFrames = 0;
+                            const HRESULT bufferResult = audioClient->GetBufferSize(&alignedFrames);
+                            if (FAILED(bufferResult) || alignedFrames == 0 ||
+                                alignedCandidate.sampleRate == 0) {
+                                candidateFailure = FAILED(bufferResult) ? bufferResult : E_FAIL;
+                                return std::nullopt;
+                            }
+                            return static_cast<int64_t>(
+                                (10'000'000.0 * static_cast<double>(alignedFrames) /
+                                    static_cast<double>(alignedCandidate.sampleRate)) + 0.5);
+                        }, [&]() {
+                            const HRESULT activated = activateFreshAudioClient();
+                            candidateFailure = activated;
+                            return SUCCEEDED(activated);
+                        });
+                if (initialization.result == wasapi::PcmCandidateResult::Accepted) {
+                    periodHundredNanos = static_cast<uint64_t>(
+                        initialization.successfulBufferDurationHundredNanos);
+                    streamInitialized = true;
+                    candidateFailure = S_OK;
+                    return wasapi::PcmCandidateResult::Accepted;
+                }
+                if (initialization.result == wasapi::PcmCandidateResult::FormatRejected) {
+                    CoTaskMemFree(chosen);
+                    chosen = nullptr;
+                    /* The policy's prepare-next-client callback recreates the client exactly once
+                     * before it probes or initializes the next candidate. */
+                    return wasapi::PcmCandidateResult::FormatRejected;
+                }
+                if (initialization.result == wasapi::PcmCandidateResult::FatalFailure) {
+                    return wasapi::PcmCandidateResult::FatalFailure;
+                }
+                candidateFailure = E_FAIL;
+                return wasapi::PcmCandidateResult::FatalFailure;
+            }, [&]() {
+                const HRESULT activated = activateFreshAudioClient();
+                candidateFailure = activated;
+                return SUCCEEDED(activated);
             });
-        if (!selected) {
+        if (!selection.candidate) {
+            if (chosen != nullptr) {
+                CoTaskMemFree(chosen);
+                chosen = nullptr;
+            }
             CoTaskMemFree(mixFormat);
+            if (selection.fatalFailure) {
+                error = "WASAPI exclusive PCM negotiation failed (HRESULT " +
+                    hresultText(candidateFailure) + ")";
+                close();
+                return LazerAudioErrorDevice;
+            }
             error = request.bitPerfect
                 ? (source.lossless
                     ? "the device does not support the source PCM format for bit-perfect output"
@@ -317,10 +443,11 @@ int32_t WasapiOutput::open(const AudioOutputRequest &request, const StreamDescri
             return LazerAudioErrorUnsupported;
         }
 
-        chosenBits = selected->descriptor == wasapi::PcmDescriptor::DeviceMix
-            ? significantBits(chosen) : selected->validBits;
-        usingFloat = selected->descriptor == wasapi::PcmDescriptor::DeviceMix && isFloatSubtype(chosen);
-        formatSelection = selectionForPcmCandidate(selected->tier);
+        chosenBits = selection.candidate->descriptor == wasapi::PcmDescriptor::DeviceMix
+            ? significantBits(chosen) : selection.candidate->validBits;
+        usingFloat = selection.candidate->descriptor == wasapi::PcmDescriptor::DeviceMix &&
+            isFloatSubtype(chosen);
+        formatSelection = selectionForPcmCandidate(selection.candidate->tier);
     } else {
         copyFormat(chosen, mixFormat);
         chosenBits = significantBits(chosen);
@@ -352,54 +479,42 @@ int32_t WasapiOutput::open(const AudioOutputRequest &request, const StreamDescri
     CoTaskMemFree(mixFormat);
     ownedFormat_ = chosen;
 
-    /* GetDevicePeriod reports 100-nanosecond units, which is what Initialize wants, so the periods are
-     * read as REFERENCE_TIME rather than a frame count. */
-    REFERENCE_TIME defaultPeriod = 0;
-    REFERENCE_TIME minimumPeriod = 0;
-    audioClient->GetDevicePeriod(&defaultPeriod, &minimumPeriod);
-    uint64_t periodHundredNanos = std::max<uint64_t>(
-        std::max<uint64_t>(defaultPeriod, minimumPeriod), 10000);
-
     /* Event-driven shared streams require both durations to be zero. Exclusive event streams need
      * equal non-zero durations; use the endpoint's supported period for stable DAC handoff. */
-    constexpr DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-    const REFERENCE_TIME exclusivePeriod = static_cast<REFERENCE_TIME>(periodHundredNanos);
     const REFERENCE_TIME bufferDuration = request.exclusive ? exclusivePeriod : 0;
     const REFERENCE_TIME periodicity = request.exclusive ? exclusivePeriod : 0;
 
-    result = audioClient->Initialize(shareMode, streamFlags, bufferDuration, periodicity, chosen, nullptr);
-    if (result == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED && request.exclusive) {
-        UINT32 alignedFrames = 0;
-        HRESULT alignedResult = audioClient->GetBufferSize(&alignedFrames);
-        if (SUCCEEDED(alignedResult) && alignedFrames > 0) {
-            const REFERENCE_TIME alignedDuration = static_cast<REFERENCE_TIME>(
-                (10'000'000.0 * static_cast<double>(alignedFrames) /
-                    static_cast<double>(chosen->nSamplesPerSec)) + 0.5);
-            /* An Initialize attempt that returns BUFFER_SIZE_NOT_ALIGNED may leave this client
-             * unusable. Microsoft requires a fresh IAudioClient for the aligned retry. */
-            audioClient->Release();
-            audioClient_ = nullptr;
-            audioClient = nullptr;
-            alignedResult = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                reinterpret_cast<void **>(&audioClient));
-            if (SUCCEEDED(alignedResult) && audioClient != nullptr) {
-                audioClient_ = audioClient;
-                result = audioClient->Initialize(shareMode, streamFlags, alignedDuration,
-                    alignedDuration, chosen, nullptr);
-                if (SUCCEEDED(result)) periodHundredNanos = static_cast<uint64_t>(alignedDuration);
+    if (!streamInitialized) {
+        result = audioClient->Initialize(shareMode, streamFlags, bufferDuration, periodicity,
+            chosen, nullptr);
+        if (result == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED && request.exclusive) {
+            UINT32 alignedFrames = 0;
+            HRESULT alignedResult = audioClient->GetBufferSize(&alignedFrames);
+            if (SUCCEEDED(alignedResult) && alignedFrames > 0) {
+                const REFERENCE_TIME alignedDuration = static_cast<REFERENCE_TIME>(
+                    (10'000'000.0 * static_cast<double>(alignedFrames) /
+                        static_cast<double>(chosen->nSamplesPerSec)) + 0.5);
+                /* An Initialize attempt that returns BUFFER_SIZE_NOT_ALIGNED may leave this client
+                 * unusable. Microsoft requires a fresh IAudioClient for the aligned retry. */
+                const HRESULT activated = activateFreshAudioClient();
+                if (SUCCEEDED(activated)) {
+                    result = audioClient->Initialize(shareMode, streamFlags, alignedDuration,
+                        alignedDuration, chosen, nullptr);
+                    if (SUCCEEDED(result)) periodHundredNanos = static_cast<uint64_t>(alignedDuration);
+                } else {
+                    result = activated;
+                }
             } else {
                 result = FAILED(alignedResult) ? alignedResult : E_FAIL;
             }
-        } else {
-            result = FAILED(alignedResult) ? alignedResult : E_FAIL;
         }
-    }
-    if (FAILED(result)) {
-        error = request.exclusive
-            ? "the device rejected exclusive initialization (HRESULT " + hresultText(result) + ")"
-            : "the shared endpoint rejected this format (HRESULT " + hresultText(result) + ")";
-        close();
-        return LazerAudioErrorDevice;
+        if (FAILED(result)) {
+            error = request.exclusive
+                ? "the device rejected exclusive initialization (HRESULT " + hresultText(result) + ")"
+                : "the shared endpoint rejected this format (HRESULT " + hresultText(result) + ")";
+            close();
+            return LazerAudioErrorDevice;
+        }
     }
     devicePeriodHundredNanos_ = periodHundredNanos;
 

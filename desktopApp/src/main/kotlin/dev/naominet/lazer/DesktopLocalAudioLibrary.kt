@@ -28,7 +28,7 @@ internal data class DesktopLocalLibraryEntry(
     val durationMillis: Long,
     val coverUrl: String?,
     val replayGain: DesktopReplayGainTags? = null,
-    /** Non-null only for a virtual track cut from a single-file CUE sheet. */
+    /** Non-null only for a virtual track cut from a CUE sheet. */
     val cueSheetPath: String? = null,
     val cueTrackNumber: Int? = null,
     val cueStartFrame75: Long? = null,
@@ -218,38 +218,40 @@ internal class DesktopLocalAudioLibraryStore(
         }
 
         checkActive()
-        val cueCandidates = cueSheets.flatMap { (cuePath, rootsContainingCue) ->
+        val cueCandidates = cueSheets.mapNotNull { (cuePath, rootsContainingCue) ->
             checkActive()
             val document = runCatching {
                 if (Files.isSymbolicLink(cuePath) || Files.size(cuePath) > MAX_CUE_SHEET_BYTES) {
                     return@runCatching null
                 }
                 parseDesktopCueSheet(Files.readString(cuePath, StandardCharsets.UTF_8))
-            }.getOrNull() ?: return@flatMap emptyList()
-            val sourcePath = resolveCueSourcePath(cuePath, document.fileName, rootsContainingCue)
-                ?: return@flatMap emptyList()
-            val source = found[pathKey(sourcePath)] ?: return@flatMap emptyList()
-            if (!cueTypeMatches(document.fileType, sourcePath) || source.durationMillis <= 0L) {
-                return@flatMap emptyList()
-            }
-            val starts = document.tracks.map { cueFrameToMillis(it.index01CueFrames) ?: return@flatMap emptyList() }
-            if (starts.any { it >= source.durationMillis }) return@flatMap emptyList()
-            val durations = starts.indices.map { index ->
-                val endMillis = starts.getOrNull(index + 1) ?: source.durationMillis
-                endMillis - starts[index]
-            }
-            if (durations.any { it <= 0L }) return@flatMap emptyList()
-            listOf(ResolvedCueSheet(cuePath, sourcePath, document, durations))
+            }.getOrNull() ?: return@mapNotNull null
+            resolveCueSheet(cuePath, rootsContainingCue, document, found)
         }
-        val cuesBySource = cueCandidates.groupBy { pathKey(it.sourcePath) }
-        val entries = found.flatMap { (sourcePath, source) ->
-            val cues = cuesBySource[pathKey(sourcePath)].orEmpty()
-            if (cues.size != 1) {
-                listOf(source)
-            } else {
-                val cue = cues.single()
-                cue.document.tracks.mapIndexed { index, track ->
-                    val nextTrackStart = cue.document.tracks.getOrNull(index + 1)?.index01CueFrames
+        // A source file claimed by more than one valid sheet makes every involved sheet
+        // ambiguous. Reject whole sheets so no multi-file CUE is only partly expanded.
+        val cueReferencesBySource = cueCandidates
+            .flatMap { cue -> cue.sourcesByFileIndex.values.map { pathKey(it.path) to cue.cuePath } }
+            .groupBy({ it.first }, { it.second })
+        val conflictingSources = cueReferencesBySource
+            .filterValues { cuePaths -> cuePaths.distinct().size > 1 }
+            .keys
+        val acceptedCues = cueCandidates.filter { cue ->
+            cue.sourcesByFileIndex.values.none { pathKey(it.path) in conflictingSources }
+        }
+        val cueSources = acceptedCues.flatMap { cue -> cue.sourcesByFileIndex.values.map { pathKey(it.path) } }.toSet()
+
+        // Keep each CUE group's album order intact while anchoring the group at its first source
+        // path. Sorting every virtual row by backing path would interleave multi-file albums.
+        val orderedGroups = buildList {
+            found.forEach { (sourcePath, source) ->
+                if (pathKey(sourcePath) !in cueSources) {
+                    add(OrderedLibraryGroup(sourcePath, sourcePath.toString(), listOf(source)))
+                }
+            }
+            acceptedCues.forEach { cue ->
+                val cueEntries = cue.document.tracks.mapIndexed { index, track ->
+                    val source = cue.trackSources[index].entry
                     DesktopLocalLibraryEntry(
                         absolutePath = source.absolutePath,
                         sizeBytes = source.sizeBytes,
@@ -257,22 +259,24 @@ internal class DesktopLocalAudioLibraryStore(
                         title = track.title.orEmpty(),
                         artist = track.performer ?: cue.document.performer ?: source.artist,
                         album = cue.document.title ?: source.album,
-                        durationMillis = cue.durationsMillis[index],
+                        durationMillis = cue.trackDurationsMillis[index],
                         coverUrl = source.coverUrl,
-                        // Whole-image ReplayGain applies to the image, not independently to each
+                        // Whole-image ReplayGain applies to an image, not independently to each
                         // virtual track, so it is deliberately not copied to the CUE entries.
                         replayGain = null,
                         cueSheetPath = cue.cuePath.toString(),
                         cueTrackNumber = track.number,
                         cueStartFrame75 = track.index01CueFrames,
-                        cueEndFrame75 = nextTrackStart ?: -1L,
+                        cueEndFrame75 = cue.trackEndFrames75[index],
                     )
                 }
+                add(OrderedLibraryGroup(cue.anchorPath, cue.cuePath.toString(), cueEntries))
             }
         }.sortedWith(
-            compareBy<DesktopLocalLibraryEntry, String>(String.CASE_INSENSITIVE_ORDER) { it.absolutePath }
-                .thenBy { it.cueTrackNumber ?: 0 },
+            compareBy<OrderedLibraryGroup, String>(String.CASE_INSENSITIVE_ORDER) { it.anchor.toString() }
+                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.tieBreaker },
         )
+        val entries = orderedGroups.flatMap(OrderedLibraryGroup::entries)
         if (scannedFiles % PROGRESS_INTERVAL != 0) onProgress(scannedFiles)
         checkActive()
         save(entries)
@@ -339,11 +343,89 @@ internal class DesktopLocalAudioLibraryStore(
 
     private fun pathKey(path: Path): Path = path.toAbsolutePath().normalize()
 
+    private fun resolveCueSheet(
+        cuePath: Path,
+        roots: List<Path>,
+        document: DesktopCueSheetDocument,
+        found: Map<Path, DesktopLocalLibraryEntry>,
+    ): ResolvedCueSheet? {
+        if (document.files.isEmpty() || document.tracks.isEmpty()) return null
+        val sources = LinkedHashMap<Int, ResolvedCueSource>()
+        val sourceKeys = HashSet<Path>()
+        document.files.forEachIndexed { fileIndex, cueFile ->
+            val sourcePath = resolveCueSourcePath(cuePath, cueFile.fileName, roots) ?: return null
+            val key = pathKey(sourcePath)
+            // A repeated FILE reference to the same physical source has ambiguous per-file time
+            // ordering in this intentionally narrow parser. Leave all files as ordinary entries.
+            if (!sourceKeys.add(key)) return null
+            val source = found[key] ?: return null
+            if (!cueTypeMatches(cueFile.fileType, sourcePath) || source.durationMillis <= 0L) return null
+            sources[fileIndex] = ResolvedCueSource(sourcePath, source)
+        }
+        if (document.tracks.any { it.fileIndex !in sources.keys } ||
+            document.tracks.map { it.fileIndex }.toSet() != sources.keys
+        ) return null
+
+        val trackSources = ArrayList<ResolvedCueSource>(document.tracks.size)
+        val trackStartsMillis = LongArray(document.tracks.size)
+        val previousStartByFile = HashMap<Int, Long>()
+        document.tracks.forEachIndexed { index, track ->
+            val source = sources[track.fileIndex] ?: return null
+            val previousStart = previousStartByFile.put(track.fileIndex, track.index01CueFrames)
+            if (previousStart != null && track.index01CueFrames <= previousStart) return null
+            val startMillis = cueFrameToMillis(track.index01CueFrames) ?: return null
+            if (startMillis >= source.entry.durationMillis) return null
+            trackSources += source
+            trackStartsMillis[index] = startMillis
+        }
+
+        val trackEndsFrame75 = MutableList(document.tracks.size) { -1L }
+        val trackDurationsMillis = MutableList(document.tracks.size) { 0L }
+        val nextStartByFile = HashMap<Int, Long>()
+        for (index in document.tracks.indices.reversed()) {
+            val track = document.tracks[index]
+            val nextStart = nextStartByFile.put(track.fileIndex, track.index01CueFrames)
+            val sourceDuration = trackSources[index].entry.durationMillis
+            val endMillis = nextStart?.let(::cueFrameToMillis) ?: sourceDuration
+            val startMillis = trackStartsMillis[index]
+            if (endMillis <= startMillis || endMillis > sourceDuration) return null
+            trackEndsFrame75[index] = nextStart ?: -1L
+            trackDurationsMillis[index] = endMillis - startMillis
+        }
+
+        return ResolvedCueSheet(
+            cuePath = cuePath,
+            sourcesByFileIndex = sources.toMap(),
+            document = document,
+            trackSources = trackSources,
+            trackDurationsMillis = trackDurationsMillis,
+            trackEndFrames75 = trackEndsFrame75,
+        )
+    }
+
+    private data class ResolvedCueSource(
+        val path: Path,
+        val entry: DesktopLocalLibraryEntry,
+    )
+
     private data class ResolvedCueSheet(
         val cuePath: Path,
-        val sourcePath: Path,
+        val sourcesByFileIndex: Map<Int, ResolvedCueSource>,
         val document: DesktopCueSheetDocument,
-        val durationsMillis: List<Long>,
+        val trackSources: List<ResolvedCueSource>,
+        val trackDurationsMillis: List<Long>,
+        val trackEndFrames75: List<Long>,
+    ) {
+        val anchorPath: Path
+            get() = sourcesByFileIndex.values.minWithOrNull(
+                compareBy(String.CASE_INSENSITIVE_ORDER) { it.path.toString() },
+            )!!.path
+    }
+
+    private data class OrderedLibraryGroup(
+        val anchor: Path,
+        val tieBreaker: String,
+        val entries: List<DesktopLocalLibraryEntry>,
     )
 
     private fun resolveCueSourcePath(cuePath: Path, cueFileName: String, roots: List<Path>): Path? {

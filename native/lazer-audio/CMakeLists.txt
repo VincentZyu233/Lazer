@@ -265,7 +265,7 @@ if(LAZER_AUDIO_BUILD_PROBE)
         COMMAND $<TARGET_FILE:lazer-audio-alsa-pcm-packing-probe>)
     set_tests_properties(lazer-audio-alsa-pcm-packing PROPERTIES TIMEOUT 15)
 
-    # Run the actual WASAPI PCM candidate-ordering policy with an injected format-support probe.
+    # Run the actual WASAPI PCM support/Initialize fallback policy with injected result probes.
     # The test is platform-independent; the WASAPI adapter uses the same policy on Windows.
     add_executable(lazer-audio-wasapi-pcm-policy-probe
         tools/lazer_audio_wasapi_pcm_policy_probe.cpp

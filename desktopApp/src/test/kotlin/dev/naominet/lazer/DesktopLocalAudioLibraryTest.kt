@@ -9,6 +9,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -364,6 +365,107 @@ class DesktopLocalAudioLibraryTest {
             assertEquals(0, rescanned.reusedMetadata)
             assertEquals(2, reads.get())
             assertEquals(result.entries, rescanned.entries)
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `expands a multi-file cue in sheet order and uses each source timeline`() {
+        val directory = Files.createTempDirectory("local-library-multi-file-cue")
+        try {
+            val root = Files.createDirectory(directory.resolve("music"))
+            val laterNamedSource = Files.write(root.resolve("z-track.wav"), byteArrayOf(1, 2, 3))
+            val earlierNamedSource = Files.write(root.resolve("a-track.wav"), byteArrayOf(4, 5, 6))
+            val cue = Files.writeString(
+                root.resolve("album.cue"),
+                """
+                TITLE "Cue Album"
+                FILE "z-track.wav" WAVE
+                TRACK 01 AUDIO
+                  TITLE "First Song"
+                  INDEX 01 00:00:00
+                TRACK 02 AUDIO
+                  TITLE "Second Song"
+                  PERFORMER "Guest Artist"
+                  INDEX 01 00:01:00
+                FILE "a-track.wav" WAVE
+                TRACK 03 AUDIO
+                  TITLE "Third Song"
+                  INDEX 01 00:00:00
+                TRACK 04 AUDIO
+                  INDEX 01 00:02:00
+                """.trimIndent(),
+            )
+            val index = directory.resolve("index.jsonl")
+            val store = DesktopLocalAudioLibraryStore(
+                indexPath = index,
+                metadataReader = { file ->
+                    val source = file.nameWithoutExtension
+                    DesktopLocalAudioMetadata(
+                        title = "Metadata $source",
+                        artist = "Source Artist $source",
+                        album = "Source Album $source",
+                        durationMillis = if (source == "z-track") 50_000L else 40_000L,
+                    )
+                },
+                artworkWriter = { null },
+            )
+
+            val result = store.scanAndCommit(listOf(root))
+            assertEquals(2, result.scannedFiles)
+            assertEquals(
+                listOf("First Song", "Second Song", "Third Song", ""),
+                result.entries.map { it.title },
+            )
+            assertEquals(
+                listOf("Source Artist z-track", "Guest Artist", "Source Artist a-track", "Source Artist a-track"),
+                result.entries.map { it.artist },
+            )
+            assertEquals(List(4) { "Cue Album" }, result.entries.map { it.album })
+            assertEquals(listOf(1_000L, 49_000L, 2_000L, 38_000L), result.entries.map { it.durationMillis })
+            assertEquals(listOf(0L, 75L, 0L, 150L), result.entries.map { it.cueStartFrame75 })
+            assertEquals(listOf(75L, -1L, 150L, -1L), result.entries.map { it.cueEndFrame75 })
+            assertEquals(
+                listOf(laterNamedSource, laterNamedSource, earlierNamedSource, earlierNamedSource)
+                    .map { it.toAbsolutePath().normalize().toString() },
+                result.entries.map { it.absolutePath },
+            )
+            assertTrue(result.entries.all { it.cueSheetPath == cue.toAbsolutePath().normalize().toString() })
+            assertTrue(result.entries.all { it.replayGain == null })
+            assertEquals(result.entries, store.load())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `rejects a multi-file cue as a whole when any referenced source is unavailable`() {
+        val directory = Files.createTempDirectory("local-library-multi-file-cue-invalid")
+        try {
+            val root = Files.createDirectory(directory.resolve("music"))
+            Files.write(root.resolve("present.wav"), byteArrayOf(1, 2, 3))
+            Files.writeString(
+                root.resolve("album.cue"),
+                """
+                FILE "present.wav" WAVE
+                TRACK 01 AUDIO
+                INDEX 01 00:00:00
+                FILE "missing.wav" WAVE
+                TRACK 02 AUDIO
+                INDEX 01 00:00:00
+                """.trimIndent(),
+            )
+            val store = DesktopLocalAudioLibraryStore(
+                indexPath = directory.resolve("index.jsonl"),
+                metadataReader = { DesktopLocalAudioMetadata(title = "Whole file", durationMillis = 30_000L) },
+                artworkWriter = { null },
+            )
+
+            val result = store.scanAndCommit(listOf(root))
+            assertEquals(1, result.entries.size)
+            assertEquals("Whole file", result.entries.single().title)
+            assertNull(result.entries.single().cueSheetPath)
         } finally {
             directory.toFile().deleteRecursively()
         }

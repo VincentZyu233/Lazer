@@ -716,7 +716,8 @@ bool runPresentationBoundaryCase() {
     return true;
 }
 
-std::vector<uint8_t> makeRampPcmWave(int32_t frames, int32_t sampleRate) {
+std::vector<uint8_t> makeRampPcmWave(int32_t frames, int32_t sampleRate,
+    int64_t sourceFrameOffset = 0) {
     const int32_t frameBytes = kChannels * 2;
     const uint32_t dataBytes = static_cast<uint32_t>(frames * frameBytes);
     std::vector<uint8_t> bytes;
@@ -734,7 +735,7 @@ std::vector<uint8_t> makeRampPcmWave(int32_t frames, int32_t sampleRate) {
     bytes.insert(bytes.end(), {'d', 'a', 't', 'a'});
     append32(bytes, dataBytes);
     for (int32_t frame = 0; frame < frames; ++frame) {
-        const int32_t marker = frame % 60'000 - 30'000;
+        const int32_t marker = static_cast<int32_t>((sourceFrameOffset + frame) % 60'000) - 30'000;
         appendSample(bytes, marker, 2);
         appendSample(bytes, -marker, 2);
     }
@@ -1195,6 +1196,119 @@ bool runCueGaplessCase() {
     return true;
 }
 
+bool runCueMultiFileGaplessCase() {
+    constexpr int32_t sampleRate = 48'000;
+    constexpr int64_t samplesPerCueFrame = sampleRate / 75;
+    constexpr int64_t firstFileCueFrames = 7;
+    constexpr int64_t secondFileCueFrames = 65;
+    constexpr int64_t firstFileFrames = firstFileCueFrames * samplesPerCueFrame;
+    constexpr int64_t secondFileFrames = secondFileCueFrames * samplesPerCueFrame;
+    constexpr int64_t totalFrames = firstFileFrames + secondFileFrames;
+    constexpr int32_t frameBytes = kChannels * 2;
+    const int64_t firstDurationMillis = firstFileFrames * 1'000 / sampleRate;
+    const int64_t secondDurationMillis =
+        (secondFileFrames * 1'000 + sampleRate / 2) / sampleRate;
+
+    /* Model two separate WAV files whose decoded samples meet exactly at the CUE seam. The seam
+     * is deliberately off the 512-frame output-period boundary and the joined stream is exactly
+     * 90 periods, so any inserted idle/padding frame makes the byte comparison fail. */
+    const std::vector<uint8_t> firstWave = makeRampPcmWave(
+        static_cast<int32_t>(firstFileFrames), sampleRate);
+    const std::vector<uint8_t> secondWave = makeRampPcmWave(
+        static_cast<int32_t>(secondFileFrames), sampleRate, firstFileFrames);
+    MemoryReader first(firstWave);
+    MemoryReader successor(secondWave);
+    const LazerAudioReader firstReader = asReader(first);
+    const LazerAudioReader successorReader = asReader(successor);
+    ProbeEvents events;
+    auto capture = std::make_shared<Capture>();
+    events.capture = capture.get();
+
+    LazerAudioEngineConfig config{};
+    config.abi_version = LAZER_AUDIO_ABI_VERSION;
+    config.struct_size = sizeof(config);
+    config.device.exclusive = 1;
+    config.device.bit_perfect = 1;
+    config.device.buffer_millis = 60;
+    config.events.on_event = onEvent;
+    config.events.context = &events;
+    config.log.on_log = onLog;
+
+    Engine *engine = Engine::create(config, std::make_unique<CaptureOutput>(capture));
+    if (engine == nullptr) {
+        std::cerr << "FAIL: multi-file CUE gapless engine creation failed\n";
+        return false;
+    }
+    events.engine = engine;
+    const auto fail = [&](const char *message) {
+        engine->destroy();
+        std::cerr << "FAIL: multi-file CUE gapless case: " << message << "\n";
+        return false;
+    };
+
+    const LazerAudioOpenParams firstParams{
+        sizeof(LazerAudioOpenParams), 0, firstDurationMillis, 0, -1};
+    if (engine->open(nullptr, &firstReader, firstParams) != LazerAudioOk) {
+        std::cerr << "multi-file CUE first source open error=" << engine->lastError() << "\n";
+        return fail("could not open the first file through physical EOF");
+    }
+    const LazerAudioOpenParams successorParams{
+        sizeof(LazerAudioOpenParams), 0, secondDurationMillis, 0, -1};
+    if (engine->queueReader(1, successorReader, successorParams) != LazerAudioOk) {
+        std::cerr << "multi-file CUE successor queue error=" << engine->lastError() << "\n";
+        return fail("could not prepare the second file from frame zero");
+    }
+    if (engine->play() != LazerAudioOk ||
+        !waitForEvent(events, LazerAudioEventEnded, std::chrono::seconds(5))) {
+        std::cerr << "multi-file CUE gapless end error=" << engine->lastError() << "\n";
+        return fail("timed out before the second file reached clean EOF");
+    }
+
+    std::vector<uint8_t> expected;
+    appendWaveFrames(expected, firstWave, 0, firstFileFrames);
+    appendWaveFrames(expected, secondWave, 0, secondFileFrames);
+    int32_t trackChanges = 0;
+    int32_t ended = 0;
+    bool successorSnapshotRead = false;
+    int64_t callbackDurationMillis = 0;
+    {
+        std::lock_guard guard(events.mutex);
+        for (const int32_t event : events.events) {
+            if (event == LazerAudioEventTrackChanged) ++trackChanges;
+            if (event == LazerAudioEventEnded) ++ended;
+        }
+        successorSnapshotRead = events.callbackSnapshotRead;
+        callbackDurationMillis = events.callbackDurationMillis;
+    }
+    engine->destroy();
+
+    std::vector<uint8_t> actual;
+    int32_t openCount = 0;
+    int32_t startCount = 0;
+    int32_t closeCount = 0;
+    {
+        std::lock_guard guard(capture->mutex);
+        actual = capture->bytes;
+        openCount = capture->openCount;
+        startCount = capture->startCount;
+        closeCount = capture->closeCount;
+    }
+    if (actual.size() != expected.size() || actual != expected || trackChanges != 1 || ended != 1 ||
+        !successorSnapshotRead || callbackDurationMillis != secondDurationMillis ||
+        openCount != 1 || startCount != 1 || closeCount != 1 ||
+        first.closeCount.load() != 1 || successor.closeCount.load() != 1) {
+        std::cerr << "FAIL: multi-file CUE exact seam bytes=" << actual.size() << "/" << expected.size()
+            << " events=" << trackChanges << "/" << ended
+            << " session=" << openCount << "/" << startCount << "/" << closeCount
+            << " duration=" << callbackDurationMillis << "/" << secondDurationMillis
+            << " readers=" << first.closeCount.load() << "/" << successor.closeCount.load()
+            << " totalFrames=" << totalFrames << " frameBytes=" << frameBytes << "\n";
+        return false;
+    }
+    std::cout << "PASS: two separate WAV CUE sources append exact PCM frames through EOF in one output session\n";
+    return true;
+}
+
 bool runCueFirstSegmentCase() {
     constexpr int32_t sampleRate = 48'000;
     constexpr int32_t physicalFrames = 72 * (sampleRate / 75);
@@ -1586,7 +1700,7 @@ int main(int argc, char **argv) {
             runMalformedCueRangeCase() && runWholeTrackRegression() ? 0 : 1;
     }
     if (argc > 1 && std::string(argv[1]) == "--cue-gapless") {
-        return runCueGaplessCase() ? 0 : 1;
+        return runCueGaplessCase() && runCueMultiFileGaplessCase() ? 0 : 1;
     }
     if (argc > 1 && std::string(argv[1]) == "--cue-first-segment") {
         return runCueFirstSegmentCase() ? 0 : 1;

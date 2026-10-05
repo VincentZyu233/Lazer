@@ -8,7 +8,7 @@ import java.nio.file.Files
 
 class DesktopCueGaplessTest {
     @Test
-    fun `accepts only directly adjacent segments from the same CUE and source`() {
+    fun `accepts adjacent CUE segments within and across source files`() {
         val first = cueTrack(id = 1, number = 1, start = 0, end = 75)
         val adjacent = cueTrack(id = 2, number = 2, start = 75, end = 150)
         assertTrue(isContiguousDesktopCueSuccessor(first, adjacent))
@@ -31,6 +31,22 @@ class DesktopCueGaplessTest {
         assertFalse(isContiguousDesktopCueSuccessor(first, adjacent.copy(
             playbackSource = DesktopTrackSource.LocalFile("/music/album.wav"),
         )))
+
+        val finalTrackInFile = cueTrack(id = 3, number = 3, start = 0, end = -1, audio = "03.wav")
+        val firstTrackInNextFile = cueTrack(id = 4, number = 4, start = 0, end = -1, audio = "04.wav")
+        assertTrue(isContiguousDesktopCueSuccessor(finalTrackInFile, firstTrackInNextFile))
+        assertFalse(isContiguousDesktopCueSuccessor(
+            finalTrackInFile,
+            firstTrackInNextFile.copy(
+                playbackSource = localSource(number = 4, start = 1, end = -1, audio = "04.wav"),
+            ),
+        ))
+        assertFalse(isContiguousDesktopCueSuccessor(
+            finalTrackInFile,
+            firstTrackInNextFile.copy(
+                playbackSource = localSource(number = 5, start = 0, end = -1, audio = "04.wav"),
+            ),
+        ))
     }
 
     @Test
@@ -164,14 +180,14 @@ class DesktopCueGaplessTest {
         ))
     }
 
-    private fun cueTrack(id: Long, number: Int, start: Long, end: Long) = TrackItem(
+    private fun cueTrack(id: Long, number: Int, start: Long, end: Long, audio: String = "album.wav") = TrackItem(
         id = id,
         title = "Track $number",
         artist = "",
         album = "",
         durationMillis = 1_000,
         coverUrl = null,
-        playbackSource = localSource(number, start, end),
+        playbackSource = localSource(number, start, end, audio = audio),
     )
 
     private fun localTrack(id: Long, path: String) = TrackItem(

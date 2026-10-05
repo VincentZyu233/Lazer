@@ -25,14 +25,16 @@ class DesktopCueSheetTest {
         )
 
         assertNotNull(sheet)
-        assertEquals("音乐目录/交响乐.flac", sheet?.fileName)
-        assertEquals("FLAC", sheet?.fileType)
+        assertEquals(
+            listOf(DesktopCueSourceFile("音乐目录/交响乐.flac", "FLAC")),
+            sheet?.files,
+        )
         assertEquals("专辑 标题", sheet?.title)
         assertEquals("唱片艺人", sheet?.performer)
         assertEquals(
             listOf(
-                DesktopCueTrack(1, "第一乐章", "独奏者", 0L),
-                DesktopCueTrack(2, null, "唱片艺人", 14_424L),
+                DesktopCueTrack(1, "第一乐章", "独奏者", 0L, fileIndex = 0),
+                DesktopCueTrack(2, null, "唱片艺人", 14_424L, fileIndex = 0),
             ),
             sheet?.tracks,
         )
@@ -43,23 +45,64 @@ class DesktopCueSheetTest {
         val wave = parseDesktopCueSheet(twoTrackCue(file = "album.wav", type = "WAVE", secondIndex = "00:01:00"))
         val flac = parseDesktopCueSheet(twoTrackCue(file = "album.flac", type = "FLAC", secondIndex = "01:00:00"))
 
-        assertEquals("WAVE", wave?.fileType)
+        assertEquals(listOf(DesktopCueSourceFile("album.wav", "WAVE")), wave?.files)
         assertEquals(75L, wave?.tracks?.getOrNull(1)?.index01CueFrames)
         assertEquals(4_500L, flac?.tracks?.getOrNull(1)?.index01CueFrames)
     }
 
     @Test
-    fun `rejects multiple files and unsupported file types`() {
-        assertRejected(
+    fun `parses multiple files with per file timestamps and correct track binding`() {
+        val sheet = parseDesktopCueSheet(
             """
                 FILE "first.wav" WAVE
                 TRACK 01 AUDIO
                 INDEX 01 00:00:00
+                TRACK 02 AUDIO
+                INDEX 01 03:12:24
                 FILE "second.wav" WAVE
+                TRACK 03 AUDIO
+                INDEX 01 00:00:00
+                TRACK 04 AUDIO
+                INDEX 01 00:45:10
             """,
         )
+        assertNotNull(sheet)
+        assertEquals(
+            listOf(
+                DesktopCueSourceFile("first.wav", "WAVE"),
+                DesktopCueSourceFile("second.wav", "WAVE"),
+            ),
+            sheet?.files,
+        )
+        assertEquals(listOf(0, 0, 1, 1), sheet?.tracks?.map(DesktopCueTrack::fileIndex))
+        assertEquals(
+            listOf(0L, 14_424L, 0L, 3_385L),
+            sheet?.tracks?.map(DesktopCueTrack::index01CueFrames),
+        )
+    }
+
+    @Test
+    fun `rejects unsupported types empty paths control characters and empty file blocks`() {
         assertRejected(cue(file = "disc.bin", type = "BINARY"))
         assertRejected(cue(file = "disc.aiff", type = "AIFF"))
+        assertRejected(cue(file = "   "))
+        assertRejected(cue(file = "bad\u0001name.wav"))
+        assertRejected(
+            """
+                FILE "empty.wav" WAVE
+                FILE "used.wav" WAVE
+                TRACK 01 AUDIO
+                INDEX 01 00:00:00
+            """,
+        )
+        assertRejected(
+            """
+                FILE "used.wav" WAVE
+                TRACK 01 AUDIO
+                INDEX 01 00:00:00
+                FILE "empty.wav" WAVE
+            """,
+        )
     }
 
     @Test
@@ -195,7 +238,7 @@ class DesktopCueSheetTest {
     }
 
     @Test
-    fun `requires one file and at least one audio track`() {
+    fun `requires at least one file and one audio track per file`() {
         assertNull(parseDesktopCueSheet("TITLE \"No file\""))
         assertRejected("FILE \"empty.wav\" WAVE")
     }
