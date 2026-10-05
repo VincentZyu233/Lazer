@@ -516,20 +516,23 @@ private fun readId3v2Tags(
     }
     if (flags and allowedTagFlags.inv() != 0) return@runCatching null
     val tagBodySize = input.readSynchsafeInt() ?: return@runCatching null
-    // Global unsynchronisation changes frame boundaries, so ignore the tag rather than misparse it.
-    if (flags and 0x80 != 0 || (majorVersion == 2 && flags and 0x40 != 0)) return@runCatching null
+    val tagUnsynchronised = flags and 0x80 != 0
+    // ID3v2.2/2.3 unsynchronise the complete body; ID3v2.4 does so per frame.
+    if (majorVersion == 2 && flags and 0x40 != 0) return@runCatching null
     val footerSize = if (majorVersion == 4 && flags and 0x10 != 0) 10L else 0L
     val totalSize = 10L + tagBodySize + footerSize
     if (tagBodySize > MAX_LOCAL_ID3_TAG_BYTES || totalSize > availableLength) return@runCatching null
-    val body = ByteArray(tagBodySize)
-    input.readFully(body)
+    val encodedBody = ByteArray(tagBodySize)
+    input.readFully(encodedBody)
+    val body = if (tagUnsynchronised && majorVersion < 4) {
+        removeId3Unsynchronization(encodedBody)
+    } else {
+        encodedBody
+    }
 
     var cursor = 0
     if (flags and 0x40 != 0) {
-        if (body.size < 4) return@runCatching null
-        val extendedSize = if (majorVersion == 4) readSynchsafeInt(body, 0) else readUInt32BigEndian(body, 0)
-        if (extendedSize == null || extendedSize < 4 || extendedSize > body.size) return@runCatching null
-        cursor = if (majorVersion == 3) 4 + extendedSize else extendedSize
+        cursor = readId3ExtendedHeaderSize(body, majorVersion) ?: return@runCatching null
     }
 
     val displayTags = linkedMapOf<String, String>()
@@ -557,21 +560,31 @@ private fun readId3v2Tags(
             "TALB", "TAL" -> "ALBUM"
             else -> null
         }
-        // Formatted/compressed/encrypted frames are not plain text. Ordinary read-only status flags are safe.
-        val formatFlags = if (majorVersion == 3) frameFlags and 0x00e0
-            else if (majorVersion == 4) frameFlags and 0x004f else 0
-        if ((frameId == "APIC" || frameId == "PIC") && formatFlags == 0) {
-            val picture = readId3Picture(body, frameOffset, frameSize, majorVersion)
+        // Compressed/encrypted/grouped frames are not plain fields; read-only flags are safe.
+        val unsupportedFormatFlags = if (majorVersion == 3) frameFlags and 0x00e0
+            else if (majorVersion == 4) frameFlags and 0x004d else 0
+        val frameUnsynchronised = majorVersion == 4 &&
+            (tagUnsynchronised || frameFlags and 0x0002 != 0)
+        val hasReadablePayload = unsupportedFormatFlags == 0 &&
+            (frameId == "APIC" || frameId == "PIC" || tagKey != null || frameId == "TXXX")
+        val readablePayload = if (hasReadablePayload) {
+            val encodedPayload = body.copyOfRange(frameOffset, frameOffset + frameSize)
+            if (frameUnsynchronised) removeId3Unsynchronization(encodedPayload) else encodedPayload
+        } else {
+            null
+        }
+        if ((frameId == "APIC" || frameId == "PIC") && readablePayload != null) {
+            val picture = readId3Picture(readablePayload, 0, readablePayload.size, majorVersion)
             if (picture != null &&
                 (artwork == null || (picture.pictureType == 3L && artwork.pictureType != 3L))
             ) artwork = picture
         }
-        if (tagKey != null && formatFlags == 0 && frameSize in 2..MAX_LOCAL_TAG_BYTES) {
-            val value = decodeId3Text(body, frameOffset, frameSize)
+        if (tagKey != null && readablePayload != null && readablePayload.size in 2..MAX_LOCAL_TAG_BYTES) {
+            val value = decodeId3Text(readablePayload, 0, readablePayload.size)
             if (!value.isNullOrBlank()) displayTags.putIfAbsent(tagKey, value)
         }
-        if (frameId == "TXXX" && formatFlags == 0 && frameSize in 2..MAX_LOCAL_TAG_BYTES) {
-            decodeId3UserText(body, frameOffset, frameSize)?.let { (description, value) ->
+        if (frameId == "TXXX" && readablePayload != null && readablePayload.size in 2..MAX_LOCAL_TAG_BYTES) {
+            decodeId3UserText(readablePayload, 0, readablePayload.size)?.let { (description, value) ->
                 val key = description.trim().uppercase()
                 if (key in flacReplayGainTagKeys && key !in replayGainValues) {
                     parseReplayGainValue(key, value)?.let { replayGainValues[key] = it }
@@ -583,6 +596,69 @@ private fun readId3v2Tags(
     }
     ParsedId3Tag(displayTags, artwork, replayGainValues.toDesktopReplayGainTags())
 }.getOrNull()
+
+/** Validates version-specific extended-header structure and returns its total byte length. */
+private fun readId3ExtendedHeaderSize(body: ByteArray, majorVersion: Int): Int? {
+    if (majorVersion == 3) {
+        if (body.size < 10) return null
+        val sizeExcludingSizeField = readUInt32BigEndian(body, 0) ?: return null
+        if (sizeExcludingSizeField != 6 && sizeExcludingSizeField != 10) return null
+        val totalSize = 4 + sizeExcludingSizeField
+        if (totalSize > body.size) return null
+        val extendedFlags = ((body[4].toInt() and 0xff) shl 8) or (body[5].toInt() and 0xff)
+        val hasCrc = extendedFlags and 0x8000 != 0
+        if (extendedFlags and 0x7fff != 0 || hasCrc != (sizeExcludingSizeField == 10)) return null
+        val paddingSize = readUInt32BigEndian(body, 6) ?: return null
+        if (paddingSize < 0 || paddingSize > body.size - totalSize) return null
+        return totalSize
+    }
+
+    if (majorVersion == 4) {
+        val totalSize = readSynchsafeInt(body, 0) ?: return null
+        if (totalSize < 6 || totalSize > body.size) return null
+        if (body[4].toInt() != 1) return null // Number of flag bytes.
+        val extendedFlags = body[5].toInt() and 0xff
+        if (extendedFlags and 0x8f != 0) return null
+        var cursor = 6
+        if (extendedFlags and 0x40 != 0) {
+            if (cursor >= totalSize || body[cursor++].toInt() != 0) return null
+        }
+        if (extendedFlags and 0x20 != 0) {
+            if (cursor >= totalSize || body[cursor++].toInt() != 5 || cursor + 5 > totalSize) return null
+            repeat(5) {
+                if (body[cursor++].toInt() and 0x80 != 0) return null
+            }
+        }
+        if (extendedFlags and 0x10 != 0) {
+            if (cursor + 2 > totalSize || body[cursor++].toInt() != 1) return null
+            cursor++ // Tag restrictions byte.
+        }
+        if (cursor != totalSize) return null
+        return totalSize
+    }
+
+    return null
+}
+
+/** Removes only the zero bytes inserted by the ID3 unsynchronisation scheme. */
+private fun removeId3Unsynchronization(encoded: ByteArray): ByteArray {
+    val decoded = ByteArray(encoded.size)
+    var readOffset = 0
+    var writeOffset = 0
+    while (readOffset < encoded.size) {
+        val value = encoded[readOffset].toInt() and 0xff
+        decoded[writeOffset++] = encoded[readOffset]
+        if (value == 0xff && readOffset + 1 < encoded.size && encoded[readOffset + 1] == 0.toByte()) {
+            val afterInsertedZero = readOffset + 2
+            val nextValue = encoded.getOrNull(afterInsertedZero)?.toInt()?.and(0xff)
+            if (nextValue == null || nextValue == 0 || nextValue >= 0xe0) {
+                readOffset++
+            }
+        }
+        readOffset++
+    }
+    return if (writeOffset == encoded.size) encoded else decoded.copyOf(writeOffset)
+}
 
 private fun decodeId3Text(body: ByteArray, offset: Int, size: Int): String? = runCatching {
     if (size < 2) return@runCatching null

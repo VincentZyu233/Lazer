@@ -97,6 +97,114 @@ class DesktopLocalAudioTest {
     }
 
     @Test
+    fun `validates ID3 v23 and v24 extended headers`() {
+        val path = Files.createTempFile("local-audio-id3-extended-header", ".wav")
+        try {
+            val titleFrameTag = id3Tag(3, listOf("TIT2" to "Extended header title")) { value ->
+                byteArrayOf(3) + value.toByteArray(Charsets.UTF_8)
+            }
+            val frames = titleFrameTag.copyOfRange(10, titleFrameTag.size)
+            val v23ExtendedHeader = byteArrayOf(0, 0, 0, 6, 0, 0, 0, 0, 0, 0)
+            Files.write(path, waveWithId3Tags(id3TagWithExtendedHeader(3, v23ExtendedHeader, frames)))
+            val v23 = readLocalAudioMetadata(path.toFile())
+            assertEquals("Extended header title", v23?.title)
+            assertEquals(1_000L, v23?.durationMillis)
+
+            val v24ExtendedHeader = byteArrayOf(0, 0, 0, 6, 1, 0)
+            Files.write(path, waveWithId3Tags(id3TagWithExtendedHeader(4, v24ExtendedHeader, frames)))
+            val v24 = readLocalAudioMetadata(path.toFile())
+            assertEquals("Extended header title", v24?.title)
+            assertEquals(1_000L, v24?.durationMillis)
+
+            // Malformed extended headers are ignored while container-level duration remains readable.
+            val malformedV23 = v23ExtendedHeader.copyOf().also { it[3] = 5 }
+            Files.write(path, waveWithId3Tags(id3TagWithExtendedHeader(3, malformedV23, frames)))
+            val rejectedV23 = readLocalAudioMetadata(path.toFile())
+            assertNull(rejectedV23?.title)
+            assertEquals(1_000L, rejectedV23?.durationMillis)
+
+            val malformedV24 = byteArrayOf(0, 0, 0, 6, 0, 0)
+            Files.write(path, waveWithId3Tags(id3TagWithExtendedHeader(4, malformedV24, frames)))
+            val rejectedV24 = readLocalAudioMetadata(path.toFile())
+            assertNull(rejectedV24?.title)
+            assertEquals(1_000L, rejectedV24?.durationMillis)
+        } finally {
+            Files.deleteIfExists(path)
+        }
+    }
+
+    @Test
+    fun `reads ID3 v22 and v23 tag-wide unsynchronization`() {
+        val wavePath = Files.createTempFile("local-audio-id3-v23-unsync", ".wav")
+        val dffPath = Files.createTempFile("local-audio-id3-v22-unsync", ".dff")
+        try {
+            val encodedTitle = byteArrayOf(0, 0xff.toByte(), 0xe1.toByte())
+            val v23 = id3UnsynchronizedTag(
+                version = 3,
+                frames = listOf("TIT2" to encodedTitle),
+                tagUnsynchronised = true,
+            )
+            Files.write(wavePath, waveWithId3Tags(v23))
+            val waveMetadata = readLocalAudioMetadata(wavePath.toFile())
+            assertEquals("\u00ff\u00e1", waveMetadata?.title)
+            assertEquals(1_000L, waveMetadata?.durationMillis)
+
+            val v22 = id3UnsynchronizedTag(
+                version = 2,
+                frames = listOf("TT2" to encodedTitle),
+                tagUnsynchronised = true,
+            )
+            Files.write(dffPath, dffFixture(dst = false, id3Tag = v22))
+            val dffMetadata = readLocalAudioMetadata(dffPath.toFile())
+            assertEquals("\u00ff\u00e1", dffMetadata?.title)
+            assertEquals(10L, dffMetadata?.durationMillis)
+        } finally {
+            Files.deleteIfExists(wavePath)
+            Files.deleteIfExists(dffPath)
+        }
+    }
+
+    @Test
+    fun `reads ID3 v24 tag-wide and per-frame unsynchronization`() {
+        val globalPath = Files.createTempFile("local-audio-id3-v24-global-unsync", ".dff")
+        val framePath = Files.createTempFile("local-audio-id3-v24-frame-unsync", ".wav")
+        try {
+            val image = byteArrayOf(
+                0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 0xe0.toByte(), 0x10,
+                0xff.toByte(), 0, 0x11, 0xff.toByte(),
+            )
+            val globalTag = id3UnsynchronizedTag(
+                version = 4,
+                frames = listOf(
+                    "TIT2" to byteArrayOf(3) + "v2.4 tag unsync".toByteArray(Charsets.UTF_8),
+                    "APIC" to id3PictureFrame(3, "image/jpeg", image),
+                ),
+                tagUnsynchronised = true,
+            )
+            Files.write(globalPath, dffFixture(dst = false, id3Tag = globalTag))
+            val globalMetadata = readLocalAudioMetadata(globalPath.toFile())
+            assertEquals("v2.4 tag unsync", globalMetadata?.title)
+            assertEquals("image/jpeg", globalMetadata?.embeddedArtwork?.mimeType)
+            assertTrue(globalMetadata?.embeddedArtwork?.data?.contentEquals(image) == true)
+            assertEquals(10L, globalMetadata?.durationMillis)
+
+            val frameTag = id3UnsynchronizedTag(
+                version = 4,
+                frames = listOf("TIT2" to byteArrayOf(0, 0xff.toByte(), 0xe2.toByte())),
+                tagUnsynchronised = false,
+                frameUnsynchronised = true,
+            )
+            Files.write(framePath, waveWithId3Tags(frameTag))
+            val frameMetadata = readLocalAudioMetadata(framePath.toFile())
+            assertEquals("\u00ff\u00e2", frameMetadata?.title)
+            assertEquals(1_000L, frameMetadata?.durationMillis)
+        } finally {
+            Files.deleteIfExists(globalPath)
+            Files.deleteIfExists(framePath)
+        }
+    }
+
+    @Test
     fun `reads trailing APEv2 tags as metadata fallback for all supported local formats`() {
         val image = pngFixture()
         val apeTag = apeV2Tag(
@@ -890,6 +998,72 @@ class DesktopLocalAudioTest {
             write(body)
         }.toByteArray()
     }
+
+    private fun id3UnsynchronizedTag(
+        version: Int,
+        frames: List<Pair<String, ByteArray>>,
+        tagUnsynchronised: Boolean,
+        frameUnsynchronised: Boolean = false,
+    ): ByteArray {
+        val frameData = ByteArrayOutputStream().apply {
+            frames.forEach { (id, payload) ->
+                val encodedPayload = if (version == 4 && (tagUnsynchronised || frameUnsynchronised)) {
+                    encodeId3Unsynchronization(payload)
+                } else {
+                    payload
+                }
+                writeAscii(id)
+                val declaredFrameSize = if (version == 4) encodedPayload.size else payload.size
+                when (version) {
+                    2 -> {
+                        write((declaredFrameSize ushr 16) and 0xff)
+                        write((declaredFrameSize ushr 8) and 0xff)
+                        write(declaredFrameSize and 0xff)
+                    }
+                    3 -> writeUInt32BigEndian(declaredFrameSize)
+                    else -> writeSynchsafeInt(declaredFrameSize)
+                }
+                if (version >= 3) {
+                    write(0)
+                    write(if (frameUnsynchronised) 0x02 else 0)
+                }
+                write(encodedPayload)
+            }
+        }.toByteArray()
+        val encodedBody = if (tagUnsynchronised && version < 4) {
+            encodeId3Unsynchronization(frameData)
+        } else {
+            frameData
+        }
+        return ByteArrayOutputStream().apply {
+            writeAscii("ID3")
+            write(version)
+            write(0)
+            write(if (tagUnsynchronised) 0x80 else 0)
+            writeSynchsafeInt(encodedBody.size)
+            write(encodedBody)
+        }.toByteArray()
+    }
+
+    private fun id3TagWithExtendedHeader(version: Int, extendedHeader: ByteArray, frames: ByteArray): ByteArray {
+        val body = extendedHeader + frames
+        return ByteArrayOutputStream().apply {
+            writeAscii("ID3")
+            write(version)
+            write(0)
+            write(0x40)
+            writeSynchsafeInt(body.size)
+            write(body)
+        }.toByteArray()
+    }
+
+    private fun encodeId3Unsynchronization(data: ByteArray): ByteArray = ByteArrayOutputStream().apply {
+        data.forEachIndexed { index, byte ->
+            write(byte.toInt() and 0xff)
+            val next = data.getOrNull(index + 1)?.toInt()?.and(0xff)
+            if (byte == 0xff.toByte() && (next == null || next == 0 || next >= 0xe0)) write(0)
+        }
+    }.toByteArray()
 
     private fun ByteArrayOutputStream.writeInfoTag(id: String, value: String) {
         val bytes = (value + '\u0000').toByteArray(Charsets.UTF_8)

@@ -126,7 +126,9 @@ internal class DesktopLocalAudioLibraryStore(
                         (schemaVersion < WAVE_REPLAY_GAIN_SCHEMA_VERSION &&
                             path.substringAfterLast('.', "").lowercase() == "wav") ||
                         (schemaVersion < APE_V2_SCHEMA_VERSION &&
-                            path.substringAfterLast('.', "").lowercase() in APE_V2_SUPPORTED_EXTENSIONS),
+                            path.substringAfterLast('.', "").lowercase() in APE_V2_SUPPORTED_EXTENSIONS) ||
+                        (schemaVersion < ID3_UNSYNC_SCHEMA_VERSION &&
+                            path.substringAfterLast('.', "").lowercase() in ID3_UNSYNC_SUPPORTED_EXTENSIONS),
                 )
             }
             entries
@@ -488,8 +490,10 @@ internal class DesktopLocalAudioLibraryStore(
         const val WAVE_ID3_ARTWORK_SCHEMA_VERSION = 6
         const val WAVE_REPLAY_GAIN_SCHEMA_VERSION = 7
         const val APE_V2_SCHEMA_VERSION = 8
-        const val SCHEMA_VERSION = APE_V2_SCHEMA_VERSION
+        const val ID3_UNSYNC_SCHEMA_VERSION = 9
+        const val SCHEMA_VERSION = ID3_UNSYNC_SCHEMA_VERSION
         val APE_V2_SUPPORTED_EXTENSIONS = setOf("wav", "flac", "dsf", "dff")
+        val ID3_UNSYNC_SUPPORTED_EXTENSIONS = setOf("wav", "dsf", "dff")
         val SUPPORTED_SCHEMA_VERSIONS = setOf(
             LEGACY_SCHEMA_VERSION,
             REPLAY_GAIN_SCHEMA_VERSION,
@@ -499,6 +503,7 @@ internal class DesktopLocalAudioLibraryStore(
             WAVE_ID3_ARTWORK_SCHEMA_VERSION,
             WAVE_REPLAY_GAIN_SCHEMA_VERSION,
             APE_V2_SCHEMA_VERSION,
+            ID3_UNSYNC_SCHEMA_VERSION,
         )
         const val PROGRESS_INTERVAL = 128
         const val CUE_FRAMES_PER_SECOND = 75L
