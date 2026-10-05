@@ -74,7 +74,24 @@ jobs:
           profile: pixel_5
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: ./gradlew :androidApp:connectedDebugAndroidTest -PlazerAbis=x86_64 --stacktrace
+          script: |
+            set +e
+            ./gradlew :androidApp:connectedDebugAndroidTest -PlazerAbis=x86_64 --stacktrace
+            gradle_status=$?
+            mkdir -p androidApp/build/diagnostics/android-dsd
+            adb logcat -d -v threadtime > androidApp/build/diagnostics/android-dsd/logcat.txt 2>&1 || true
+            exit "$gradle_status"
+      - name: Upload Android DSD instrumentation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-dsd-instrumentation-diagnostics
+          path: |
+            androidApp/build/reports/androidTests/connected/debug/**
+            androidApp/build/outputs/androidTest-results/connected/**
+            androidApp/build/diagnostics/android-dsd/logcat.txt
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v7
         with:
           name: lazer-apk-arm64
