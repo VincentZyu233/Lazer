@@ -48,6 +48,10 @@ struct AudioOutputSession {
     bool exclusive = false;
     bool primeBeforeStart = false;
     bool queueDepthAvailable = true;
+    /* Set only by CoreAudio from the initialized virtual ASBD; this is HAL format metadata, not a
+     * guarantee of bit-perfect output or physical DAC behavior. */
+    bool coreAudioMixabilityKnown = false;
+    bool coreAudioStreamNonMixable = false;
     /* True only when the backend initialized an exact DoP carrier PCM session. */
     bool doP = false;
     /* True only when the backend initialized an exact Native DSD session. */

@@ -667,6 +667,8 @@
   "settings.hifi.stream.session.integer": "{0}-bit integer PCM",
   "settings.hifi.stream.session.integer_container": "{0}-bit valid integer PCM / {1}-bit container",
   "settings.hifi.stream.session.float": "{0}-bit floating-point PCM",
+  "settings.hifi.stream.coreaudio.non_mixable": "CoreAudio virtual ASBD is flagged non-mixable · this does not prove bit-perfect output",
+  "settings.hifi.stream.coreaudio.mixable": "CoreAudio virtual ASBD is mixable · this does not prove the DAC's physical format",
   "settings.hifi.stream.underrun.active": "Source starvation detected · {0} padded frames (~{1} ms estimated)",
   "settings.hifi.stream.underrun.history": "Source starvation padding · {0} frames (~{1} ms estimated)",
   "settings.hifi.stream.underrun.note": "Application output padding estimate; not a DAC gap measurement.",

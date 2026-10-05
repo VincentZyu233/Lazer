@@ -153,15 +153,11 @@ bool normalizedTuple(const AudioStreamBasicDescription &format,
     tuple.littleEndian = isLittleEndian(format);
     tuple.packed = (format.mFormatFlags & kAudioFormatFlagIsPacked) != 0;
     tuple.alignedHigh = (format.mFormatFlags & kAudioFormatFlagIsAlignedHigh) != 0;
+    tuple.nonMixable = (format.mFormatFlags & kAudioFormatFlagIsNonMixable) != 0;
     tuple.containerBitsPerSample = sampleContainerBits(format);
     tuple.bitsPerChannel = static_cast<int32_t>(format.mBitsPerChannel);
-    if (isFloat(format)) {
-        tuple.encoding = CoreAudioPcmEncoding::Float32;
-    } else if (isSignedInteger(format)) {
-        tuple.encoding = CoreAudioPcmEncoding::SignedInteger;
-    } else {
-        return false;
-    }
+    tuple.encoding = coreAudioPcmEncodingFromFlags(isFloat(format), isSignedInteger(format));
+    if (tuple.encoding == CoreAudioPcmEncoding::Unsupported) return false;
     return tuple.containerBitsPerSample > 0 && tuple.bitsPerChannel > 0;
 }
 
@@ -244,7 +240,8 @@ bool candidateMatches(const StreamCandidate &candidate,
         candidate.tuple.interleaved == endpoint.interleaved &&
         candidate.tuple.littleEndian == endpoint.littleEndian &&
         candidate.tuple.packed == endpoint.packed &&
-        candidate.tuple.alignedHigh == endpoint.alignedHigh;
+        candidate.tuple.alignedHigh == endpoint.alignedHigh &&
+        candidate.tuple.nonMixable == endpoint.nonMixable;
 }
 
 bool setAndReadNominalRate(AudioDeviceID device, int32_t requestedRate,
@@ -365,7 +362,8 @@ bool formatMatchesEndpoint(const AudioStreamBasicDescription &format,
     return tuple.channels == endpoint.channels && bits == endpoint.bitsPerSample &&
         tuple.containerBitsPerSample == endpoint.containerBitsPerSample &&
         tuple.interleaved == endpoint.interleaved && tuple.littleEndian == endpoint.littleEndian &&
-        tuple.packed == endpoint.packed && tuple.alignedHigh == endpoint.alignedHigh;
+        tuple.packed == endpoint.packed && tuple.alignedHigh == endpoint.alignedHigh &&
+        tuple.nonMixable == endpoint.nonMixable;
 }
 
 bool exactDoPCarrierFormat(const AudioStreamBasicDescription &format,
@@ -864,6 +862,8 @@ int32_t CoreAudioOutput::open(const AudioOutputRequest &request,
         session.primeBeforeStart = false;
         session.exclusive = ownsHog_;
         session.doP = request.requireDoP;
+        session.coreAudioMixabilityKnown = true;
+        session.coreAudioStreamNonMixable = actualTuple.nonMixable;
         const bool exactVirtualTuple = exactPcmTuple &&
             formatMatchesEndpoint(readback, selectedEndpoint);
         session.formatSelection = request.requireDoP
@@ -881,6 +881,7 @@ int32_t CoreAudioOutput::open(const AudioOutputRequest &request,
             << target.channels << " ch / "
             << (interleaved_ ? "interleaved" : "non-interleaved")
             << (request.requireDoP ? " virtual DoP carrier" : " virtual PCM");
+        description << (actualTuple.nonMixable ? " / HAL non-mixable" : " / HAL mixable");
         if (physicalRead) {
             description << " / physical " << static_cast<int32_t>(std::llround(physical.mSampleRate))
                 << " Hz / " << physical.mBitsPerChannel << " bit";

@@ -36,6 +36,11 @@ class DesktopHiFiDiagnosticsTest {
                 .getValue("underrun_padded_frames").jsonPrimitive.content.toLong(),
         )
         assertEquals(
+            true,
+            json.getValue("stream").jsonObject.getValue("output_session").jsonObject
+                .getValue("coreaudio_virtual_asbd_non_mixable").jsonPrimitive.content.toBoolean(),
+        )
+        assertEquals(
             "Negotiated",
             json.getValue("stream").jsonObject.getValue("signal_path").jsonObject
                 .getValue("direct_path_status").jsonPrimitive.content,
@@ -192,6 +197,7 @@ class DesktopHiFiDiagnosticsTest {
                 signalPath = signalPath,
                 outputContainerBitsPerSample = 32,
                 outputFormatInitialized = true,
+                outputNonMixable = true,
                 formatSelection = OutputFormatSelection.ExclusiveSource,
                 underrunActive = true,
                 underrunFrames = 4_800L,

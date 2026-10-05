@@ -1114,6 +1114,8 @@ void Engine::streamInfo(LazerAudioStreamInfo &out) {
             ? outputSession_.target.containerBitsPerSample : 32;
         out.output_is_float = outputSession_.target.bitsPerSample == 0 ? 1 : 0;
         out.output_format_initialized = 1;
+        out.output_coreaudio_mixability_known = outputSession_.coreAudioMixabilityKnown ? 1 : 0;
+        out.output_coreaudio_non_mixable = outputSession_.coreAudioStreamNonMixable ? 1 : 0;
         out.output_format_selection = outputSession_.formatSelection;
         out.output_telemetry_valid = outputTelemetryValid_.load(std::memory_order_acquire) &&
             !bitPerfectActive_.load(std::memory_order_acquire) &&

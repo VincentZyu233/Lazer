@@ -667,6 +667,8 @@
   "settings.hifi.stream.session.integer": "{0}-bit 整數 PCM",
   "settings.hifi.stream.session.integer_container": "{0}-bit 有效整數 PCM / {1}-bit 容器",
   "settings.hifi.stream.session.float": "{0}-bit 浮點 PCM",
+  "settings.hifi.stream.coreaudio.non_mixable": "CoreAudio 虛擬 ASBD 標記為不可混音 · 這不能證明輸出為 bit-perfect",
+  "settings.hifi.stream.coreaudio.mixable": "CoreAudio 虛擬 ASBD 可混音 · 這不能證明 DAC 的實際格式",
   "settings.hifi.stream.underrun.active": "偵測到來源供數不足 · 已補 {0} 幀（估算約 {1} ms）",
   "settings.hifi.stream.underrun.history": "來源供數不足補零 · {0} 幀（估算約 {1} ms）",
   "settings.hifi.stream.underrun.note": "這是應用程式輸出端補零量估算，不代表 DAC 實際中斷時間。",

@@ -5,6 +5,7 @@ import com.sun.jna.Native
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DesktopSignalPathSnapshotTest {
@@ -29,7 +30,7 @@ class DesktopSignalPathSnapshotTest {
     fun `stream info jna layout preserves append-only fields with current abi`() {
         val info = LazerAudioStreamInfo()
 
-        assertEquals(22, LAZER_AUDIO_ABI_VERSION)
+        assertEquals(23, LAZER_AUDIO_ABI_VERSION)
         assertEquals(6, LAZER_AUDIO_EVENT_TRACK_CHANGED)
         assertEquals(-2, LAZER_AUDIO_READER_IO_ERROR)
         assertEquals(0, LAZER_AUDIO_DSD_OUTPUT_CONVERT_TO_PCM)
@@ -48,11 +49,29 @@ class DesktopSignalPathSnapshotTest {
                 "bitPerfectActive", "outputContainerBitsPerSample", "outputIsFloat", "outputFormatInitialized",
                 "sourceFormatKind", "sourceDsdRateMultiplier", "outputFormatSelection", "outputPeakMilliDbfs",
                 "limiterGainReductionMilliDb", "outputClippedSampleCount", "outputTelemetryValid",
-                "outputFormatKind", "outputDsdRateMultiplier",
+                "outputFormatKind", "outputDsdRateMultiplier", "outputCoreAudioMixabilityKnown",
+                "outputCoreAudioNonMixable",
             ),
             LazerAudioStreamInfo::class.java.getAnnotation(Structure.FieldOrder::class.java).value.toList(),
         )
-        assertEquals(160, info.size())
+        assertEquals(168, info.size())
+    }
+
+    @Test
+    fun `coreaudio nonmixable flag preserves unknown and reported states`() {
+        assertNull(LazerAudioStreamInfo().coreAudioNonMixableOrNull())
+        assertFalse(
+            LazerAudioStreamInfo().apply {
+                outputCoreAudioMixabilityKnown = 1
+                outputCoreAudioNonMixable = 0
+            }.coreAudioNonMixableOrNull()!!,
+        )
+        assertTrue(
+            LazerAudioStreamInfo().apply {
+                outputCoreAudioMixabilityKnown = 1
+                outputCoreAudioNonMixable = 1
+            }.coreAudioNonMixableOrNull()!!,
+        )
     }
 
     @Test

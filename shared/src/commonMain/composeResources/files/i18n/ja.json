@@ -667,6 +667,8 @@
   "settings.hifi.stream.session.integer": "{0}-bit 整数 PCM",
   "settings.hifi.stream.session.integer_container": "{0}-bit 有効整数 PCM / {1}-bit コンテナ",
   "settings.hifi.stream.session.float": "{0}-bit 浮動小数点 PCM",
+  "settings.hifi.stream.coreaudio.non_mixable": "CoreAudio 仮想 ASBD は非ミックスとして報告されています · bit-perfect 出力を証明するものではありません",
+  "settings.hifi.stream.coreaudio.mixable": "CoreAudio 仮想 ASBD はミックス可能です · DAC の物理フォーマットを証明するものではありません",
   "settings.hifi.stream.underrun.active": "ソース供給の不足を検出 · 補完 {0} フレーム（推定約 {1} ms）",
   "settings.hifi.stream.underrun.history": "ソース供給不足による補完 · {0} フレーム（推定約 {1} ms）",
   "settings.hifi.stream.underrun.note": "アプリ出力の補完量の推定値です。DAC の無音時間を測定した値ではありません。",

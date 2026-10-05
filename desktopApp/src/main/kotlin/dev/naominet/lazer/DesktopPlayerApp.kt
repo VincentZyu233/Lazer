@@ -3049,6 +3049,16 @@ private fun DesktopHiFiSection(controller: DesktopPlayerController) {
                         color = colors.onSurfaceVariant,
                     )
                 }
+                it.outputNonMixable?.let { nonMixable ->
+                    Text(
+                        tr(
+                            if (nonMixable) "settings.hifi.stream.coreaudio.non_mixable"
+                            else "settings.hifi.stream.coreaudio.mixable",
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
                 val selectionKey = when (it.formatSelection) {
                     OutputFormatSelection.SharedMix -> "settings.hifi.stream.selection.shared_mix"
                     OutputFormatSelection.ExclusiveSource -> "settings.hifi.stream.selection.exclusive_source"

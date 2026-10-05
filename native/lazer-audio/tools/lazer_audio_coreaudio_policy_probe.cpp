@@ -24,7 +24,7 @@ CoreAudioSampleRateRange rateRange(double minimumHz, double maximumHz) {
 
 CoreAudioPcmStreamTuple pcmTuple(int32_t minimumRateHz, int32_t maximumRateHz,
     int32_t channels, int32_t bits, int32_t containerBits, bool interleaved = true,
-    bool littleEndian = true, bool alignedHigh = true) {
+    bool littleEndian = true, bool alignedHigh = true, bool nonMixable = false) {
     return CoreAudioPcmStreamTuple{
         rateRange(minimumRateHz, maximumRateHz),
         channels,
@@ -35,6 +35,7 @@ CoreAudioPcmStreamTuple pcmTuple(int32_t minimumRateHz, int32_t maximumRateHz,
         littleEndian,
         bits == containerBits,
         alignedHigh,
+        nonMixable,
     };
 }
 
@@ -50,6 +51,7 @@ CoreAudioPcmStreamTuple floatTuple(int32_t minimumRateHz, int32_t maximumRateHz,
         littleEndian,
         true,
         true,
+        false,
     };
 }
 
@@ -116,6 +118,27 @@ void testExactPcmTupleMatrix() {
         check(decision.conversionReasons == CoreAudioPcmConversionNone,
             std::string(test.name) + " should not request conversion");
     }
+}
+
+void testAsbdEncodingFlagsAndNonMixableMetadata() {
+    check(coreAudioPcmEncodingFromFlags(false, true) == CoreAudioPcmEncoding::SignedInteger,
+        "signed-integer ASBD flags should map to integer PCM");
+    check(coreAudioPcmEncodingFromFlags(true, false) == CoreAudioPcmEncoding::Float32,
+        "float ASBD flags should map to float PCM");
+    check(coreAudioPcmEncodingFromFlags(false, false) == CoreAudioPcmEncoding::Unsupported,
+        "ASBD without an encoding flag should be rejected");
+    check(coreAudioPcmEncodingFromFlags(true, true) == CoreAudioPcmEncoding::Unsupported,
+        "ASBD with conflicting float and signed-integer flags should be rejected");
+
+    auto tuple = pcmTuple(48000, 48000, 2, 24, 24, true, true, true, true);
+    const auto decision = negotiateCoreAudioPcmFormat(targetFormat(48000, 2, 24),
+        knownCapabilities({rateRange(48000, 48000)}, {tuple}), true, true);
+    check(decision.kind == CoreAudioPcmDecisionKind::ExactPcmTuple,
+        "a non-mixable integer format should retain its exact PCM classification");
+    check(decision.endpoint.nonMixable,
+        "the selected tuple should report the HAL non-mixable flag");
+    check(decision.conversionReasons == CoreAudioPcmConversionNone,
+        "non-mixable metadata must not imply PCM sample conversion");
 }
 
 void testRateAndChannelConversionCandidates() {
@@ -381,6 +404,7 @@ void testStreamFormatRestoreGuard() {
 
 int main() {
     testExactPcmTupleMatrix();
+    testAsbdEncodingFlagsAndNonMixableMetadata();
     testRateAndChannelConversionCandidates();
     testUnknownAndEmptyCapabilities();
     testBitPerfectNeverFallsBack();

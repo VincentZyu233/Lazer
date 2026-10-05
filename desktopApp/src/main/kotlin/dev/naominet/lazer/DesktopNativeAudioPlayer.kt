@@ -43,11 +43,16 @@ data class LazerHiFiStreamInfo(
     val outputTelemetry: OutputTelemetrySnapshot? = null,
     val outputFormatKind: Int = LAZER_AUDIO_OUTPUT_FORMAT_PCM,
     val outputDsdRateMultiplier: Int = 0,
+    /** HAL virtual ASBD's non-mixable flag; null when this backend does not report it. */
+    val outputNonMixable: Boolean? = null,
     /** True when the most recently submitted output block contained source-starvation padding. */
     val underrunActive: Boolean = false,
     /** Cumulative device-output frames padded because the source had not reached EOF. */
     val underrunFrames: Long = 0L,
 )
+
+internal fun LazerAudioStreamInfo.coreAudioNonMixableOrNull(): Boolean? =
+    if (outputCoreAudioMixabilityKnown != 0) outputCoreAudioNonMixable != 0 else null
 
 internal val LazerHiFiStreamInfo.estimatedUnderrunMillis: Long?
     get() = sampleRate.takeIf { it > 0 }?.let {
@@ -1185,6 +1190,7 @@ internal class DesktopNativeAudioPlayer(
             outputTelemetry = info.toOutputTelemetrySnapshot(),
             outputFormatKind = info.outputFormatKind,
             outputDsdRateMultiplier = info.outputDsdRateMultiplier,
+            outputNonMixable = info.coreAudioNonMixableOrNull(),
             exclusive = info.outputExclusive != 0,
             lossless = info.lossless != 0,
             bitPerfectActive = info.bitPerfectActive != 0,

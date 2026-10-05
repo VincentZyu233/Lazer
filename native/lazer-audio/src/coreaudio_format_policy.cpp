@@ -240,6 +240,12 @@ CoreAudioPcmDecisionReason hogFailureReason(CoreAudioHogOwnership ownership) noe
 
 }  // namespace
 
+CoreAudioPcmEncoding coreAudioPcmEncodingFromFlags(bool isFloat,
+    bool isSignedInteger) noexcept {
+    if (isFloat == isSignedInteger) return CoreAudioPcmEncoding::Unsupported;
+    return isFloat ? CoreAudioPcmEncoding::Float32 : CoreAudioPcmEncoding::SignedInteger;
+}
+
 bool coreAudioStreamFormatMayRestore(const CoreAudioStreamFormatSnapshot &current,
     const CoreAudioStreamFormatSnapshot &selected, bool nominalRateWasRestored,
     double restoredNominalRateHz) noexcept {
@@ -306,6 +312,7 @@ CoreAudioPcmDecision negotiateCoreAudioPcmFormat(const TargetFormat &target,
         endpoint.littleEndian = tuple.littleEndian;
         endpoint.packed = tuple.packed;
         endpoint.alignedHigh = tuple.alignedHigh;
+        endpoint.nonMixable = tuple.nonMixable;
 
         uint32_t conversionReasons = conversionReasonsFor(normalized, endpoint);
         const bool exactEncoding = tuple.encoding == normalized.encoding;

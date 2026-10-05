@@ -163,6 +163,7 @@ internal object DesktopHiFiDiagnostics {
             put("valid_bits", bitsPerSample)
             put("container_bits", outputContainerBitsPerSample)
             put("encoding", if (outputIsFloat) "float" else "integer")
+            outputNonMixable?.let { put("coreaudio_virtual_asbd_non_mixable", it) }
             put("format_selection", formatSelection.name)
             put("bit_perfect_active", bitPerfectActive)
             put("underrun_padding_active", underrunActive)

@@ -22,11 +22,15 @@ enum class CoreAudioPcmEncoding : int32_t {
     Unsupported = 2,
 };
 
+/* ASBD PCM flags must describe exactly one supported sample encoding. */
+CoreAudioPcmEncoding coreAudioPcmEncodingFromFlags(bool isFloat, bool isSignedInteger) noexcept;
+
 /* Normalized from an AudioStreamRangedDescription. containerBitsPerSample is the storage width
  * inferred by the HAL adapter from bytes-per-frame; bitsPerChannel is the valid precision reported
  * by the stream. A non-interleaved stream reports the per-channel sample storage width. The last
- * three flags preserve ASBD details needed to decide whether the engine's little-endian, packed,
- * high-aligned PCM bytes can be submitted unchanged. */
+ * layout flags preserve ASBD details needed to decide whether the engine's little-endian, packed,
+ * high-aligned PCM bytes can be submitted unchanged. nonMixable is retained as HAL metadata; it is
+ * not a PCM sample-layout or bit-perfect guarantee. */
 struct CoreAudioPcmStreamTuple {
     CoreAudioSampleRateRange sampleRateRange{};
     int32_t channels = 0;
@@ -37,6 +41,7 @@ struct CoreAudioPcmStreamTuple {
     bool littleEndian = true;
     bool packed = true;
     bool alignedHigh = true;
+    bool nonMixable = false;
 };
 
 enum class CoreAudioHogOwnership : int32_t {
@@ -104,6 +109,7 @@ struct CoreAudioPcmEndpointTuple {
     bool littleEndian = true;
     bool packed = true;
     bool alignedHigh = true;
+    bool nonMixable = false;
 };
 
 /* The subset of AudioStreamBasicDescription that must remain unchanged before restoring a

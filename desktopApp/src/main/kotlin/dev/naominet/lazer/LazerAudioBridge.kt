@@ -279,7 +279,8 @@ internal class LazerAudioSnapshot : Structure() {
     "bitPerfectActive", "outputContainerBitsPerSample", "outputIsFloat", "outputFormatInitialized",
     "sourceFormatKind", "sourceDsdRateMultiplier", "outputFormatSelection", "outputPeakMilliDbfs",
     "limiterGainReductionMilliDb", "outputClippedSampleCount", "outputTelemetryValid",
-    "outputFormatKind", "outputDsdRateMultiplier",
+    "outputFormatKind", "outputDsdRateMultiplier", "outputCoreAudioMixabilityKnown",
+    "outputCoreAudioNonMixable",
 )
 internal class LazerAudioStreamInfo : Structure() {
     @JvmField var codec = ByteArray(64)
@@ -305,6 +306,8 @@ internal class LazerAudioStreamInfo : Structure() {
     @JvmField var outputTelemetryValid: Int = 0
     @JvmField var outputFormatKind: Int = LAZER_AUDIO_OUTPUT_FORMAT_PCM
     @JvmField var outputDsdRateMultiplier: Int = 0
+    @JvmField var outputCoreAudioMixabilityKnown: Int = 0
+    @JvmField var outputCoreAudioNonMixable: Int = 0
 
     override fun getFieldOrder(): List<String> = listOf(
         "codec", "sourceSampleRate", "sourceChannels", "sourceBitsPerSample", "sourceBitrateKbps",
@@ -312,7 +315,8 @@ internal class LazerAudioStreamInfo : Structure() {
         "bitPerfectActive", "outputContainerBitsPerSample", "outputIsFloat", "outputFormatInitialized",
         "sourceFormatKind", "sourceDsdRateMultiplier", "outputFormatSelection", "outputPeakMilliDbfs",
         "limiterGainReductionMilliDb", "outputClippedSampleCount", "outputTelemetryValid",
-        "outputFormatKind", "outputDsdRateMultiplier",
+        "outputFormatKind", "outputDsdRateMultiplier", "outputCoreAudioMixabilityKnown",
+        "outputCoreAudioNonMixable",
     )
 
     fun codecName(): String = String(codec, 0, codec.indexOfFirst { it == 0.toByte() }
@@ -364,7 +368,7 @@ internal class LazerAudioDspConfig : Structure() {
     )
 }
 
-internal const val LAZER_AUDIO_ABI_VERSION = 22
+internal const val LAZER_AUDIO_ABI_VERSION = 23
 internal const val LAZER_AUDIO_READER_IO_ERROR = -2
 internal const val LAZER_AUDIO_SOURCE_FORMAT_PCM = 0
 internal const val LAZER_AUDIO_SOURCE_FORMAT_DSD = 1

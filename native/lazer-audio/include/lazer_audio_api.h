@@ -30,7 +30,7 @@
 #define LAZER_AUDIO_CALL
 #endif
 
-#define LAZER_AUDIO_ABI_VERSION 22u
+#define LAZER_AUDIO_ABI_VERSION 23u
 
 #define LAZER_AUDIO_MAX_EQ_BANDS 32u
 
@@ -234,10 +234,14 @@ typedef struct LazerAudioStreamInfo {
     /* Append-only in ABI v17: initialized output encoding and DSD rate multiplier (0 for PCM). */
     int32_t output_format_kind;
     int32_t output_dsd_rate_multiplier;
+    /* Append-only in ABI v23: initialized CoreAudio virtual ASBD mixability metadata. A zero
+     * `output_coreaudio_mixability_known` means unavailable/not applicable. */
+    int32_t output_coreaudio_mixability_known;
+    int32_t output_coreaudio_non_mixable;
 } LazerAudioStreamInfo;
 
 #if defined(__cplusplus) && defined(_WIN64)
-static_assert(sizeof(LazerAudioStreamInfo) == 160, "update the JNA stream-info layout with the native ABI");
+static_assert(sizeof(LazerAudioStreamInfo) == 168, "update the JNA stream-info layout with the native ABI");
 #endif
 
 typedef struct LazerAudioSnapshot {
