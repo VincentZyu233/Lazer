@@ -35,6 +35,16 @@ esac
 prefix_parent="$(dirname "$1")"
 mkdir -p "$prefix_parent"
 prefix="$(cd "$prefix_parent" && pwd)/$(basename "$1")"
+ffmpeg_lib="$prefix/lib"
+if [[ -f "$ffmpeg_lib/libavformat.a" &&
+    -f "$ffmpeg_lib/libavcodec.a" &&
+    -f "$ffmpeg_lib/libavutil.a" &&
+    -f "$ffmpeg_lib/libswresample.a" &&
+    -f "$ffmpeg_lib/pkgconfig/libavformat.pc" ]]; then
+    echo "Using the existing Android FFmpeg static SDK at $prefix."
+    exit 0
+fi
+
 ndk_root="${2:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
 if [[ -z "$ndk_root" && -n "${ANDROID_HOME:-}" ]]; then
     ndk_root="$ANDROID_HOME/ndk/$NDK_REVISION"

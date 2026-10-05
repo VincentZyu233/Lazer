@@ -123,32 +123,22 @@ val androidDsdNdkRoot = providers.gradleProperty("lazerAndroidNdkRoot")
         .map { "$it/ndk/30.0.16248370" })
     .orElse(providers.environmentVariable("ANDROID_SDK_ROOT")
         .map { "$it/ndk/30.0.16248370" })
+    .orElse("")
 val buildAndroidDsdFfmpeg = tasks.register<Exec>("buildAndroidDsdFfmpeg") {
     group = "build"
     description = "Builds the pinned static DSD-capable FFmpeg SDK for the selected Android ABI."
     val buildScript = rootProject.file("native/lazer-audio/tools/build_android_dsd_ffmpeg.sh")
     inputs.file(buildScript)
+    inputs.property("androidDsdAbi", androidDsdAbi)
+    inputs.property("androidDsdNdkRoot", androidDsdNdkRoot)
     outputs.dir(androidDsdFfmpegRoot)
-    onlyIf {
-        val ffmpegLib = File(androidDsdFfmpegRoot.get(), "lib")
-        listOf("avformat", "avcodec", "avutil", "swresample")
-            .any { !File(ffmpegLib, "lib$it.a").isFile } ||
-            !File(ffmpegLib, "pkgconfig/libavformat.pc").isFile
-    }
-    doFirst {
-        val ndkRoot = androidDsdNdkRoot.orNull
-            ?: throw GradleException(
-                "Android DSD support needs NDK 30.0.16248370. Set ANDROID_NDK_HOME " +
-                    "or -PlazerAndroidNdkRoot=<NDK path>."
-            )
-        commandLine(
-            "bash",
-            buildScript.absolutePath,
-            androidDsdFfmpegRoot.get(),
-            ndkRoot,
-            androidDsdAbi.get(),
-        )
-    }
+    commandLine(
+        "bash",
+        buildScript.absolutePath,
+        androidDsdFfmpegRoot.get(),
+        androidDsdNdkRoot.get(),
+        androidDsdAbi.get(),
+    )
 }
 
 val androidDsdInstrumentationAssets =
