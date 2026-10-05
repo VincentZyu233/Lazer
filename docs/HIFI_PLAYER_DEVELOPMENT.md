@@ -7,6 +7,8 @@
 > 2026-10-05 Native DSD payload 回归：复核发现 `AudioSource::emitAVFrame` 曾把“未配置 PCM 重采样器”一律视为跳过，因此虽然 Native DSD 会话可打开，raw DSD 解码帧仍被丢弃，输出可能只有 `0x69` idle。入口条件已修正，并把 fake-output 引擎探针改为等到捕获已知合成 DSF 的 U32_BE 声道样本；这避免只凭“写出过字节”误判成功。Linux ALSA 输出探针现会用测试专属 ALSA `null` 参数协商检查 DSD64–1024、单/双声道的精确 DSD 字节时钟和五种 U8/U16/U32 端序格式，并确认公共 Native DSD API 仍拒绝 `null`/`plughw:`；null 只验证 ALSA 参数协商，不验证 `hw:` 驱动或 DAC。Windows Release 完整 CTest 15/15 通过；Actions #37241111573 对上一提交的 Linux job 已通过，但本次帧输出修复及 ALSA 参数矩阵仍待新 CI 确认。
 > 2026-10-05 Native DSD ALSA 生命周期回归：在测试构建增加只接受 `lazer-test:alsa-null` 的内部路由 token，使 Linux 探针可通过真实 `AlsaOutput` 对象验证原生 DSD start/write/readiness/queue/drain/stop-resume/reset/close；普通 `null`、`plughw:` 和生产构建仍拒绝 DSD 插件路由。ALSA 恢复策略现由 DoP 与 Native DSD 共用可注入的 direct-DSD 策略，确定性探针覆盖 XRUN 终止、挂起恢复保留队列、终止错误及重试上限后不 prepare/重放。Actions #37242736580 的上一提交已通过 Linux 原生构建和 14 项 CTest（当时仅包含参数矩阵）；这次输出对象生命周期和恢复策略增量仍待新 CI。`null` 会丢弃或快速消费样本，这些检查不证明驱动/DAC 识别或数字回采。
 
+> 2026-10-05 iOS 模拟器启动回归：Actions #37244216465 的诊断包确认，应用启动时严格翻译目录校验因 `ja.json` 与 `zh-Hant.json` 漏掉 11 个 Native DSD 文案键而抛出异常，并非音频输出或模拟器故障。当前修复已补齐两种语言，并将内置目录加载校验从 JVM 专属测试移入 `commonTest`，以便 iOS 模拟器测试执行；本机 `:shared:jvmTest` 已通过。修复后的 `:shared:iosSimulatorArm64Test` 和应用启动 smoke test 仍待下一轮 macOS Actions 确认。
+
 ## 1. 目标与完成标准
 
 Lazer 的目标是成为一个跨平台、对音频链路诚实且易用的播放器：用户能管理音乐、稳定地播放整张专辑、选择 USB DAC 或网络播放设备，并准确看到文件格式、实际输出格式和音频处理中每一步发生了什么。和 foobar2000 看齐的重点是**格式与设备可控、播放稳定、队列与媒体库可靠、状态可验证**，不是仅在设置页堆格式名称。
