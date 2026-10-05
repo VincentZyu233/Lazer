@@ -56,7 +56,7 @@ class DesktopLocalAudioLibraryTest {
             assertFalse(refreshed.entries.single().metadataNeedsRefresh)
 
             val header = Files.readAllLines(index).first()
-            assertTrue(header.contains("\"schemaVersion\":7"))
+            assertTrue(header.contains("\"schemaVersion\":8"))
             assertEquals(tags, DesktopLocalAudioLibraryStore(index).load().single().replayGain)
             assertFalse(DesktopLocalAudioLibraryStore(index).load().single().metadataNeedsRefresh)
         } finally {
@@ -65,7 +65,7 @@ class DesktopLocalAudioLibraryTest {
     }
 
     @Test
-    fun `migrates schema two replaygain entries to current schema without rereading`() {
+    fun `schema two rereads APE-capable metadata and preserves parsed ReplayGain`() {
         val directory = Files.createTempDirectory("local-library-schema-two")
         try {
             val root = Files.createDirectory(directory.resolve("music"))
@@ -88,30 +88,32 @@ class DesktopLocalAudioLibraryTest {
             }.toString()
             Files.writeString(index, "$oldHeader\n$oldEntry\n")
             val metadataReads = AtomicInteger()
+            val tags = DesktopReplayGainTags(-5.0, 0.9, -6.0, 0.95)
             val store = DesktopLocalAudioLibraryStore(
                 indexPath = index,
                 metadataReader = {
                     metadataReads.incrementAndGet()
-                    DesktopLocalAudioMetadata(title = "Unexpected reread")
+                    DesktopLocalAudioMetadata(title = "Refreshed FLAC", replayGain = tags)
                 },
                 artworkWriter = { null },
             )
 
             val loaded = store.load().single()
             assertEquals(DesktopReplayGainTags(-5.0, 0.9, -6.0, 0.95), loaded.replayGain)
-            assertFalse(loaded.metadataNeedsRefresh)
+            assertTrue(loaded.metadataNeedsRefresh)
             val migrated = store.scanAndCommit(listOf(root), previousEntries = listOf(loaded))
-            assertEquals(1, migrated.reusedMetadata)
-            assertEquals(0, metadataReads.get())
-            assertEquals(loaded.replayGain, migrated.entries.single().replayGain)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":7"))
+            assertEquals(0, migrated.reusedMetadata)
+            assertEquals(1, metadataReads.get())
+            assertEquals("Refreshed FLAC", migrated.entries.single().title)
+            assertEquals(tags, migrated.entries.single().replayGain)
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":8"))
         } finally {
             directory.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `schema four rereads only DSD metadata for artwork before one-time current schema migration`() {
+    fun `schema four rereads every APE-capable format before writing current schema`() {
         val directory = Files.createTempDirectory("local-library-dsd-id3-migration")
         try {
             val root = Files.createDirectory(directory.resolve("music"))
@@ -149,27 +151,27 @@ class DesktopLocalAudioLibraryTest {
             val loaded = store.load()
             assertTrue(loaded.single { it.absolutePath.endsWith(".dsf") }.metadataNeedsRefresh)
             assertTrue(loaded.single { it.absolutePath.endsWith(".dff") }.metadataNeedsRefresh)
-            assertFalse(loaded.single { it.absolutePath.endsWith(".flac") }.metadataNeedsRefresh)
+            assertTrue(loaded.single { it.absolutePath.endsWith(".flac") }.metadataNeedsRefresh)
 
             val migrated = store.scanAndCommit(listOf(root), previousEntries = loaded)
-            assertEquals(2, metadataReads.get())
-            assertEquals(1, migrated.reusedMetadata)
+            assertEquals(3, metadataReads.get())
+            assertEquals(0, migrated.reusedMetadata)
             assertEquals("Refreshed dsf", migrated.entries.single { it.absolutePath.endsWith(".dsf") }.title)
             assertEquals("Refreshed dff", migrated.entries.single { it.absolutePath.endsWith(".dff") }.title)
-            assertEquals("Cached PCM title", migrated.entries.single { it.absolutePath.endsWith(".flac") }.title)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":7"))
+            assertEquals("Refreshed flac", migrated.entries.single { it.absolutePath.endsWith(".flac") }.title)
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":8"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
             store.scanAndCommit(listOf(root), previousEntries = migratedEntries)
-            assertEquals(2, metadataReads.get())
+            assertEquals(3, metadataReads.get())
         } finally {
             directory.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `schema five rereads only WAV metadata for ID3 artwork before one-time schema seven migration`() {
+    fun `schema five rereads every APE-capable format before writing current schema`() {
         val directory = Files.createTempDirectory("local-library-wave-id3-migration")
         try {
             val root = Files.createDirectory(directory.resolve("music"))
@@ -205,28 +207,28 @@ class DesktopLocalAudioLibraryTest {
             )
             val loaded = store.load()
             assertTrue(loaded.single { it.absolutePath.endsWith(".wav") }.metadataNeedsRefresh)
-            assertFalse(loaded.single { it.absolutePath.endsWith(".flac") }.metadataNeedsRefresh)
-            assertFalse(loaded.single { it.absolutePath.endsWith(".dsf") }.metadataNeedsRefresh)
+            assertTrue(loaded.single { it.absolutePath.endsWith(".flac") }.metadataNeedsRefresh)
+            assertTrue(loaded.single { it.absolutePath.endsWith(".dsf") }.metadataNeedsRefresh)
 
             val migrated = store.scanAndCommit(listOf(root), previousEntries = loaded)
-            assertEquals(1, metadataReads.get())
-            assertEquals(2, migrated.reusedMetadata)
+            assertEquals(3, metadataReads.get())
+            assertEquals(0, migrated.reusedMetadata)
             assertEquals("Refreshed wav", migrated.entries.single { it.absolutePath.endsWith(".wav") }.title)
-            assertEquals("Cached FLAC title", migrated.entries.single { it.absolutePath.endsWith(".flac") }.title)
-            assertEquals("Cached DSD title", migrated.entries.single { it.absolutePath.endsWith(".dsf") }.title)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":7"))
+            assertEquals("Refreshed flac", migrated.entries.single { it.absolutePath.endsWith(".flac") }.title)
+            assertEquals("Refreshed dsf", migrated.entries.single { it.absolutePath.endsWith(".dsf") }.title)
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":8"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
             store.scanAndCommit(listOf(root), previousEntries = migratedEntries)
-            assertEquals(1, metadataReads.get())
+            assertEquals(3, metadataReads.get())
         } finally {
             directory.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `schema six rereads only WAV metadata for ReplayGain and retains other format caches`() {
+    fun `schema six rereads every APE-capable format and saves refreshed ReplayGain`() {
         val directory = Files.createTempDirectory("local-library-wave-replaygain-migration")
         try {
             val root = Files.createDirectory(directory.resolve("music"))
@@ -277,29 +279,84 @@ class DesktopLocalAudioLibraryTest {
             )
             val loaded = store.load()
             assertTrue(loaded.single { it.absolutePath.endsWith(".wav") }.metadataNeedsRefresh)
-            assertFalse(loaded.single { it.absolutePath.endsWith(".flac") }.metadataNeedsRefresh)
-            assertFalse(loaded.single { it.absolutePath.endsWith(".dsf") }.metadataNeedsRefresh)
+            assertTrue(loaded.single { it.absolutePath.endsWith(".flac") }.metadataNeedsRefresh)
+            assertTrue(loaded.single { it.absolutePath.endsWith(".dsf") }.metadataNeedsRefresh)
 
             val migrated = store.scanAndCommit(listOf(root), previousEntries = loaded)
-            assertEquals(listOf("wav"), metadataReads)
-            assertEquals(2, migrated.reusedMetadata)
+            assertEquals(listOf("dsf", "flac", "wav"), metadataReads.sorted())
+            assertEquals(0, migrated.reusedMetadata)
             val refreshedWav = migrated.entries.single { it.absolutePath.endsWith(".wav") }
             val cachedFlac = migrated.entries.single { it.absolutePath.endsWith(".flac") }
             val cachedDsd = migrated.entries.single { it.absolutePath.endsWith(".dsf") }
             assertEquals("Refreshed WAV title", refreshedWav.title)
             assertEquals(refreshedTags, refreshedWav.replayGain)
-            assertEquals("Cached FLAC title", cachedFlac.title)
-            assertEquals("cached:Cached FLAC title", cachedFlac.coverUrl)
-            assertEquals(DesktopReplayGainTags(-2.0, 0.8, -3.0, 0.9), cachedFlac.replayGain)
-            assertEquals("Cached DSD title", cachedDsd.title)
-            assertEquals("cached:Cached DSD title", cachedDsd.coverUrl)
-            assertEquals(DesktopReplayGainTags(-3.0, 0.8, -4.0, 0.9), cachedDsd.replayGain)
-            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":7"))
+            assertEquals("Refreshed WAV title", cachedFlac.title)
+            assertEquals("Refreshed WAV title", cachedDsd.title)
+            assertEquals(refreshedTags, cachedFlac.replayGain)
+            assertEquals(refreshedTags, cachedDsd.replayGain)
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":8"))
 
             val migratedEntries = store.load()
             assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
             store.scanAndCommit(listOf(root), previousEntries = migratedEntries)
-            assertEquals(listOf("wav"), metadataReads)
+            assertEquals(listOf("dsf", "flac", "wav"), metadataReads.sorted())
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `schema seven refreshes cached metadata once for every APEv2-supported format`() {
+        val directory = Files.createTempDirectory("local-library-ape-v2-migration")
+        try {
+            val root = Files.createDirectory(directory.resolve("music"))
+            val paths = listOf("wav", "flac", "dsf", "dff").map { extension ->
+                Files.write(root.resolve("track.$extension"), byteArrayOf(1, 2, 3))
+            }
+            val index = directory.resolve("index.jsonl")
+            val oldEntries = paths.mapIndexed { position, path ->
+                buildJsonObject {
+                    put("path", path.toAbsolutePath().normalize().toString())
+                    put("size", Files.size(path))
+                    put("modified", Files.getLastModifiedTime(path).toMillis())
+                    put("title", "Cached $position")
+                    put("artist", "Cached artist")
+                    put("album", "Cached album")
+                    put("duration", 1_000L)
+                    put("cover", "")
+                    put("cueSheetPath", "")
+                    put("cueTrackNumber", kotlinx.serialization.json.JsonNull)
+                    put("cueStartFrame75", kotlinx.serialization.json.JsonNull)
+                    put("cueEndFrame75", kotlinx.serialization.json.JsonNull)
+                }.toString()
+            }
+            Files.writeString(
+                index,
+                "${buildJsonObject { put("schemaVersion", 7) }}\n${oldEntries.joinToString("\n")}\n",
+            )
+
+            val metadataReads = mutableListOf<String>()
+            val store = DesktopLocalAudioLibraryStore(
+                indexPath = index,
+                metadataReader = { file ->
+                    metadataReads += file.extension.lowercase()
+                    DesktopLocalAudioMetadata(title = "APE-aware ${file.extension.lowercase()}")
+                },
+                artworkWriter = { null },
+            )
+            val loaded = store.load()
+            assertTrue(loaded.all { it.metadataNeedsRefresh })
+
+            val migrated = store.scanAndCommit(listOf(root), previousEntries = loaded)
+            assertEquals(listOf("dff", "dsf", "flac", "wav"), metadataReads.sorted())
+            assertEquals(0, migrated.reusedMetadata)
+            assertTrue(migrated.entries.all { it.title == "APE-aware ${it.absolutePath.substringAfterLast('.')}" })
+            assertTrue(Files.readAllLines(index).first().contains("\"schemaVersion\":8"))
+
+            val migratedEntries = store.load()
+            assertTrue(migratedEntries.none { it.metadataNeedsRefresh })
+            store.scanAndCommit(listOf(root), previousEntries = migratedEntries)
+            assertEquals(4, metadataReads.size)
         } finally {
             directory.toFile().deleteRecursively()
         }

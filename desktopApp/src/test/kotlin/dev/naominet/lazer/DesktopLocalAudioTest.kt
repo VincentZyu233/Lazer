@@ -97,6 +97,107 @@ class DesktopLocalAudioTest {
     }
 
     @Test
+    fun `reads trailing APEv2 tags as metadata fallback for all supported local formats`() {
+        val image = pngFixture()
+        val apeTag = apeV2Tag(
+            items = listOf(
+                apeTextItem("TITLE", "APE 标题"),
+                apeTextItem("ARTIST", "\u0000APE 艺人"),
+                apeTextItem("ALBUM", "APE 专辑"),
+                apeTextItem("REPLAYGAIN_TRACK_GAIN", "-7.25 dB"),
+                apeTextItem("REPLAYGAIN_TRACK_PEAK", "0.91"),
+                apeBinaryItem("Cover Art (Front)", "cover.png".toByteArray() + byteArrayOf(0) + image),
+            ),
+            headerPresent = true,
+        )
+        val fixtures = listOf(
+            ".wav" to waveWithId3Tags(id3Tag = null),
+            ".flac" to flacWithVorbisComments(emptyList()),
+            ".dsf" to dsfFixture(sampleRate = 2_822_400, sampleCount = 28_224),
+            ".dff" to dffFixture(dst = false),
+        )
+        val paths = fixtures.map { (extension, bytes) ->
+            Files.createTempFile("local-audio-ape-v2", extension).also { path ->
+                Files.write(path, bytes + apeTag)
+            }
+        }
+        try {
+            paths.forEach { path ->
+                val metadata = readLocalAudioMetadata(path.toFile())
+                assertEquals("APE 标题", metadata?.title)
+                assertEquals("APE 艺人", metadata?.artist)
+                assertEquals("APE 专辑", metadata?.album)
+                assertEquals(3L, metadata?.embeddedArtwork?.pictureType)
+                assertEquals("image/png", metadata?.embeddedArtwork?.mimeType)
+                assertTrue(metadata?.embeddedArtwork?.data?.contentEquals(image) == true)
+                assertEquals(DesktopReplayGainTags(-7.25, 0.91, null, null), metadata?.replayGain)
+                assertTrue((metadata?.durationMillis ?: 0L) > 0L)
+            }
+        } finally {
+            paths.forEach(Files::deleteIfExists)
+        }
+    }
+
+    @Test
+    fun `native metadata wins over APE fallback and APE can follow ID3v1`() {
+        val wavePath = Files.createTempFile("local-audio-ape-precedence", ".wav")
+        val id3v1Path = Files.createTempFile("local-audio-ape-id3v1", ".wav")
+        try {
+            val nativeId3 = id3v24WithExtraFrames(
+                tags = listOf("TIT2" to "Native ID3 title"),
+                extraFrames = listOf("TXXX" to id3UserTextFrame(3, "REPLAYGAIN_TRACK_GAIN", "-2 dB")),
+            )
+            val apeTag = apeV2Tag(
+                items = listOf(
+                    apeTextItem("TITLE", "APE title"),
+                    apeTextItem("ARTIST", "APE artist"),
+                    apeTextItem("REPLAYGAIN_TRACK_GAIN", "-8 dB"),
+                    apeTextItem("REPLAYGAIN_TRACK_PEAK", "0.8"),
+                ),
+            )
+            Files.write(wavePath, waveWithId3Tags(nativeId3) + apeTag)
+            val metadata = readLocalAudioMetadata(wavePath.toFile())
+            assertEquals("Native ID3 title", metadata?.title)
+            assertEquals("APE artist", metadata?.artist)
+            assertEquals(DesktopReplayGainTags(-2.0, 0.8, null, null), metadata?.replayGain)
+
+            val id3v1 = ByteArray(128).apply { "TAG".toByteArray(Charsets.US_ASCII).copyInto(this) }
+            Files.write(id3v1Path, waveWithId3Tags(id3Tag = null) + apeTag + id3v1)
+            assertEquals("APE title", readLocalAudioMetadata(id3v1Path.toFile())?.title)
+        } finally {
+            Files.deleteIfExists(wavePath)
+            Files.deleteIfExists(id3v1Path)
+        }
+    }
+
+    @Test
+    fun `invalid APEv2 trailer is ignored without losing container metadata or duration`() {
+        val path = Files.createTempFile("local-audio-ape-v2-invalid", ".wav")
+        try {
+            val validTag = apeV2Tag(listOf(apeTextItem("TITLE", "Must not appear")))
+            val badVersion = validTag.copyOf().apply {
+                this[size - 32 + 8] = 0xD1.toByte()
+            }
+            Files.write(path, waveWithId3Tags(id3Tag = null, includeInfoTags = true) + badVersion)
+            val metadata = readLocalAudioMetadata(path.toFile())
+            assertEquals("WAV Title", metadata?.title)
+            assertEquals("WAV Artist", metadata?.artist)
+            assertEquals(1_000L, metadata?.durationMillis)
+
+            val badSize = validTag.copyOf().apply {
+                val footerOffset = size - 32
+                repeat(4) { this[footerOffset + 12 + it] = 0xff.toByte() }
+            }
+            Files.write(path, waveWithId3Tags(id3Tag = null) + badSize)
+            val stillReadable = readLocalAudioMetadata(path.toFile())
+            assertNull(stillReadable?.title)
+            assertEquals(1_000L, stillReadable?.durationMillis)
+        } finally {
+            Files.deleteIfExists(path)
+        }
+    }
+
+    @Test
     fun `reads FLAC duration from STREAMINFO`() {
         val path = Files.createTempFile("local-audio-streaminfo", ".flac")
         try {
@@ -814,6 +915,43 @@ class DesktopLocalAudioTest {
         write((value ushr 8) and 0xff)
         write((value ushr 16) and 0xff)
         write((value ushr 24) and 0xff)
+    }
+
+    private data class ApeFixtureItem(val key: String, val value: ByteArray, val flags: Int)
+
+    private fun apeTextItem(key: String, value: String): ApeFixtureItem =
+        ApeFixtureItem(key, value.toByteArray(Charsets.UTF_8), flags = 0)
+
+    private fun apeBinaryItem(key: String, value: ByteArray): ApeFixtureItem =
+        ApeFixtureItem(key, value, flags = 2)
+
+    private fun apeV2Tag(items: List<ApeFixtureItem>, headerPresent: Boolean = false): ByteArray {
+        val itemData = ByteArrayOutputStream().apply {
+            items.forEach { item ->
+                val key = item.key.toByteArray(Charsets.US_ASCII)
+                writeUInt32LittleEndian(item.value.size)
+                writeUInt32LittleEndian(item.flags)
+                write(key)
+                write(0)
+                write(item.value)
+            }
+        }.toByteArray()
+        val tagSize = itemData.size + 32
+        fun footer(isHeader: Boolean): ByteArray = ByteArrayOutputStream().apply {
+            writeAscii("APETAGEX")
+            writeUInt32LittleEndian(2_000)
+            writeUInt32LittleEndian(tagSize)
+            writeUInt32LittleEndian(items.size)
+            val flags = (if (headerPresent) Int.MIN_VALUE else 0) or
+                (if (isHeader) 0x2000_0000 else 0)
+            writeUInt32LittleEndian(flags)
+            write(ByteArray(8))
+        }.toByteArray()
+        return ByteArrayOutputStream().apply {
+            if (headerPresent) write(footer(isHeader = true))
+            write(itemData)
+            write(footer(isHeader = false))
+        }.toByteArray()
     }
 
     private fun ByteArrayOutputStream.writeUInt32BigEndian(value: Int) {

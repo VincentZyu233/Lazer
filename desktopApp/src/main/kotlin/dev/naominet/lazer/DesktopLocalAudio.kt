@@ -2,6 +2,8 @@ package dev.naominet.lazer
 
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
@@ -34,7 +36,13 @@ internal data class DesktopEmbeddedArtwork(
 private const val MAX_LOCAL_TAG_BYTES = 1_048_576
 private const val MAX_LOCAL_ARTWORK_BYTES = 12 * 1_048_576
 private const val MAX_LOCAL_ID3_TAG_BYTES = MAX_LOCAL_ARTWORK_BYTES + 4 * MAX_LOCAL_TAG_BYTES + 64 * 1_024
+private const val MAX_LOCAL_APE_TAG_BYTES = MAX_LOCAL_ARTWORK_BYTES + 4 * MAX_LOCAL_TAG_BYTES + 64 * 1_024
+private const val MAX_LOCAL_APE_ITEM_COUNT = 10_000L
 private const val MAX_LOCAL_ARTWORK_CACHE_BYTES = 256L * 1_048_576
+private const val APE_FOOTER_SIZE = 32L
+private const val APE_FLAG_HEADER_PRESENT = 0x8000_0000L
+private const val APE_FLAG_NO_FOOTER = 0x4000_0000L
+private const val APE_FLAG_IS_HEADER = 0x2000_0000L
 
 internal fun isSupportedLocalAudioFile(file: File): Boolean =
     file.extension.lowercase() in supportedLocalAudioExtensions
@@ -81,15 +89,214 @@ private class LocalFileSeekableAudioSource(
 /** Reads basic display tags and duration without decoding the audio payload. */
 internal fun readLocalAudioMetadata(file: File): DesktopLocalAudioMetadata? = runCatching {
     RandomAccessFile(file, "r").use { input ->
-        when (file.extension.lowercase()) {
+        val container = when (file.extension.lowercase()) {
             "wav" -> readWaveMetadata(input)
             "flac" -> readFlacMetadata(input)
             "dsf" -> readDsfMetadata(input)
             "dff" -> readDffMetadata(input)
             else -> null
         }
+        container?.withApeV2Fallback(readApeV2Tags(input))
     }
 }.getOrNull()
+
+private fun DesktopLocalAudioMetadata.withApeV2Fallback(ape: ParsedApeV2Tag?): DesktopLocalAudioMetadata {
+    if (ape == null) return this
+    val currentGain = replayGain
+    val apeGain = ape.replayGain
+    val mergedGain = if (currentGain == null && apeGain == null) {
+        null
+    } else {
+        DesktopReplayGainTags(
+            trackGainDb = currentGain?.trackGainDb ?: apeGain?.trackGainDb,
+            trackPeak = currentGain?.trackPeak ?: apeGain?.trackPeak,
+            albumGainDb = currentGain?.albumGainDb ?: apeGain?.albumGainDb,
+            albumPeak = currentGain?.albumPeak ?: apeGain?.albumPeak,
+        )
+    }
+    return copy(
+        title = title?.takeIf(String::isNotBlank) ?: ape.title,
+        artist = artist?.takeIf(String::isNotBlank) ?: ape.artist,
+        album = album?.takeIf(String::isNotBlank) ?: ape.album,
+        embeddedArtwork = embeddedArtwork ?: ape.artwork,
+        replayGain = mergedGain,
+    )
+}
+
+private data class ParsedApeV2Tag(
+    val title: String? = null,
+    val artist: String? = null,
+    val album: String? = null,
+    val artwork: DesktopEmbeddedArtwork? = null,
+    val replayGain: DesktopReplayGainTags? = null,
+)
+
+/** Reads only a bounded APEv2 footer at EOF or immediately before an ID3v1 trailer. */
+private fun readApeV2Tags(input: RandomAccessFile): ParsedApeV2Tag? = runCatching {
+    val fileLength = input.length()
+    if (fileLength < APE_FOOTER_SIZE) return@runCatching null
+
+    val footerOffsets = buildList {
+        add(fileLength - APE_FOOTER_SIZE)
+        if (fileLength >= 128L + APE_FOOTER_SIZE) {
+            input.seek(fileLength - 128L)
+            if (input.readAscii(3) == "TAG") add(fileLength - 128L - APE_FOOTER_SIZE)
+        }
+    }
+    footerOffsets.firstNotNullOfOrNull { footerOffset ->
+        runCatching { readApeV2TagAtFooter(input, fileLength, footerOffset) }.getOrNull()
+    }
+}.getOrNull()
+
+private fun readApeV2TagAtFooter(
+    input: RandomAccessFile,
+    fileLength: Long,
+    footerOffset: Long,
+): ParsedApeV2Tag? {
+    if (footerOffset < 0L || footerOffset > fileLength - APE_FOOTER_SIZE) return null
+    input.seek(footerOffset)
+    if (input.readAscii(8) != "APETAGEX") return null
+    val version = input.readUInt32LittleEndian()
+    val tagSize = input.readUInt32LittleEndian()
+    val itemCount = input.readUInt32LittleEndian()
+    val footerFlags = input.readUInt32LittleEndian()
+    input.readUInt64LittleEndian() // Reserved.
+    val headerPresent = footerFlags and APE_FLAG_HEADER_PRESENT != 0L
+    if (version != 2_000L || tagSize !in APE_FOOTER_SIZE..MAX_LOCAL_APE_TAG_BYTES.toLong() ||
+        itemCount !in 1L..MAX_LOCAL_APE_ITEM_COUNT || footerFlags and APE_FLAG_NO_FOOTER != 0L ||
+        footerFlags and APE_FLAG_IS_HEADER != 0L
+    ) {
+        return null
+    }
+
+    // APEv2 tagSize includes item bytes and the footer, but excludes the optional header.
+    val itemStart = footerOffset + APE_FOOTER_SIZE - tagSize
+    val itemEnd = footerOffset
+    if (itemStart < 0L || itemStart > itemEnd) return null
+    if (headerPresent) {
+        val headerOffset = itemStart - APE_FOOTER_SIZE
+        if (headerOffset < 0L) return null
+        input.seek(headerOffset)
+        if (input.readAscii(8) != "APETAGEX" || input.readUInt32LittleEndian() != version ||
+            input.readUInt32LittleEndian() != tagSize || input.readUInt32LittleEndian() != itemCount
+        ) {
+            return null
+        }
+        val headerFlags = input.readUInt32LittleEndian()
+        if (headerFlags and (APE_FLAG_HEADER_PRESENT or APE_FLAG_NO_FOOTER or APE_FLAG_IS_HEADER) !=
+            (APE_FLAG_HEADER_PRESENT or APE_FLAG_IS_HEADER)
+        ) {
+            return null
+        }
+        input.readUInt64LittleEndian() // Reserved.
+    }
+
+    val displayTags = linkedMapOf<String, String>()
+    val replayGainValues = linkedMapOf<String, Double>()
+    var artwork: DesktopEmbeddedArtwork? = null
+    var cursor = itemStart
+    repeat(itemCount.toInt()) {
+        if (itemEnd - cursor < 11L) return null
+        input.seek(cursor)
+        val valueLength = input.readUInt32LittleEndian()
+        val itemFlags = input.readUInt32LittleEndian()
+        val keyStart = cursor + 8L
+        val keyLimit = keyStart + minOf(itemEnd - keyStart, 256L)
+        val keyBytes = ByteArray(255)
+        var keyLength = 0
+        var hasKeyTerminator = false
+        while (input.filePointer < keyLimit) {
+            val next = input.readUnsignedByte()
+            if (next == 0) {
+                hasKeyTerminator = true
+                break
+            }
+            if (next !in 0x20..0x7e) return null
+            if (keyLength == keyBytes.size) return null
+            keyBytes[keyLength++] = next.toByte()
+        }
+        if (!hasKeyTerminator || keyLength !in 2..255) return null
+        val key = String(keyBytes, 0, keyLength, Charsets.US_ASCII).uppercase()
+        val valueStart = input.filePointer
+        if (valueLength > itemEnd - valueStart) return null
+        val itemType = (itemFlags ushr 1) and 0x3L
+        val textKey = key in apeDisplayTagKeys || key in flacReplayGainTagKeys
+        if (itemType == 0L && textKey && valueLength in 1L..MAX_LOCAL_TAG_BYTES.toLong()) {
+            val valueBytes = ByteArray(valueLength.toInt())
+            input.readFully(valueBytes)
+            val value = decodeApeTextValue(valueBytes)
+            if (value != null) {
+                when (key) {
+                    "TITLE" -> displayTags.putIfAbsent(key, value)
+                    "ARTIST" -> displayTags.putIfAbsent(key, value)
+                    "ALBUM" -> displayTags.putIfAbsent(key, value)
+                    else -> if (key !in replayGainValues) {
+                        parseReplayGainValue(key, value)?.let { replayGainValues[key] = it }
+                    }
+                }
+            }
+        } else if (key == "COVER ART (FRONT)" && itemType == 1L && artwork == null &&
+            valueLength in 2L..(MAX_LOCAL_ARTWORK_BYTES + MAX_LOCAL_TAG_BYTES).toLong()
+        ) {
+            val valueBytes = ByteArray(valueLength.toInt())
+            input.readFully(valueBytes)
+            artwork = readApeFrontArtwork(valueBytes)
+        }
+        cursor = valueStart + valueLength
+    }
+
+    val replayGain = replayGainValues.toDesktopReplayGainTags()
+    return ParsedApeV2Tag(
+        title = displayTags["TITLE"],
+        artist = displayTags["ARTIST"],
+        album = displayTags["ALBUM"],
+        artwork = artwork,
+        replayGain = replayGain,
+    ).takeIf { it.title != null || it.artist != null || it.album != null || it.artwork != null || it.replayGain != null }
+}
+
+private val apeDisplayTagKeys = setOf("TITLE", "ARTIST", "ALBUM")
+
+private fun decodeApeTextValue(bytes: ByteArray): String? {
+    var start = 0
+    while (start <= bytes.size) {
+        val end = bytes.indexOfZero(start, bytes.size) ?: bytes.size
+        if (end > start) {
+            val decoded = runCatching {
+                Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes, start, end - start))
+                    .toString()
+                    .trim()
+            }.getOrNull()
+            if (!decoded.isNullOrBlank()) return decoded
+        }
+        if (end == bytes.size) return null
+        start = end + 1
+    }
+    return null
+}
+
+private fun readApeFrontArtwork(value: ByteArray): DesktopEmbeddedArtwork? {
+    val filenameEnd = value.indexOfZero(0, value.size) ?: return null
+    if (filenameEnd !in 1..MAX_LOCAL_TAG_BYTES) return null
+    val imageOffset = filenameEnd + 1
+    val imageSize = value.size - imageOffset
+    if (imageSize !in 1..MAX_LOCAL_ARTWORK_BYTES) return null
+    val mimeType = when {
+        imageSize >= 8 && value.copyOfRange(imageOffset, imageOffset + 8)
+            .contentEquals(byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) -> "image/png"
+        imageSize >= 3 && value[imageOffset] == 0xff.toByte() && value[imageOffset + 1] == 0xd8.toByte() &&
+            value[imageOffset + 2] == 0xff.toByte() -> "image/jpeg"
+        imageSize >= 6 && String(value, imageOffset, 6, Charsets.US_ASCII) in setOf("GIF87a", "GIF89a") -> "image/gif"
+        imageSize >= 12 && String(value, imageOffset + 8, 4, Charsets.US_ASCII) == "WEBP" &&
+            String(value, imageOffset, 4, Charsets.US_ASCII) == "RIFF" -> "image/webp"
+        else -> return null
+    }
+    if (mimeType !in supportedFlacArtworkMimeTypes) return null
+    return DesktopEmbeddedArtwork(mimeType, 3L, value.copyOfRange(imageOffset, value.size))
+}
 
 /** Kept as a small helper for callers that only need a duration. */
 internal fun readLocalAudioDurationMillis(file: File): Long? =
