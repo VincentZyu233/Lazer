@@ -27,6 +27,8 @@ jobs:
       # setup-gradle owns the Gradle wrapper, dependency and project build caches.
       # Do not cache generated APKs or build directories across commits.
       - uses: gradle/actions/setup-gradle@v6
+      - name: Test Android unit suite
+        run: ./gradlew :androidApp:testDebugUnitTest --stacktrace
       - name: Assemble arm64 release APK
         run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
       - uses: actions/upload-artifact@v7

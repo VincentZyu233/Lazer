@@ -7,7 +7,7 @@ internal enum class AndroidUacVersion {
     Uac2,
 }
 
-/** A master-channel Feature Unit directly upstream of a physical playback terminal. */
+/** A master-channel Feature Unit on every source path to a physical playback terminal. */
 internal data class AndroidUacVolumeControl(
     val version: AndroidUacVersion,
     val controlInterfaceNumber: Int,
@@ -48,6 +48,12 @@ internal sealed interface AndroidUacVolumeValue {
 }
 
 internal enum class AndroidUacVolumeDirection { Down, Up }
+
+private data class AndroidUacAudioEntity(
+    val sourceIds: List<Int>,
+    val isInputTerminal: Boolean = false,
+    val hasMasterVolume: Boolean = false,
+)
 
 /** Accepts only the permission broadcast created for the request that is still awaiting a result. */
 internal fun androidUacPermissionCallbackMatches(
@@ -103,8 +109,9 @@ internal fun nextAndroidUacVolumeValue(
 
 /**
  * Parses the descriptor stream returned by UsbDeviceConnection.getRawDescriptors(). It accepts
- * only a single well-bounded configuration and a master Volume Control on a Feature Unit directly
- * feeding a physical output terminal; other topologies fail closed.
+ * only a single well-bounded configuration and a unique advertised master Volume Control that
+ * dominates every source path to a physical output terminal; unsupported or malformed topologies
+ * fail closed.
  */
 internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): AndroidUacVolumeControl? {
     var offset = 0
@@ -112,7 +119,8 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
     var isAudioControlInterface = false
     val versionByInterface = mutableMapOf<Int, AndroidUacVersion>()
     val volumeUnits = mutableListOf<AndroidUacVolumeControl>()
-    val physicalOutputSources = mutableMapOf<Int, MutableSet<Int>>()
+    val entitiesByInterface = mutableMapOf<Int, MutableMap<Int, AndroidUacAudioEntity>>()
+    val physicalOutputTerminals = mutableMapOf<Int, MutableSet<Int>>()
     var configurationCount = 0
     var configurationEnd = -1
     var acTotalLength = 0
@@ -121,6 +129,21 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
     fun unsigned(index: Int): Int = descriptors[index].toInt() and 0xff
     fun littleEndian(index: Int, byteCount: Int): Int =
         (0 until byteCount).fold(0) { result, byte -> result or (unsigned(index + byte) shl (byte * 8)) }
+
+    fun registerEntity(interfaceNumber: Int, entityId: Int, entity: AndroidUacAudioEntity): Boolean {
+        if (entityId == 0) return false
+        val entities = entitiesByInterface.getOrPut(interfaceNumber, ::mutableMapOf)
+        if (entities.containsKey(entityId)) return false
+        entities[entityId] = entity
+        return true
+    }
+
+    fun readSources(start: Int, count: Int, descriptorEnd: Int): List<Int>? {
+        if (count <= 0 || start + count > descriptorEnd) return null
+        val sources = (start until start + count).map(::unsigned)
+        if (sources.any { it == 0 } || sources.distinct().size != sources.size) return null
+        return sources
+    }
 
     while (offset < descriptors.size) {
         if (descriptors.size - offset < 2) return null
@@ -148,7 +171,8 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
                 unsigned(offset + 6) == USB_SUBCLASS_AUDIO_CONTROL
             acTotalLength = 0
             acBytesSeen = 0
-        } else if (isAudioControlInterface && type == USB_DESCRIPTOR_CS_INTERFACE && length >= 3) {
+        } else if (isAudioControlInterface && type == USB_DESCRIPTOR_CS_INTERFACE) {
+            if (length < 3) return null
             if (configurationEnd >= 0 && offset + length > configurationEnd) return null
             if (acTotalLength != 0 && acBytesSeen + length > acTotalLength) return null
             if (acTotalLength != 0) acBytesSeen += length
@@ -181,10 +205,26 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
                     }
                 }
 
+                USB_AC_INPUT_TERMINAL -> {
+                    val version = versionByInterface[controlInterface] ?: return null
+                    val expectedLength = when (version) {
+                        AndroidUacVersion.Uac1 -> 12
+                        AndroidUacVersion.Uac2 -> 17
+                    }
+                    if (length != expectedLength ||
+                        !registerEntity(
+                            controlInterface,
+                            unsigned(offset + 3),
+                            AndroidUacAudioEntity(sourceIds = emptyList(), isInputTerminal = true),
+                        )
+                    ) return null
+                }
+
                 USB_AC_FEATURE_UNIT -> {
                     val version = versionByInterface[controlInterface] ?: return null
                     if (length < 7) return null
                     val unitId = unsigned(offset + 3)
+                    val sourceId = unsigned(offset + 4)
                     val hasMasterVolumeControl = when (version) {
                         AndroidUacVersion.Uac1 -> {
                             val controlSize = unsigned(offset + 5)
@@ -202,18 +242,128 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
                                 UAC2_HOST_PROGRAMMABLE
                         }
                     }
+                    if (!registerEntity(
+                            controlInterface,
+                            unitId,
+                            AndroidUacAudioEntity(
+                                sourceIds = listOf(sourceId),
+                                hasMasterVolume = hasMasterVolumeControl,
+                            ),
+                        )
+                    ) return null
                     if (hasMasterVolumeControl) {
                         volumeUnits += AndroidUacVolumeControl(version, controlInterface, unitId)
                     }
                 }
 
-                USB_AC_OUTPUT_TERMINAL -> {
-                    if (length < 9 || controlInterface < 0) return null
-                    val terminalType = littleEndian(offset + 4, 2)
-                    if (terminalType and USB_TERMINAL_TYPE_MASK == USB_TERMINAL_TYPE_PHYSICAL_OUTPUT) {
-                        physicalOutputSources.getOrPut(controlInterface, ::mutableSetOf)
-                            .add(unsigned(offset + 7))
+                USB_AC_MIXER_UNIT, USB_AC_SELECTOR_UNIT -> {
+                    val version = versionByInterface[controlInterface] ?: return null
+                    if (length < 6 || controlInterface < 0) return null
+                    val unitId = unsigned(offset + 3)
+                    val sourceCount = unsigned(offset + 4)
+                    val sources = readSources(offset + 5, sourceCount, offset + length) ?: return null
+                    val validLength = when (unsigned(offset + 2)) {
+                        USB_AC_SELECTOR_UNIT -> length == when (version) {
+                            AndroidUacVersion.Uac1 -> 6 + sourceCount
+                            AndroidUacVersion.Uac2 -> 7 + sourceCount
+                        }
+
+                        else -> {
+                            val outputChannelCountOffset = offset + 5 + sourceCount
+                            if (outputChannelCountOffset >= offset + length || unsigned(outputChannelCountOffset) == 0) {
+                                return null
+                            }
+                            // The mixer-control bitmap size depends on the source/output channel counts.
+                            // We only need its source links here, so validate the mandatory trailing fields
+                            // and descriptor boundary without guessing that variable bitmap size.
+                            length >= when (version) {
+                                AndroidUacVersion.Uac1 -> 11 + sourceCount
+                                AndroidUacVersion.Uac2 -> 14 + sourceCount
+                            }
+                        }
                     }
+                    if (!validLength ||
+                        !registerEntity(controlInterface, unitId, AndroidUacAudioEntity(sourceIds = sources))
+                    ) return null
+                }
+
+                USB_AC_OUTPUT_TERMINAL -> {
+                    val version = versionByInterface[controlInterface] ?: return null
+                    val expectedLength = when (version) {
+                        AndroidUacVersion.Uac1 -> 9
+                        AndroidUacVersion.Uac2 -> 12
+                    }
+                    if (length != expectedLength || controlInterface < 0) return null
+                    val terminalType = littleEndian(offset + 4, 2)
+                    val terminalId = unsigned(offset + 3)
+                    val sourceId = unsigned(offset + 7)
+                    if (!registerEntity(
+                            controlInterface,
+                            terminalId,
+                            AndroidUacAudioEntity(sourceIds = listOf(sourceId)),
+                        )
+                    ) return null
+                    if (terminalType and USB_TERMINAL_TYPE_MASK == USB_TERMINAL_TYPE_PHYSICAL_OUTPUT) {
+                        physicalOutputTerminals.getOrPut(controlInterface, ::mutableSetOf).add(terminalId)
+                    }
+                }
+
+                else -> {
+                    val version = versionByInterface[controlInterface] ?: return null
+                    val entitySubtype = unsigned(offset + 2)
+                    val graphEntity = when (version to entitySubtype) {
+                        AndroidUacVersion.Uac1 to USB_UAC1_PROCESSING_UNIT,
+                        AndroidUacVersion.Uac1 to USB_UAC1_EXTENSION_UNIT -> {
+                            if (length < 8) return null
+                            val unitId = unsigned(offset + 3)
+                            val sourceCount = unsigned(offset + 6)
+                            val sources = readSources(offset + 7, sourceCount, offset + length) ?: return null
+                            val controlSizeOffset = offset + 11 + sourceCount
+                            if (controlSizeOffset >= offset + length) return null
+                            val minimumLength = 13 + sourceCount + unsigned(controlSizeOffset)
+                            if (length < minimumLength ||
+                                (entitySubtype == USB_UAC1_EXTENSION_UNIT && length != minimumLength)
+                            ) return null
+                            unitId to AndroidUacAudioEntity(sourceIds = sources)
+                        }
+
+                        AndroidUacVersion.Uac2 to USB_UAC2_EFFECT_UNIT -> {
+                            if (length < 16 || (length - 16) % 4 != 0) return null
+                            unsigned(offset + 3) to AndroidUacAudioEntity(
+                                sourceIds = listOf(unsigned(offset + 6)),
+                            )
+                        }
+
+                        AndroidUacVersion.Uac2 to USB_UAC2_PROCESSING_UNIT -> {
+                            if (length < 8) return null
+                            val unitId = unsigned(offset + 3)
+                            val sourceCount = unsigned(offset + 6)
+                            val sources = readSources(offset + 7, sourceCount, offset + length) ?: return null
+                            if (length < 17 + sourceCount) return null
+                            unitId to AndroidUacAudioEntity(sourceIds = sources)
+                        }
+
+                        AndroidUacVersion.Uac2 to USB_UAC2_EXTENSION_UNIT -> {
+                            if (length < 8) return null
+                            val unitId = unsigned(offset + 3)
+                            val sourceCount = unsigned(offset + 6)
+                            val sources = readSources(offset + 7, sourceCount, offset + length) ?: return null
+                            if (length != 15 + sourceCount) return null
+                            unitId to AndroidUacAudioEntity(sourceIds = sources)
+                        }
+
+                        AndroidUacVersion.Uac2 to USB_UAC2_SAMPLE_RATE_CONVERTER -> {
+                            if (length != 8) return null
+                            unsigned(offset + 3) to AndroidUacAudioEntity(
+                                sourceIds = listOf(unsigned(offset + 4)),
+                            )
+                        }
+
+                        else -> null
+                    }
+                    if (graphEntity != null &&
+                        !registerEntity(controlInterface, graphEntity.first, graphEntity.second)
+                    ) return null
                 }
             }
         }
@@ -224,10 +374,73 @@ internal fun findAndroidUacPlaybackVolumeControl(descriptors: ByteArray): Androi
     if (acTotalLength != 0 && acBytesSeen != acTotalLength) return null
     if (configurationCount != 1 || configurationEnd != descriptors.size) return null
 
-    val matches = volumeUnits.filter { control ->
-        control.unitId in physicalOutputSources[control.controlInterfaceNumber].orEmpty()
+    fun reachesInputWithout(
+        entityId: Int,
+        excludedEntityId: Int,
+        entities: Map<Int, AndroidUacAudioEntity>,
+        path: MutableSet<Int>,
+        memoizedResult: MutableMap<Int, Boolean>,
+    ): Boolean {
+        if (entityId == excludedEntityId) return false
+        memoizedResult[entityId]?.let { return it }
+        if (!path.add(entityId)) return false
+        val entity = entities[entityId]
+        if (entity == null) {
+            path.remove(entityId)
+            return false
+        }
+        if (entity.isInputTerminal) {
+            path.remove(entityId)
+            memoizedResult[entityId] = true
+            return true
+        }
+        val reachesInput = entity.sourceIds.any { sourceId ->
+            reachesInputWithout(sourceId, excludedEntityId, entities, path, memoizedResult)
+        }
+        path.remove(entityId)
+        memoizedResult[entityId] = reachesInput
+        return reachesInput
     }
-    return matches.singleOrNull()
+
+    val selectedControls = mutableListOf<AndroidUacVolumeControl>()
+    for ((interfaceNumber, terminalIds) in physicalOutputTerminals) {
+        val entities = entitiesByInterface[interfaceNumber] ?: return null
+        val roots = terminalIds.map { terminalId ->
+            entities[terminalId]?.sourceIds ?: return null
+        }
+        if (roots.isEmpty() || roots.any { it.isEmpty() }) return null
+        val reachable = mutableSetOf<Int>()
+        val path = mutableSetOf<Int>()
+
+        fun validatePath(entityId: Int): Boolean {
+            if (entityId in path) return false
+            if (entityId in reachable) return true
+            val entity = entities[entityId] ?: return false
+            reachable += entityId
+            path += entityId
+            val valid = if (entity.isInputTerminal) true else
+                entity.sourceIds.isNotEmpty() && entity.sourceIds.all(::validatePath)
+            path -= entityId
+            return valid
+        }
+
+        if (!roots.flatten().all(::validatePath)) return null
+        val candidates = reachable.filter { entities[it]?.hasMasterVolume == true }
+        val dominatingUnits = candidates.filter { candidate ->
+            val memoizedResult = mutableMapOf<Int, Boolean>()
+            roots.all { rootSources ->
+                rootSources.none { root ->
+                    reachesInputWithout(root, candidate, entities, mutableSetOf(), memoizedResult)
+                }
+            }
+        }
+        val selectedUnitId = dominatingUnits.singleOrNull() ?: return null
+        val selected = volumeUnits.singleOrNull {
+            it.controlInterfaceNumber == interfaceNumber && it.unitId == selectedUnitId
+        } ?: return null
+        selectedControls += selected
+    }
+    return selectedControls.singleOrNull()
 }
 
 internal fun androidUacGetCurrentVolumeRequest(control: AndroidUacVolumeControl): AndroidUsbControlRequest =
@@ -384,8 +597,17 @@ private const val USB_DESCRIPTOR_CS_INTERFACE = 0x24
 private const val USB_CLASS_AUDIO = 0x01
 private const val USB_SUBCLASS_AUDIO_CONTROL = 0x01
 private const val USB_AC_HEADER = 0x01
+private const val USB_AC_INPUT_TERMINAL = 0x02
 private const val USB_AC_OUTPUT_TERMINAL = 0x03
+private const val USB_AC_MIXER_UNIT = 0x04
+private const val USB_AC_SELECTOR_UNIT = 0x05
 private const val USB_AC_FEATURE_UNIT = 0x06
+private const val USB_UAC1_PROCESSING_UNIT = 0x07
+private const val USB_UAC1_EXTENSION_UNIT = 0x08
+private const val USB_UAC2_EFFECT_UNIT = 0x07
+private const val USB_UAC2_PROCESSING_UNIT = 0x08
+private const val USB_UAC2_EXTENSION_UNIT = 0x09
+private const val USB_UAC2_SAMPLE_RATE_CONVERTER = 0x0d
 private const val USB_TERMINAL_TYPE_MASK = 0xff00
 private const val USB_TERMINAL_TYPE_PHYSICAL_OUTPUT = 0x0300
 private const val UAC1_VOLUME_CONTROL_BIT = 0x02

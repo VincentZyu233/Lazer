@@ -33,6 +33,131 @@ class AndroidUacVolumeTest {
     }
 
     @Test
+    fun `UAC1 volume behind a mixer must cover every playback source`() {
+        val descriptors = uac1Configuration(
+            inputTerminalUac1(2),
+            inputTerminalUac1(3),
+            mixerUac1(unitId = 4, sourceIds = listOf(2, 3)),
+            featureUac1(unitId = 5, sourceId = 4),
+            outputTerminalUac1(terminalId = 7, sourceId = 5),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac1, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(descriptors),
+        )
+    }
+
+    @Test
+    fun `UAC1 processing and extension units preserve the Feature Unit source path`() {
+        val descriptors = uac1Configuration(
+            inputTerminalUac1(2),
+            processingUac1(unitId = 3, sourceId = 2),
+            extensionUac1(unitId = 4, sourceId = 3),
+            featureUac1(unitId = 5, sourceId = 4),
+            outputTerminalUac1(terminalId = 7, sourceId = 5),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac1, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(descriptors),
+        )
+    }
+
+    @Test
+    fun `UAC2 volume behind a selector is found on every playback path`() {
+        val descriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            inputTerminalUac2(3),
+            selectorUac2(unitId = 4, sourceIds = listOf(2, 3)),
+            featureUac2(unitId = 5, sourceId = 4, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 5),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(descriptors),
+        )
+    }
+
+    @Test
+    fun `UAC2 volume after a mixer controls every input branch`() {
+        val descriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            inputTerminalUac2(3),
+            mixerUac2(unitId = 4, sourceIds = listOf(2, 3)),
+            featureUac2(unitId = 5, sourceId = 4, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 5),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(descriptors),
+        )
+    }
+
+    @Test
+    fun `UAC2 processing and extension units preserve the Feature Unit source path`() {
+        val descriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            processingUac2(unitId = 3, sourceId = 2),
+            extensionUac2(unitId = 4, sourceId = 3),
+            featureUac2(unitId = 5, sourceId = 4, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 5),
+        )
+
+        assertEquals(
+            AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 5),
+            findAndroidUacPlaybackVolumeControl(descriptors),
+        )
+    }
+
+    @Test
+    fun `UAC volume parser rejects branch local controls cycles missing sources and duplicate units`() {
+        val branchLocalControl = uac1Configuration(
+            inputTerminalUac1(2),
+            inputTerminalUac1(3),
+            featureUac1(unitId = 5, sourceId = 2),
+            mixerUac1(unitId = 6, sourceIds = listOf(5, 3)),
+            outputTerminalUac1(terminalId = 7, sourceId = 6),
+        )
+        assertNull(findAndroidUacPlaybackVolumeControl(branchLocalControl))
+
+        val cycle = uac1Configuration(
+            inputTerminalUac1(2),
+            mixerUac1(unitId = 4, sourceIds = listOf(5)),
+            featureUac1(unitId = 5, sourceId = 4),
+            outputTerminalUac1(terminalId = 7, sourceId = 5),
+        )
+        assertNull(findAndroidUacPlaybackVolumeControl(cycle))
+
+        val missingSource = uac1Configuration(
+            featureUac1(unitId = 5, sourceId = 99),
+            outputTerminalUac1(terminalId = 7, sourceId = 5),
+        )
+        assertNull(findAndroidUacPlaybackVolumeControl(missingSource))
+
+        val duplicateUnitId = uac1Configuration(
+            inputTerminalUac1(2),
+            featureUac1(unitId = 5, sourceId = 2),
+            mixerUac1(unitId = 5, sourceIds = listOf(2)),
+            outputTerminalUac1(terminalId = 7, sourceId = 5),
+        )
+        assertNull(findAndroidUacPlaybackVolumeControl(duplicateUnitId))
+    }
+
+    @Test
+    fun `multiple master controls on a playback graph are ambiguous`() {
+        val descriptors = uac2Configuration(
+            inputTerminalUac2(2),
+            featureUac2(unitId = 4, sourceId = 2, masterControls = 0x0c),
+            featureUac2(unitId = 5, sourceId = 4, masterControls = 0x0c),
+            outputTerminalUac2(terminalId = 7, sourceId = 5),
+        )
+        assertNull(findAndroidUacPlaybackVolumeControl(descriptors))
+    }
+
+    @Test
     fun `UAC2 master volume requires host programmable descriptor bits`() {
         assertEquals(
             AndroidUacVolumeControl(AndroidUacVersion.Uac2, controlInterfaceNumber = 1, unitId = 5),
@@ -70,6 +195,12 @@ class AndroidUacVolumeTest {
         }
         assertNull(findAndroidUacPlaybackVolumeControl(truncatedControlBlock))
         assertNull(findAndroidUacPlaybackVolumeControl(descriptor + descriptor))
+
+        val truncatedClassSpecificDescriptor = (descriptor + byteArrayOf(2, 0x24)).apply {
+            this[2] = (this[2].toInt() + 2).toByte()
+            this[23] = (this[23].toInt() + 2).toByte()
+        }
+        assertNull(findAndroidUacPlaybackVolumeControl(truncatedClassSpecificDescriptor))
     }
 
     @Test
@@ -258,36 +389,117 @@ class AndroidUacVolumeTest {
         terminalSource: Int = 5,
         outputTerminalType: Int = 0x0302,
     ): ByteArray {
-        val masterControls = ByteArray(controlSize).apply { if (isNotEmpty()) this[0] = 0x02 }
-        val feature = byteArrayOf(
-            (7 + controlSize).toByte(), 0x24, 0x06, 5, 1, controlSize.toByte(),
-        ) + masterControls + byteArrayOf(0)
-        val terminal = byteArrayOf(
-            9, 0x24, 0x03, 7, outputTerminalType.toByte(), (outputTerminalType ushr 8).toByte(),
-            0, terminalSource.toByte(), 0,
-        )
-        val controlTotalLength = 9 + feature.size + terminal.size
+        val feature = featureUac1(unitId = 5, sourceId = 1, controlSize = controlSize)
+        val terminal = outputTerminalUac1(7, terminalSource, outputTerminalType)
+        return uac1Configuration(inputTerminalUac1(1), feature, terminal)
+    }
+
+    private fun uac1Configuration(vararg entities: ByteArray): ByteArray {
+        val entityBytes = entities.fold(ByteArray(0), ByteArray::plus)
+        val controlTotalLength = 9 + entityBytes.size
         val interfaceDescriptor = byteArrayOf(9, 4, 1, 0, 0, 1, 1, 0, 0)
         val header = byteArrayOf(9, 0x24, 1, 0, 1, controlTotalLength.toByte(), 0, 1, 2)
-        return usbConfiguration(interfaceDescriptor + header + feature + terminal)
+        return usbConfiguration(interfaceDescriptor + header + entityBytes)
     }
 
     private fun uac2Descriptors(masterControls: Int): ByteArray {
-        val feature = byteArrayOf(
-            14, 0x24, 0x06, 5, 1,
-            masterControls.toByte(), 0, 0, 0,
-            0, 0, 0, 0,
-            0,
-        )
-        val terminal = byteArrayOf(12, 0x24, 0x03, 7, 0x02, 0x03, 0, 5, 1, 0, 0, 0)
-        val controlTotalLength = 9 + feature.size + terminal.size
+        val feature = featureUac2(unitId = 5, sourceId = 1, masterControls = masterControls)
+        val terminal = outputTerminalUac2(terminalId = 7, sourceId = 5)
+        return uac2Configuration(inputTerminalUac2(1), feature, terminal)
+    }
+
+    private fun uac2Configuration(vararg entities: ByteArray): ByteArray {
+        val entityBytes = entities.fold(ByteArray(0), ByteArray::plus)
+        val controlTotalLength = 9 + entityBytes.size
         val interfaceDescriptor = byteArrayOf(9, 4, 1, 0, 0, 1, 1, 0x20, 0)
         val header = byteArrayOf(
             9, 0x24, 1, 0, 2, 0x30,
             controlTotalLength.toByte(), (controlTotalLength ushr 8).toByte(), 0,
         )
-        return usbConfiguration(interfaceDescriptor + header + feature + terminal)
+        return usbConfiguration(interfaceDescriptor + header + entityBytes)
     }
+
+    private fun inputTerminalUac1(terminalId: Int): ByteArray = byteArrayOf(
+        12, 0x24, 0x02, terminalId.toByte(), 0x01, 0x01, 0, 1, 0, 0, 0, 0,
+    )
+
+    private fun inputTerminalUac2(terminalId: Int): ByteArray = byteArrayOf(
+        17, 0x24, 0x02, terminalId.toByte(), 0x01, 0x01, 0, 1,
+        0, 0, 0, 0, 0, 1, 0, 0, 0,
+    )
+
+    private fun featureUac1(
+        unitId: Int,
+        sourceId: Int,
+        controlSize: Int = 1,
+        hasMasterVolume: Boolean = true,
+    ): ByteArray {
+        val controls = ByteArray(controlSize).apply {
+            if (hasMasterVolume && isNotEmpty()) this[0] = 0x02
+        }
+        // One mono channel contributes a master and a channel control bitmap.
+        val channelControls = ByteArray(controlSize)
+        return byteArrayOf((7 + controlSize * 2).toByte(), 0x24, 0x06, unitId.toByte(), sourceId.toByte(),
+            controlSize.toByte()) + controls + channelControls + byteArrayOf(0)
+    }
+
+    private fun featureUac2(unitId: Int, sourceId: Int, masterControls: Int): ByteArray = byteArrayOf(
+        14, 0x24, 0x06, unitId.toByte(), sourceId.toByte(),
+        masterControls.toByte(), 0, 0, 0,
+        0, 0, 0, 0,
+        0,
+    )
+
+    private fun mixerUac1(unitId: Int, sourceIds: List<Int>): ByteArray {
+        val controlSize = (sourceIds.size * 2 + 7) / 8
+        val length = 10 + sourceIds.size + controlSize
+        return byteArrayOf(length.toByte(), 0x24, 0x04, unitId.toByte(), sourceIds.size.toByte()) +
+            sourceIds.map(Int::toByte).toByteArray() +
+            byteArrayOf(2, 3, 0, 0) + ByteArray(controlSize) + byteArrayOf(0)
+    }
+
+    private fun mixerUac2(unitId: Int, sourceIds: List<Int>): ByteArray = byteArrayOf(
+        (14 + sourceIds.size).toByte(), 0x24, 0x04, unitId.toByte(), sourceIds.size.toByte(),
+    ) + sourceIds.map { it.toByte() }.toByteArray() + byteArrayOf(
+        2, 3, 0, 0, 0, 0, 0, 0, 0,
+    )
+
+    private fun processingUac1(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        15, 0x24, 0x07, unitId.toByte(), 0, 0, 1, sourceId.toByte(),
+        1, 0, 0, 0, 1, 0, 0,
+    )
+
+    private fun extensionUac1(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        15, 0x24, 0x08, unitId.toByte(), 0, 0, 1, sourceId.toByte(),
+        1, 0, 0, 0, 1, 0, 0,
+    )
+
+    private fun processingUac2(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        18, 0x24, 0x08, unitId.toByte(), 0, 0, 1, sourceId.toByte(),
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    )
+
+    private fun extensionUac2(unitId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        16, 0x24, 0x09, unitId.toByte(), 0, 0, 1, sourceId.toByte(),
+        1, 0, 0, 0, 0, 0, 0, 0,
+    )
+
+    private fun selectorUac2(unitId: Int, sourceIds: List<Int>): ByteArray = byteArrayOf(
+        (7 + sourceIds.size).toByte(), 0x24, 0x05, unitId.toByte(), sourceIds.size.toByte(),
+    ) + sourceIds.map(Int::toByte).toByteArray() + byteArrayOf(0, 0)
+
+    private fun outputTerminalUac1(
+        terminalId: Int,
+        sourceId: Int,
+        terminalType: Int = 0x0302,
+    ): ByteArray = byteArrayOf(
+        9, 0x24, 0x03, terminalId.toByte(), terminalType.toByte(), (terminalType ushr 8).toByte(),
+        0, sourceId.toByte(), 0,
+    )
+
+    private fun outputTerminalUac2(terminalId: Int, sourceId: Int): ByteArray = byteArrayOf(
+        12, 0x24, 0x03, terminalId.toByte(), 0x02, 0x03, 0, sourceId.toByte(), 1, 0, 0, 0,
+    )
 
     private fun usbConfiguration(body: ByteArray): ByteArray {
         val totalLength = 9 + body.size
