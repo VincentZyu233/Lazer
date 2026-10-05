@@ -22,19 +22,25 @@ class AndroidUac2StreamingDescriptorsTest {
         assertNotNull(parsed)
         assertEquals(2, parsed.size)
         val first = parsed[0]
+        assertEquals(1, first.configurationValue)
         assertEquals(1, first.controlInterfaceNumber)
         assertEquals(2, first.interfaceNumber)
         assertEquals(1, first.alternateSetting)
         assertEquals(5, first.terminalLink)
         assertEquals(3, first.clockSourceId)
         assertEquals(2, first.channelCount)
+        assertEquals(3L, first.channelConfig)
         assertEquals(3, first.subslotSizeBytes)
         assertEquals(24, first.validBitResolution)
         assertEquals(0x01, first.dataEndpoint.address)
+        assertEquals(1, first.dataEndpoint.synchronizationType)
         assertEquals(288, first.dataEndpoint.maximumPacketSizeBytes)
         assertEquals(1, first.dataEndpoint.transactionsPerMicroframe)
         assertEquals(1, first.dataEndpoint.interval)
         assertEquals(0x81, first.feedbackEndpoint?.address)
+        assertEquals(0, first.feedbackEndpoint?.synchronizationType)
+        assertEquals(1, first.feedbackEndpoint?.usageType)
+        assertEquals(AndroidUac2ClockFrequencyAccess.ReadOnly, first.clockFrequencyAccess)
         assertEquals(4, parsed[1].subslotSizeBytes)
         assertEquals(32, parsed[1].validBitResolution)
         assertNull(parsed[1].feedbackEndpoint)
@@ -71,6 +77,23 @@ class AndroidUac2StreamingDescriptorsTest {
     }
 
     @Test
+    fun `multiple raw configurations retain configuration identity`() {
+        val rawDeviceDescriptor = bytes(
+            18, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 64, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 2,
+        )
+        val rawDescriptors = rawDeviceDescriptor +
+            playbackConfiguration(altSettings = listOf(playbackAltSetting(alt = 1, feedback = false)), configurationValue = 1) +
+            playbackConfiguration(altSettings = listOf(playbackAltSetting(alt = 2, feedback = true)), configurationValue = 2)
+
+        val parsed = parseAndroidUac2PlaybackAltSettings(rawDescriptors)
+
+        assertNotNull(parsed)
+        assertEquals(listOf(1, 2), parsed.map { it.configurationValue })
+        assertEquals(listOf(1, 2), parsed.map { it.alternateSetting })
+    }
+
+    @Test
     fun `unrelated bulk endpoint with zero interval does not reject playback`() {
         val configuration = playbackConfiguration(
             altSettings = listOf(playbackAltSetting(alt = 1, feedback = false)),
@@ -85,7 +108,11 @@ class AndroidUac2StreamingDescriptorsTest {
 
     @Test
     fun `direct clock source request addresses sampling frequency range`() {
-        val source = AndroidUac2ClockSource(controlInterfaceNumber = 1, clockSourceId = 3)
+        val source = AndroidUac2ClockSource(
+            controlInterfaceNumber = 1,
+            clockSourceId = 3,
+            frequencyAccess = AndroidUac2ClockFrequencyAccess.ReadOnly,
+        )
         val header = androidUac2ClockSourceGetRangeHeaderRequest(source)
         val complete = androidUac2ClockSourceGetRangeRequest(source, subRangeCount = 2)
 
@@ -100,6 +127,79 @@ class AndroidUac2StreamingDescriptorsTest {
         assertFailsWith<IllegalArgumentException> {
             androidUac2ClockSourceGetRangeRequest(source, subRangeCount = 0)
         }
+    }
+
+    @Test
+    fun `clock source current frequency requests and programmable rate writes are exact`() {
+        val readOnly = AndroidUac2ClockSource(1, 3, AndroidUac2ClockFrequencyAccess.ReadOnly)
+        val programmable = AndroidUac2ClockSource(1, 3, AndroidUac2ClockFrequencyAccess.HostProgrammable)
+        val currentRequest = androidUac2ClockSourceGetCurrentFrequencyRequest(readOnly)
+
+        assertEquals(0xa1, currentRequest.requestType)
+        assertEquals(0x01, currentRequest.request)
+        assertEquals(0x0100, currentRequest.value)
+        assertEquals(0x0301, currentRequest.index)
+        assertEquals(4, currentRequest.length)
+        assertEquals(96_000L, parseAndroidUac2ClockSourceCurrentFrequencyHz(byteArrayOf(0x00, 0x77, 0x01, 0x00)))
+        assertFailsWith<IllegalArgumentException> {
+            parseAndroidUac2ClockSourceCurrentFrequencyHz(byteArrayOf(1, 2, 3))
+        }
+
+        val ranges = listOf(AndroidUac2ClockFrequencyRange(44_100, 192_000, 1))
+        val setRequest = androidUac2ClockSourceSetCurrentFrequencyRequest(programmable, 96_000, ranges)
+        assertEquals(0x21, setRequest.requestType)
+        assertEquals(0x01, setRequest.request)
+        assertEquals(0x0100, setRequest.value)
+        assertEquals(0x0301, setRequest.index)
+        assertEquals(listOf(0, 0x77, 1, 0), setRequest.data.map { it.toInt() and 0xff })
+        assertFailsWith<IllegalArgumentException> {
+            androidUac2ClockSourceSetCurrentFrequencyRequest(readOnly, 96_000, ranges)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            androidUac2ClockSourceSetCurrentFrequencyRequest(programmable, 48_000, listOf(
+                AndroidUac2ClockFrequencyRange(44_100, 44_100, 0),
+                AndroidUac2ClockFrequencyRange(96_000, 96_000, 0),
+            ))
+        }
+    }
+
+    @Test
+    fun `playback plan binds selected rate to the exact configuration and endpoints`() {
+        val alternate = assertNotNull(
+            parseAndroidUac2PlaybackAltSettings(
+                playbackConfiguration(
+                    altSettings = listOf(playbackAltSetting(alt = 1, subslotSize = 4, validBits = 24, feedback = true)),
+                    configurationValue = 7,
+                    clockEntity = clockSource(id = 3, frequencyControl = 3),
+                ),
+            ),
+        ).single()
+        val ranges = listOf(
+            AndroidUac2ClockFrequencyRange(44_100, 44_100, 0),
+            AndroidUac2ClockFrequencyRange(96_000, 96_000, 0),
+        )
+
+        val plan = planAndroidUac2PcmPlayback(alternate, 96_000, ranges)
+
+        assertNotNull(plan)
+        assertEquals(7, plan.configurationValue)
+        assertEquals(96_000, plan.sampleRateHz)
+        assertEquals(AndroidUac2ClockFrequencyAccess.HostProgrammable, plan.clockFrequencyAccess)
+        assertEquals(4, plan.subslotSizeBytes)
+        assertEquals(24, plan.validBitResolution)
+        assertEquals(0x01, plan.dataEndpoint.address)
+        assertEquals(0x81, plan.feedbackEndpoint?.address)
+        assertNull(planAndroidUac2PcmPlayback(alternate, 48_000, ranges))
+
+        val asyncWithoutFeedback = playbackConfiguration(
+            altSettings = listOf(playbackAltSetting(alt = 1, feedback = false)),
+            clockEntity = clockSource(id = 3, frequencyControl = 3),
+        ).apply {
+            val endpointOffset = indexOfDescriptor(this, descriptorType = 0x05, descriptorSubtype = null, occurrence = 0)
+            this[endpointOffset + 3] = 0x05 // Async OUT needs explicit feedback until implicit discovery is supported.
+        }
+        val asyncAlternate = assertNotNull(parseAndroidUac2PlaybackAltSettings(asyncWithoutFeedback)).single()
+        assertNull(planAndroidUac2PcmPlayback(asyncAlternate, 96_000, ranges))
     }
 
     @Test
@@ -168,11 +268,47 @@ class AndroidUac2StreamingDescriptorsTest {
         }
         assertNull(parseAndroidUac2PlaybackAltSettings(malformedEndpoint))
 
+        val extendedEndpoint = valid.copyOf(valid.size + 1).apply {
+            val endpointOffset = indexOfDescriptor(valid, descriptorType = 0x05, descriptorSubtype = null, occurrence = 0)
+            System.arraycopy(valid, endpointOffset + 7, this, endpointOffset + 8, valid.size - endpointOffset - 7)
+            this[endpointOffset] = 8
+            this[endpointOffset + 7] = 0
+            val totalLength = valid.size + 1
+            this[2] = totalLength.toByte()
+            this[3] = (totalLength ushr 8).toByte()
+        }
+        assertNull(parseAndroidUac2PlaybackAltSettings(extendedEndpoint))
+
         val malformedAsGeneral = valid.copyOf().apply {
             val generalOffset = indexOfDescriptor(this, descriptorType = 0x24, descriptorSubtype = 0x01, occurrence = 1)
             this[generalOffset] = 15
         }
         assertNull(parseAndroidUac2PlaybackAltSettings(malformedAsGeneral))
+
+        val oversizedIsochronousPacket = valid.copyOf().apply {
+            val endpointOffset = indexOfDescriptor(this, descriptorType = 0x05, descriptorSubtype = null, occurrence = 0)
+            this[endpointOffset + 4] = 0x01
+            this[endpointOffset + 5] = 0x04 // 1025 bytes exceeds the USB 2.0 high-speed transaction limit.
+        }
+        assertNull(parseAndroidUac2PlaybackAltSettings(oversizedIsochronousPacket))
+
+        val synchronousIsochronousEndpoint = playbackConfiguration(
+            altSettings = listOf(playbackAltSetting(alt = 1, feedback = false)),
+        ).apply {
+            val endpointOffset = indexOfDescriptor(this, descriptorType = 0x05, descriptorSubtype = null, occurrence = 0)
+            this[endpointOffset + 3] = 0x0d // Isochronous, synchronous.
+        }
+        assertEquals(
+            3,
+            assertNotNull(parseAndroidUac2PlaybackAltSettings(synchronousIsochronousEndpoint))
+                .single().dataEndpoint.synchronizationType,
+        )
+
+        val unsynchronizedIsochronousEndpoint = synchronousIsochronousEndpoint.copyOf().apply {
+            val endpointOffset = indexOfDescriptor(this, descriptorType = 0x05, descriptorSubtype = null, occurrence = 0)
+            this[endpointOffset + 3] = 0x01 // Isochronous with reserved synchronization type 00.
+        }
+        assertNull(parseAndroidUac2PlaybackAltSettings(unsynchronizedIsochronousEndpoint))
 
         assertNull(
             parseAndroidUac2PlaybackAltSettings(
@@ -236,6 +372,7 @@ class AndroidUac2StreamingDescriptorsTest {
 
     private fun playbackConfiguration(
         altSettings: List<ByteArray>,
+        configurationValue: Int = 1,
         includeCaptureAlt: Boolean = false,
         includeBulkInterface: Boolean = false,
         clockEntity: ByteArray = clockSource(id = 3),
@@ -266,7 +403,7 @@ class AndroidUac2StreamingDescriptorsTest {
             totalLength and 0xff,
             totalLength ushr 8,
             interfaceCount,
-            1, 0, 0x80, 50,
+            configurationValue, 0, 0x80, 50,
         ) + body
         return configuration
     }
@@ -280,7 +417,11 @@ class AndroidUac2StreamingDescriptorsTest {
         extraFeedbackEndpoints: Int = 0,
     ): ByteArray {
         val dataEndpoints = listOf(
-            standardEndpoint(address = 0x01, attributes = 0x09, maxPacketSize = 288),
+            standardEndpoint(
+                address = 0x01,
+                attributes = if (feedback) 0x05 else 0x09,
+                maxPacketSize = 288,
+            ),
         ) + List(extraDataEndpoints) { index ->
             standardEndpoint(address = 0x02 + index, attributes = 0x09, maxPacketSize = 288)
         }

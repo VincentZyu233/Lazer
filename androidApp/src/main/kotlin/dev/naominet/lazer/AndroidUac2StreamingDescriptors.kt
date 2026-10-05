@@ -2,12 +2,15 @@ package dev.naominet.lazer
 
 /** A UAC2 AudioStreaming alternate setting with a PCM Type-I isochronous OUT endpoint. */
 internal data class AndroidUac2PlaybackAltSetting(
+    val configurationValue: Int,
     val controlInterfaceNumber: Int,
     val interfaceNumber: Int,
     val alternateSetting: Int,
     val terminalLink: Int,
     val clockSourceId: Int,
     val channelCount: Int,
+    val channelConfig: Long,
+    val clockFrequencyAccess: AndroidUac2ClockFrequencyAccess,
     val subslotSizeBytes: Int,
     val validBitResolution: Int,
     val dataEndpoint: AndroidUac2IsochronousEndpoint,
@@ -17,6 +20,8 @@ internal data class AndroidUac2PlaybackAltSetting(
 /** The endpoint packet size excludes the high-speed transaction multiplier encoded in wMaxPacketSize. */
 internal data class AndroidUac2IsochronousEndpoint(
     val address: Int,
+    val synchronizationType: Int,
+    val usageType: Int,
     val maximumPacketSizeBytes: Int,
     val transactionsPerMicroframe: Int,
     val interval: Int,
@@ -26,7 +31,13 @@ internal data class AndroidUac2IsochronousEndpoint(
 internal data class AndroidUac2ClockSource(
     val controlInterfaceNumber: Int,
     val clockSourceId: Int,
+    val frequencyAccess: AndroidUac2ClockFrequencyAccess,
 )
+
+internal enum class AndroidUac2ClockFrequencyAccess {
+    ReadOnly,
+    HostProgrammable,
+}
 
 internal data class AndroidUac2ClockFrequencyRange(
     val minimumHz: Long,
@@ -55,13 +66,117 @@ internal data class AndroidUac2ClockFrequencyRange(
             (resolutionHz == 0L || (sampleRateHz - minimumHz) % resolutionHz == 0L)
 }
 
+/** A resolved alternate setting and the exact source sample rate selected from its Clock Source. */
+internal data class AndroidUac2PlaybackStreamPlan(
+    val configurationValue: Int,
+    val controlInterfaceNumber: Int,
+    val interfaceNumber: Int,
+    val alternateSetting: Int,
+    val clockSourceId: Int,
+    val clockFrequencyAccess: AndroidUac2ClockFrequencyAccess,
+    val sampleRateHz: Long,
+    val channelCount: Int,
+    val channelConfig: Long,
+    val subslotSizeBytes: Int,
+    val validBitResolution: Int,
+    val dataEndpoint: AndroidUac2IsochronousEndpoint,
+    val feedbackEndpoint: AndroidUac2IsochronousEndpoint?,
+)
+
+/** Resolves a stream only when the requested rate is explicitly advertised by the device clock. */
+internal fun planAndroidUac2PcmPlayback(
+    alternate: AndroidUac2PlaybackAltSetting,
+    sampleRateHz: Long,
+    supportedRanges: List<AndroidUac2ClockFrequencyRange>,
+): AndroidUac2PlaybackStreamPlan? {
+    if (sampleRateHz <= 0 || supportedRanges.none { it.contains(sampleRateHz) }) return null
+    if (alternate.dataEndpoint.synchronizationType == USB_ISO_SYNC_ASYNCHRONOUS &&
+        alternate.feedbackEndpoint == null
+    ) return null // Implicit feedback discovery is not implemented yet.
+    return AndroidUac2PlaybackStreamPlan(
+        configurationValue = alternate.configurationValue,
+        controlInterfaceNumber = alternate.controlInterfaceNumber,
+        interfaceNumber = alternate.interfaceNumber,
+        alternateSetting = alternate.alternateSetting,
+        clockSourceId = alternate.clockSourceId,
+        clockFrequencyAccess = alternate.clockFrequencyAccess,
+        sampleRateHz = sampleRateHz,
+        channelCount = alternate.channelCount,
+        channelConfig = alternate.channelConfig,
+        subslotSizeBytes = alternate.subslotSizeBytes,
+        validBitResolution = alternate.validBitResolution,
+        dataEndpoint = alternate.dataEndpoint,
+        feedbackEndpoint = alternate.feedbackEndpoint,
+    )
+}
+
 /**
- * Parses one bounded USB configuration returned by `UsbDeviceConnection.getRawDescriptors()`.
+ * Parses bounded raw USB descriptors returned by `UsbDeviceConnection.getRawDescriptors()`.
+ * Android can return a Device Descriptor followed by multiple configurations; each configuration
+ * is parsed independently and the configuration value is retained for later interface claims.
  * Malformed or ambiguous descriptors return null. Clock Selectors and Clock Multipliers are
- * deliberately not mistaken for Clock Sources: a terminal linked through either is unsupported
- * by this slice and causes the matching playback alternate setting to fail closed.
+ * deliberately not mistaken for Clock Sources: indirect links fail closed in this slice.
  */
 internal fun parseAndroidUac2PlaybackAltSettings(
+    descriptors: ByteArray,
+): List<AndroidUac2PlaybackAltSetting>? {
+    if (descriptors.size !in USB_CONFIGURATION_DESCRIPTOR_BYTES..MAX_USB_RAW_DESCRIPTOR_BYTES) return null
+    var offset = 0
+    var descriptorCount = 0
+    var expectedConfigurationCount: Int? = null
+    val configurationValues = mutableSetOf<Int>()
+    val output = mutableListOf<AndroidUac2PlaybackAltSetting>()
+
+    fun unsigned(index: Int): Int = descriptors[index].toInt() and 0xff
+    fun littleEndian(index: Int, byteCount: Int): Int =
+        (0 until byteCount).fold(0) { result, byte -> result or (unsigned(index + byte) shl (byte * 8)) }
+
+    while (offset < descriptors.size) {
+        if (++descriptorCount > MAX_USB_CONFIGURATIONS + 1 || descriptors.size - offset < 2) return null
+        val length = unsigned(offset)
+        val type = unsigned(offset + 1)
+        if (length < 2 || offset + length > descriptors.size) return null
+        when (type) {
+            USB_DESCRIPTOR_DEVICE -> {
+                if (offset != 0 || expectedConfigurationCount != null ||
+                    length != USB_DEVICE_DESCRIPTOR_BYTES
+                ) return null
+                expectedConfigurationCount = unsigned(offset + 17).takeIf { it > 0 } ?: return null
+                offset += length
+            }
+
+            USB_DESCRIPTOR_CONFIGURATION -> {
+                if (length != USB_CONFIGURATION_DESCRIPTOR_BYTES) return null
+                val configurationLength = littleEndian(offset + 2, 2)
+                val configurationValue = unsigned(offset + 5)
+                if (configurationLength !in USB_CONFIGURATION_DESCRIPTOR_BYTES..MAX_USB_CONFIGURATION_BYTES ||
+                    offset + configurationLength > descriptors.size || configurationValue == 0 ||
+                    !configurationValues.add(configurationValue)
+                ) return null
+                if (expectedConfigurationCount != null && configurationValues.size > expectedConfigurationCount) return null
+                val configuration = descriptors.copyOfRange(offset, offset + configurationLength)
+                val parsed = parseAndroidUac2PlaybackConfiguration(configuration) ?: return null
+                output += parsed
+                offset += configurationLength
+            }
+
+            else -> return null
+        }
+    }
+
+    if (configurationValues.isEmpty() ||
+        (expectedConfigurationCount != null && configurationValues.size != expectedConfigurationCount)
+    ) return null
+    return output.sortedWith(
+        compareBy(
+            AndroidUac2PlaybackAltSetting::configurationValue,
+            AndroidUac2PlaybackAltSetting::interfaceNumber,
+            AndroidUac2PlaybackAltSetting::alternateSetting,
+        ),
+    )
+}
+
+private fun parseAndroidUac2PlaybackConfiguration(
     descriptors: ByteArray,
 ): List<AndroidUac2PlaybackAltSetting>? {
     if (descriptors.size !in USB_CONFIGURATION_DESCRIPTOR_BYTES..MAX_USB_CONFIGURATION_BYTES) return null
@@ -71,8 +186,8 @@ internal fun parseAndroidUac2PlaybackAltSettings(
     var configurationCount = 0
     var configurationOffset = -1
     var configurationLength = 0
+    var configurationValue = 0
     var configurationInterfaceCount = 0
-    var deviceDescriptorSeen = false
     var currentInterface: UsbInterfaceBuilder? = null
     var offset = 0
     var descriptorCount = 0
@@ -91,21 +206,19 @@ internal fun parseAndroidUac2PlaybackAltSettings(
 
         when (type) {
             USB_DESCRIPTOR_DEVICE -> {
-                if (deviceDescriptorSeen || configurationCount != 0 || offset != 0 ||
-                    length != USB_DEVICE_DESCRIPTOR_BYTES
-                ) return null
-                deviceDescriptorSeen = true
-                currentInterface = null
+                return null
             }
 
             USB_DESCRIPTOR_CONFIGURATION -> {
-                val expectedOffset = if (deviceDescriptorSeen) USB_DEVICE_DESCRIPTOR_BYTES else 0
-                if (configurationCount != 0 || offset != expectedOffset || length != USB_CONFIGURATION_DESCRIPTOR_BYTES) return null
+                if (configurationCount != 0 || offset != 0 || length != USB_CONFIGURATION_DESCRIPTOR_BYTES) return null
                 configurationCount = 1
                 configurationOffset = offset
                 configurationLength = littleEndian(offset + 2, 2).toInt()
+                configurationValue = unsigned(offset + 5)
                 configurationInterfaceCount = unsigned(offset + 4)
-                if (configurationLength != descriptors.size - configurationOffset || configurationInterfaceCount == 0) return null
+                if (configurationValue == 0 || configurationLength != descriptors.size - configurationOffset ||
+                    configurationInterfaceCount == 0
+                ) return null
                 currentInterface = null
             }
 
@@ -145,7 +258,7 @@ internal fun parseAndroidUac2PlaybackAltSettings(
             }
 
             USB_DESCRIPTOR_ENDPOINT -> {
-                if (configurationCount != 1 || length < USB_ENDPOINT_DESCRIPTOR_MIN_BYTES) return null
+                if (configurationCount != 1 || length != USB_ENDPOINT_DESCRIPTOR_BYTES) return null
                 val owner = currentInterface ?: return null
                 val endpoint = parseEndpoint(
                     address = unsigned(offset + 2),
@@ -230,7 +343,7 @@ internal fun parseAndroidUac2PlaybackAltSettings(
             associations = audioAssociations,
         ) ?: return null
         val controlFunction = controlFunctions[controlInterfaceNumber] ?: return null
-        val parsedAlt = parsePlaybackAltSetting(streamingInterface, controlFunction) ?: return null
+        val parsedAlt = parsePlaybackAltSetting(streamingInterface, controlFunction, configurationValue) ?: return null
         output += parsedAlt
     }
 
@@ -248,6 +361,55 @@ internal fun androidUac2ClockSourceGetRangeRequest(
     source: AndroidUac2ClockSource,
     subRangeCount: Int,
 ): AndroidUsbControlRequest = androidUac2ClockSourceGetRangeRequest(source, subRangeCount as Int?)
+
+/** Builds the four-byte GET_CUR request for the Clock Source Sampling Frequency Control. */
+internal fun androidUac2ClockSourceGetCurrentFrequencyRequest(
+    source: AndroidUac2ClockSource,
+): AndroidUsbControlRequest {
+    require(source.controlInterfaceNumber in 0..0xff) { "AudioControl interface number is out of range" }
+    require(source.clockSourceId in 1..0xff) { "Clock Source ID must be nonzero" }
+    return AndroidUsbControlRequest(
+        requestType = USB_CLASS_INTERFACE_IN,
+        request = UAC2_GET_CUR,
+        value = UAC2_CLOCK_FREQUENCY_CONTROL_SELECTOR shl 8,
+        index = (source.clockSourceId shl 8) or source.controlInterfaceNumber,
+        data = ByteArray(UAC2_CLOCK_FREQUENCY_BYTES),
+        length = UAC2_CLOCK_FREQUENCY_BYTES,
+    )
+}
+
+/** Parses a four-byte little-endian UAC2 Sampling Frequency GET_CUR response. */
+internal fun parseAndroidUac2ClockSourceCurrentFrequencyHz(response: ByteArray): Long {
+    require(response.size == UAC2_CLOCK_FREQUENCY_BYTES) { "Clock Source GET_CUR response must be four bytes" }
+    return readUnsignedLittleEndian(response, 0, UAC2_CLOCK_FREQUENCY_BYTES)
+}
+
+/** Builds SET_CUR only for host-programmable clocks and rates advertised by GET_RANGE. */
+internal fun androidUac2ClockSourceSetCurrentFrequencyRequest(
+    source: AndroidUac2ClockSource,
+    sampleRateHz: Long,
+    supportedRanges: List<AndroidUac2ClockFrequencyRange>,
+): AndroidUsbControlRequest {
+    require(source.frequencyAccess == AndroidUac2ClockFrequencyAccess.HostProgrammable) {
+        "Clock Source Sampling Frequency is read-only"
+    }
+    require(source.controlInterfaceNumber in 0..0xff) { "AudioControl interface number is out of range" }
+    require(source.clockSourceId in 1..0xff) { "Clock Source ID must be nonzero" }
+    require(sampleRateHz in 1L..UAC2_UINT32_MAX_HZ && supportedRanges.any { it.contains(sampleRateHz) }) {
+        "Requested sample rate is not advertised by the Clock Source"
+    }
+    val data = ByteArray(UAC2_CLOCK_FREQUENCY_BYTES) { index ->
+        (sampleRateHz ushr (index * 8)).toByte()
+    }
+    return AndroidUsbControlRequest(
+        requestType = USB_CLASS_INTERFACE_OUT,
+        request = UAC2_SET_CUR,
+        value = UAC2_CLOCK_FREQUENCY_CONTROL_SELECTOR shl 8,
+        index = (source.clockSourceId shl 8) or source.controlInterfaceNumber,
+        data = data,
+        length = data.size,
+    )
+}
 
 private fun androidUac2ClockSourceGetRangeRequest(
     source: AndroidUac2ClockSource,
@@ -347,11 +509,15 @@ private fun parseControlFunction(interfaceDescriptor: UsbInterfaceBuilder): Pars
                 if (descriptor.length != UAC2_CLOCK_SOURCE_DESCRIPTOR_BYTES) return null
                 val id = bytes.u8(3)
                 val frequencyControl = bytes.u8(5) and UAC2_CLOCK_FREQUENCY_CONTROL_MASK
-                // UAC2 reserves capability value 0b10; RANGE must be host-readable.
-                if (id == 0 || frequencyControl !in setOf(UAC2_CONTROL_READ_ONLY, UAC2_CONTROL_READ_WRITE) ||
+                val frequencyAccess = when (frequencyControl) {
+                    UAC2_CONTROL_READ_ONLY -> AndroidUac2ClockFrequencyAccess.ReadOnly
+                    UAC2_CONTROL_READ_WRITE -> AndroidUac2ClockFrequencyAccess.HostProgrammable
+                    else -> null // Absent and reserved controls cannot provide the required GET_RANGE.
+                }
+                if (id == 0 || frequencyAccess == null ||
                     entitySubtypes.putIfAbsent(id, descriptor.subtype) != null
                 ) return null
-                clockSources[id] = AndroidUac2ClockSource(interfaceDescriptor.number, id)
+                clockSources[id] = AndroidUac2ClockSource(interfaceDescriptor.number, id, frequencyAccess)
             }
 
             UAC_AC_CLOCK_SELECTOR -> {
@@ -410,6 +576,7 @@ private fun associatedControlInterface(
 private fun parsePlaybackAltSetting(
     interfaceDescriptor: UsbInterfaceBuilder,
     controlFunction: ParsedUac2ControlFunction,
+    configurationValue: Int,
 ): AndroidUac2PlaybackAltSetting? {
     val general = interfaceDescriptor.classSpecificInterfaces.single { it.subtype == UAC_AS_GENERAL }.bytes
     val formatType = general.u8(5)
@@ -428,6 +595,7 @@ private fun parsePlaybackAltSetting(
 
     val terminalLink = general.u8(3)
     val channelCount = general.u8(10)
+    val channelConfig = readUnsignedLittleEndian(general, 11, 4)
     if (terminalLink == 0 || channelCount !in 1..MAX_UAC2_PCM_CHANNELS) return null
     val inputTerminal = controlFunction.inputTerminals[terminalLink] ?: return null
     if (inputTerminal.terminalType != USB_TERMINAL_TYPE_USB_STREAMING || inputTerminal.channelCount != channelCount) {
@@ -449,15 +617,20 @@ private fun parsePlaybackAltSetting(
     val feedbackEndpoints = interfaceDescriptor.endpoints.filter {
         it.isIsochronous && it.direction == UsbEndpointDirection.In && it.usageType == USB_ISO_USAGE_FEEDBACK
     }
-    if (feedbackEndpoints.size > 1) return null
+    if (feedbackEndpoints.size > 1 ||
+        (feedbackEndpoints.isNotEmpty() && isochronousOutData.single().synchronizationType != USB_ISO_SYNC_ASYNCHRONOUS)
+    ) return null
 
     return AndroidUac2PlaybackAltSetting(
+        configurationValue = configurationValue,
         controlInterfaceNumber = clockSource.controlInterfaceNumber,
         interfaceNumber = interfaceDescriptor.number,
         alternateSetting = interfaceDescriptor.alternateSetting,
         terminalLink = terminalLink,
         clockSourceId = clockSource.clockSourceId,
         channelCount = channelCount,
+        channelConfig = channelConfig,
+        clockFrequencyAccess = clockSource.frequencyAccess,
         subslotSizeBytes = subslotSizeBytes,
         validBitResolution = validBitResolution,
         dataEndpoint = isochronousOutData.single().toPublicEndpoint(),
@@ -475,9 +648,20 @@ private fun parseEndpoint(
     val transferType = attributes and USB_ENDPOINT_TRANSFER_TYPE_MASK
     val synchronizationType = (attributes and USB_ENDPOINT_SYNCHRONIZATION_MASK) ushr 2
     val usageType = (attributes and USB_ENDPOINT_USAGE_MASK) ushr 4
-    if (attributes and USB_ENDPOINT_RESERVED_ATTRIBUTE_BITS != 0 ||
-        synchronizationType == USB_ISO_SYNC_RESERVED || usageType == USB_ISO_USAGE_RESERVED
-    ) return null
+    if (attributes and USB_ENDPOINT_RESERVED_ATTRIBUTE_BITS != 0) return null
+    if (transferType == USB_TRANSFER_TYPE_ISOCHRONOUS) {
+        when (usageType) {
+            USB_ISO_USAGE_FEEDBACK -> {
+                if (synchronizationType != USB_ISO_SYNC_NONE || address and USB_ENDPOINT_DIRECTION_IN == 0) return null
+            }
+            USB_ISO_USAGE_DATA, USB_ISO_USAGE_IMPLICIT_FEEDBACK -> {
+                if (synchronizationType !in USB_ISO_SYNC_ASYNCHRONOUS..USB_ISO_SYNC_SYNCHRONOUS) return null
+            }
+            else -> return null
+        }
+    } else if (synchronizationType != USB_ISO_SYNC_NONE || usageType != USB_ISO_USAGE_DATA) {
+        return null
+    }
     val packetSizeBytes = rawMaximumPacketSize and USB_ENDPOINT_PACKET_SIZE_MASK
     val transactionsCode = (rawMaximumPacketSize and USB_ENDPOINT_TRANSACTION_MULTIPLIER_MASK) ushr 11
     val intervalIsValid = when (transferType) {
@@ -486,7 +670,9 @@ private fun parseEndpoint(
         else -> true // Full-speed bulk endpoints may advertise bInterval = 0.
     }
     if (rawMaximumPacketSize and USB_ENDPOINT_RESERVED_PACKET_BITS != 0 ||
-        packetSizeBytes == 0 || transactionsCode == USB_ENDPOINT_RESERVED_TRANSACTION_CODE || !intervalIsValid
+        packetSizeBytes == 0 ||
+        (transferType == USB_TRANSFER_TYPE_ISOCHRONOUS && packetSizeBytes > USB_ISOCHRONOUS_MAX_PACKET_BYTES) ||
+        transactionsCode == USB_ENDPOINT_RESERVED_TRANSACTION_CODE || !intervalIsValid
     ) return null
     return ParsedEndpoint(
         address = address,
@@ -502,6 +688,8 @@ private fun parseEndpoint(
 
 private fun ParsedEndpoint.toPublicEndpoint() = AndroidUac2IsochronousEndpoint(
     address = address,
+    synchronizationType = synchronizationType,
+    usageType = usageType,
     maximumPacketSizeBytes = maximumPacketSizeBytes,
     transactionsPerMicroframe = transactionsPerMicroframe,
     interval = interval,
@@ -568,6 +756,7 @@ private data class ParsedUac2ControlFunction(
 )
 
 private const val USB_CLASS_INTERFACE_IN = 0xa1
+private const val USB_CLASS_INTERFACE_OUT = 0x21
 private const val USB_CLASS_AUDIO = 0x01
 private const val USB_SUBCLASS_AUDIO_CONTROL = 0x01
 private const val USB_SUBCLASS_AUDIO_STREAMING = 0x02
@@ -598,6 +787,9 @@ private const val UAC2_CONTROL_READ_ONLY = 0x01
 private const val UAC2_CONTROL_READ_WRITE = 0x03
 private const val UAC2_CLOCK_FREQUENCY_CONTROL_SELECTOR = 0x01
 private const val UAC2_GET_RANGE = 0x02
+private const val UAC2_GET_CUR = 0x01
+private const val UAC2_SET_CUR = 0x01
+private const val UAC2_CLOCK_FREQUENCY_BYTES = 4
 private const val UAC2_RANGE_HEADER_BYTES = 2
 private const val UAC2_CLOCK_RANGE_BYTES = 12
 private const val UAC2_CLOCK_SOURCE_DESCRIPTOR_BYTES = 8
@@ -611,6 +803,8 @@ private const val UAC2_AS_GENERAL_DESCRIPTOR_BYTES = 16
 private const val UAC2_TYPE_I_FORMAT_DESCRIPTOR_BYTES = 6
 private val UAC_AC_ENTITY_SUBTYPE_RANGE = 0x02..0x0c
 private const val MAX_USB_CONFIGURATION_BYTES = 65_535
+private const val MAX_USB_CONFIGURATIONS = 0xff
+private const val MAX_USB_RAW_DESCRIPTOR_BYTES = MAX_USB_CONFIGURATION_BYTES * MAX_USB_CONFIGURATIONS + 18
 private const val MAX_USB_DESCRIPTORS = 2_048
 private const val MAX_USB_INTERFACE_NUMBER_EXCLUSIVE = 256
 private const val MAX_UAC2_PCM_CHANNELS = 32
@@ -621,7 +815,7 @@ private const val USB_CONFIGURATION_DESCRIPTOR_BYTES = 9
 private const val USB_DEVICE_DESCRIPTOR_BYTES = 18
 private const val USB_INTERFACE_DESCRIPTOR_BYTES = 9
 private const val USB_INTERFACE_ASSOCIATION_DESCRIPTOR_BYTES = 8
-private const val USB_ENDPOINT_DESCRIPTOR_MIN_BYTES = 7
+private const val USB_ENDPOINT_DESCRIPTOR_BYTES = 7
 private const val USB_ENDPOINT_RESERVED_ADDRESS_BITS = 0x70
 private const val USB_ENDPOINT_NUMBER_MASK = 0x0f
 private const val USB_ENDPOINT_DIRECTION_IN = 0x80
@@ -631,12 +825,16 @@ private const val USB_ENDPOINT_USAGE_MASK = 0x30
 private const val USB_ENDPOINT_RESERVED_ATTRIBUTE_BITS = 0xc0
 private const val USB_TRANSFER_TYPE_ISOCHRONOUS = 0x01
 private const val USB_TRANSFER_TYPE_INTERRUPT = 0x03
-private const val USB_ISO_SYNC_RESERVED = 0x03
+private const val USB_ISO_SYNC_NONE = 0x00
+private const val USB_ISO_SYNC_ASYNCHRONOUS = 0x01
+private const val USB_ISO_SYNC_ADAPTIVE = 0x02
+private const val USB_ISO_SYNC_SYNCHRONOUS = 0x03
 private const val USB_ISO_USAGE_DATA = 0x00
 private const val USB_ISO_USAGE_FEEDBACK = 0x01
-private const val USB_ISO_USAGE_RESERVED = 0x03
+private const val USB_ISO_USAGE_IMPLICIT_FEEDBACK = 0x02
 private const val USB_ENDPOINT_PACKET_SIZE_MASK = 0x07ff
 private const val USB_ENDPOINT_TRANSACTION_MULTIPLIER_MASK = 0x1800
 private const val USB_ENDPOINT_RESERVED_PACKET_BITS = 0xe000
 private const val USB_ENDPOINT_RESERVED_TRANSACTION_CODE = 0x03
 private const val USB_ENDPOINT_MAX_INTERVAL = 16
+private const val USB_ISOCHRONOUS_MAX_PACKET_BYTES = 1024
