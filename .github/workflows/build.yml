@@ -33,6 +33,9 @@ jobs:
       - name: Install Android native build tools
         run: |
           sdkmanager --install "ndk;30.0.16248370" "cmake;3.31.6"
+          # Hosted runners can export ANDROID_NDK_HOME pointing at another NDK.
+          # The pinned FFmpeg build must use the same NDK revision as the app.
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/30.0.16248370" >> "$GITHUB_ENV"
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config nasm
       - name: Enable KVM for the Android emulator
