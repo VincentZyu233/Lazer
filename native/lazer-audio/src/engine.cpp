@@ -541,6 +541,7 @@ int32_t Engine::configurePipeline() {
         rawDsdTarget.nativeDsd = false;
         rawDsdTarget.nativeDsdRawBytes = true;
         rawDsdTarget.nativeDsdBigEndian = true;
+        rawDsdTarget.nativeDsdWordBytes = wordBytes;
         const int32_t result = currentSource().setTargetFormat(rawDsdTarget);
         if (result != LazerAudioOk) {
             lastError_ = currentSource().lastError();
@@ -753,6 +754,7 @@ int32_t Engine::queueReader(
         target.nativeDsd = false;
         target.nativeDsdRawBytes = true;
         target.nativeDsdBigEndian = true;
+        target.nativeDsdWordBytes = wordBytes;
     } else {
         /* Keep the active device clock for the whole session. A different-rate successor must go
          * through the normal stop/open path so exclusive output can renegotiate before that track. */

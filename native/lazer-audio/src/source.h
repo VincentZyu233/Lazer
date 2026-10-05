@@ -37,6 +37,8 @@ struct TargetFormat {
     bool nativeDsdBigEndian = true;
     /* Raw interleaved DSD byte frames for the Engine's session-level Native DSD packer. */
     bool nativeDsdRawBytes = false;
+    /* Physical output word width for nativeDsdRawBytes seek alignment; zero keeps the generic byte grid. */
+    int32_t nativeDsdWordBytes = 0;
 
     [[nodiscard]] bool isFloat() const noexcept { return bitsPerSample == 0; }
     [[nodiscard]] int32_t frameBytes() const noexcept {

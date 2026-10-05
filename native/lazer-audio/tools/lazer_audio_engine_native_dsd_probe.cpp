@@ -225,9 +225,10 @@ void onEvent(void *opaque, int32_t event, int32_t, int64_t) {
 class NativeDsdCaptureOutput final : public AudioOutput {
 public:
     NativeDsdCaptureOutput(std::shared_ptr<Capture> capture, bool wrongClock,
-        bool allowPcm = false, int32_t startupDelayMillis = 0)
+        bool allowPcm = false, int32_t startupDelayMillis = 0,
+        int32_t nativeWordBytes = 4)
         : capture_(std::move(capture)), wrongClock_(wrongClock), allowPcm_(allowPcm),
-          startupDelayMillis_(startupDelayMillis) {}
+          startupDelayMillis_(startupDelayMillis), nativeWordBytes_(nativeWordBytes) {}
 
     int32_t open(const AudioOutputRequest &request, const StreamDescription &source,
         AudioOutputSession &session, std::string &error, LogProxy *) override {
@@ -259,15 +260,19 @@ public:
         }
 
         TargetFormat target;
-        target.sampleRate = wrongClock_ ? kNativeDsdRate / 2 : kNativeDsdRate;
+        target.sampleRate = kDsdByteClock / nativeWordBytes_;
+        if (wrongClock_) target.sampleRate /= 2;
         target.channels = kStereo;
-        target.bitsPerSample = 32;
-        target.containerBitsPerSample = 32;
+        target.bitsPerSample = nativeWordBytes_ * 8;
+        target.containerBitsPerSample = nativeWordBytes_ * 8;
         target.nativeDsd = true;
         target.nativeDsdBigEndian = true;
         session.target = target;
         session.engineFormat = PcmFormat{target.sampleRate, target.channels};
-        session.formatSelection = LazerAudioFormatSelectionNativeDsdU32Be;
+        session.formatSelection = nativeWordBytes_ == 1
+            ? LazerAudioFormatSelectionNativeDsdU8
+            : nativeWordBytes_ == 2 ? LazerAudioFormatSelectionNativeDsdU16Be
+                                    : LazerAudioFormatSelectionNativeDsdU32Be;
         session.periodFrames = 128;
         session.bufferFrames = 512;
         session.writeMode = OutputWriteMode::Variable;
@@ -334,6 +339,7 @@ private:
     bool wrongClock_ = false;
     bool allowPcm_ = false;
     int32_t startupDelayMillis_ = 0;
+    int32_t nativeWordBytes_ = 4;
     std::chrono::steady_clock::time_point startedAt_{};
     std::atomic<bool> open_{false};
 };
@@ -496,19 +502,21 @@ int runNativeModeChangeRejectionCase() {
     return 0;
 }
 
-std::vector<uint8_t> packExpectedNativeDsd(const std::vector<uint8_t> &rawBytes) {
-    NativeDsdPacker packer(kStereo, 4, true);
+std::vector<uint8_t> packExpectedNativeDsd(const std::vector<uint8_t> &rawBytes,
+    size_t wordBytes = 4) {
+    NativeDsdPacker packer(kStereo, wordBytes, true);
     const size_t inputFrames = rawBytes.size() / kStereo;
-    const size_t capacityFrames = (inputFrames + 3) / 4 + 1;
-    std::vector<uint8_t> packed(capacityFrames * kNativeFrameBytes);
+    const size_t outputFrameBytes = static_cast<size_t>(kStereo) * wordBytes;
+    const size_t capacityFrames = (inputFrames + wordBytes - 1) / wordBytes + 1;
+    std::vector<uint8_t> packed(capacityFrames * outputFrameBytes);
     const NativeDsdPackResult result = packer.pack(rawBytes.data(), inputFrames,
         packed.data(), capacityFrames);
     if (result.status == NativeDsdPackStatus::OutputFull ||
         result.consumedInputFrames != inputFrames) return {};
-    packed.resize(result.producedOutputFrames * kNativeFrameBytes);
+    packed.resize(result.producedOutputFrames * outputFrameBytes);
     if (packer.hasPendingInput()) {
         const size_t offset = packed.size();
-        packed.resize(offset + kNativeFrameBytes);
+        packed.resize(offset + outputFrameBytes);
         const NativeDsdPackResult flushed = packer.flush(packed.data() + offset, 1);
         if (flushed.status != NativeDsdPackStatus::Ok || flushed.producedOutputFrames != 1) {
             return {};
@@ -517,12 +525,119 @@ std::vector<uint8_t> packExpectedNativeDsd(const std::vector<uint8_t> &rawBytes)
     return packed;
 }
 
+bool beginsWithNativePayload(const Capture &capture, const std::vector<uint8_t> &expected,
+    size_t outputFrameBytes) {
+    if (expected.empty() || outputFrameBytes == 0 ||
+        capture.bytes.size() < expected.size() || capture.bytes.size() % outputFrameBytes != 0) {
+        return false;
+    }
+    size_t firstPayload = 0;
+    while (firstPayload + outputFrameBytes <= capture.bytes.size()) {
+        const auto frameBegin = capture.bytes.begin() +
+            static_cast<std::ptrdiff_t>(firstPayload);
+        const bool idle = std::all_of(frameBegin,
+            frameBegin + static_cast<std::ptrdiff_t>(outputFrameBytes),
+            [](uint8_t byte) { return byte == 0x69; });
+        if (!idle) break;
+        firstPayload += outputFrameBytes;
+    }
+    return firstPayload + expected.size() <= capture.bytes.size() &&
+        std::equal(expected.begin(), expected.end(),
+            capture.bytes.begin() + static_cast<std::ptrdiff_t>(firstPayload));
+}
+
 bool waitForEvent(const std::shared_ptr<Capture> &capture, int32_t event) {
     std::unique_lock guard(capture->mutex);
     return capture->changed.wait_for(guard, std::chrono::seconds(10), [&capture, event] {
         return std::find(capture->events.begin(), capture->events.end(), event) !=
             capture->events.end();
     });
+}
+
+int runNativeDsdSeekAlignmentCase(int32_t wordBytes) {
+    constexpr int64_t seekMillis = 2'301;
+    constexpr size_t expectedOutputFrames = 16;
+    constexpr uint8_t seed = 0x27;
+    const std::vector<uint8_t> encoded = makeStereoDsf(5'000, seed);
+    std::vector<uint8_t> rawBytes;
+    if (!decodeRawDsd(encoded, rawBytes)) {
+        return fail("could not decode the Native DSD seek-alignment fixture");
+    }
+
+    const int32_t physicalWordRate = kDsdByteClock / wordBytes;
+    const int64_t targetWordIndex = (seekMillis * physicalWordRate + 500) / 1'000;
+    const int64_t targetRawFrame = targetWordIndex * wordBytes;
+    const int64_t totalRawFrames = static_cast<int64_t>(rawBytes.size() / kStereo);
+    if (targetRawFrame < 0 || targetRawFrame >= totalRawFrames) {
+        return fail("Native DSD seek target falls outside its fixture");
+    }
+    const size_t rawOffset = static_cast<size_t>(targetRawFrame) * kStereo;
+    const std::vector<uint8_t> suffixRaw(rawBytes.begin() +
+        static_cast<std::ptrdiff_t>(rawOffset), rawBytes.end());
+    const std::vector<uint8_t> expectedPacked = packExpectedNativeDsd(
+        suffixRaw, static_cast<size_t>(wordBytes));
+    const size_t outputFrameBytes = static_cast<size_t>(kStereo) * wordBytes;
+    const size_t expectedBytes = expectedOutputFrames * outputFrameBytes;
+    if (expectedPacked.size() < expectedBytes) {
+        return fail("Native DSD seek fixture is too short for its packed prefix");
+    }
+    const std::vector<uint8_t> expectedPrefix(expectedPacked.begin(),
+        expectedPacked.begin() + static_cast<std::ptrdiff_t>(expectedBytes));
+
+    MemoryReader reader(encoded);
+    const LazerAudioReader input = asReader(reader);
+    auto capture = std::make_shared<Capture>();
+    LazerAudioEngineConfig config{};
+    config.abi_version = LAZER_AUDIO_ABI_VERSION;
+    config.struct_size = sizeof(config);
+    config.device.dsd_output_mode = LazerAudioDsdOutputRequireNative;
+    config.device.buffer_millis = 2'500;
+    Engine *engine = Engine::create(config,
+        std::make_unique<NativeDsdCaptureOutput>(capture, false, false, 100, wordBytes));
+    if (engine == nullptr) return fail("Native DSD seek engine creation failed");
+
+    const LazerAudioOpenParams params{sizeof(LazerAudioOpenParams), 0, 0};
+    if (engine->open(nullptr, &input, params) != LazerAudioOk) {
+        std::cerr << "Native DSD seek open error: " << engine->lastError() << '\n';
+        engine->destroy();
+        return fail("Native DSD seek source did not open");
+    }
+    if (engine->seek(seekMillis) != LazerAudioOk || engine->play() != LazerAudioOk) {
+        std::cerr << "Native DSD seek/play error: " << engine->lastError() << '\n';
+        engine->destroy();
+        return fail("Native DSD seek or playback request failed");
+    }
+    {
+        std::unique_lock guard(capture->mutex);
+        const bool matched = capture->changed.wait_for(guard, std::chrono::seconds(8), [&] {
+            return beginsWithNativePayload(*capture, expectedPrefix, outputFrameBytes);
+        });
+        if (!matched) {
+            std::cerr << "Native DSD U" << wordBytes * 8
+                      << " seek expected word index=" << targetWordIndex
+                      << " raw frame=" << targetRawFrame
+                      << " captured bytes=" << capture->bytes.size() << '\n';
+            guard.unlock();
+            engine->destroy();
+            return fail("Native DSD seek payload did not start at the expected word boundary");
+        }
+    }
+    if (engine->stop() != LazerAudioOk) {
+        engine->destroy();
+        return fail("Native DSD seek test could not stop the engine");
+    }
+    engine->destroy();
+
+    std::lock_guard guard(capture->mutex);
+    if (capture->openCount != 1 || capture->session.target.sampleRate != physicalWordRate ||
+        capture->session.target.containerBitsPerSample != wordBytes * 8 ||
+        capture->invalidWrite) {
+        return fail("Native DSD seek fake endpoint used an unexpected word format");
+    }
+    std::cout << "PASS: Native DSD U" << wordBytes * 8
+              << " seek at 2301 ms begins at raw-frame word boundary "
+              << targetRawFrame << '\n';
+    return 0;
 }
 
 int runNativeDsdGaplessCase() {
@@ -652,6 +767,9 @@ int main() {
     if (runNativeDsdCase() != 0) return 1;
     if (runWrongClockCase() != 0) return 1;
     if (runNativeModeChangeRejectionCase() != 0) return 1;
+    for (const int32_t wordBytes : {1, 2, 4}) {
+        if (runNativeDsdSeekAlignmentCase(wordBytes) != 0) return 1;
+    }
     if (runNativeDsdGaplessCase() != 0) return 1;
     return 0;
 }

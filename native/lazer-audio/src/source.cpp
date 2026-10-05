@@ -1258,8 +1258,21 @@ int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
             const int64_t inputIndex = av_rescale_q(
                 frameTimestamp - streamStartTimestamp, inputTimeBase_,
                 AVRational{1, inputRate});
-            const int64_t commonRate = std::gcd(inputRate, target_.sampleRate);
-            const int64_t phasePeriod = inputRate / commonRate;
+            const bool hasNativeDsdWordWidth = target_.nativeDsdRawBytes &&
+                target_.nativeDsdWordBytes != 0;
+            if (hasNativeDsdWordWidth &&
+                ((target_.nativeDsdWordBytes != 1 && target_.nativeDsdWordBytes != 2 &&
+                    target_.nativeDsdWordBytes != 4) ||
+                    inputRate % target_.nativeDsdWordBytes != 0)) {
+                lastError_ = "Native DSD seek has an invalid output word clock";
+                return LazerAudioErrorUnsupported;
+            }
+            const bool nativeDsdWordAligned = hasNativeDsdWordWidth;
+            const int64_t commonRate = nativeDsdWordAligned
+                ? inputRate / target_.nativeDsdWordBytes
+                : std::gcd(inputRate, target_.sampleRate);
+            const int64_t phasePeriod = nativeDsdWordAligned
+                ? target_.nativeDsdWordBytes : inputRate / commonRate;
             const int64_t phaseRemainder = ((inputIndex % phasePeriod) + phasePeriod) % phasePeriod;
             const int64_t inputSamplesToAlign =
                 (phasePeriod - phaseRemainder) % phasePeriod;
@@ -1297,10 +1310,13 @@ int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
                 }
             }
             const int64_t alignedInputIndex = inputIndex + inputSamplesToAlign;
-            const int64_t alignedOutputIndex =
-                (alignedInputIndex / phasePeriod) * (target_.sampleRate / commonRate);
+            const int32_t outputRate = nativeDsdWordAligned
+                ? inputRate / target_.nativeDsdWordBytes : target_.sampleRate;
+            const int64_t alignedOutputIndex = nativeDsdWordAligned
+                ? alignedInputIndex / phasePeriod
+                : (alignedInputIndex / phasePeriod) * (target_.sampleRate / commonRate);
             const int64_t targetOutputIndex = av_rescale_q_rnd(
-                seekOutputTargetMillis_, kMillisTimeBase, AVRational{1, target_.sampleRate},
+                seekOutputTargetMillis_, kMillisTimeBase, AVRational{1, outputRate},
                 AV_ROUND_NEAR_INF);
             if (alignedOutputIndex > targetOutputIndex && log_ != nullptr) {
                 log_->write(LazerAudioLogWarning,
@@ -1310,7 +1326,14 @@ int32_t AudioSource::emitAVFrame(AVFrame *frame, SourceConsumer &consumer) {
                 lastError_ = "DSD seek landed after the requested position and cannot be sample-aligned";
                 return LazerAudioErrorUnsupported;
             }
-            seekOutputFramesToDrop_ = targetOutputIndex - alignedOutputIndex;
+            const int64_t outputFramesToDrop = targetOutputIndex - alignedOutputIndex;
+            if (nativeDsdWordAligned && outputFramesToDrop >
+                std::numeric_limits<int64_t>::max() / target_.nativeDsdWordBytes) {
+                lastError_ = "Native DSD seek target exceeds the raw-frame range";
+                return LazerAudioErrorUnsupported;
+            }
+            seekOutputFramesToDrop_ = nativeDsdWordAligned
+                ? outputFramesToDrop * target_.nativeDsdWordBytes : outputFramesToDrop;
             seekOutputTargetMillis_ = -1;
         }
     }
