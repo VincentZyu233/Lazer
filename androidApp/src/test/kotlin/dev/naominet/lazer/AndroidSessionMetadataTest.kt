@@ -19,6 +19,7 @@ class AndroidSessionMetadataTest {
                 artist = "Performer",
                 album = "Album",
                 durationMillis = 120_000L,
+                coverUrl = "file:///data/user/0/dev.naominet.lazer/files/local-artwork/cover.png",
                 albumArtist = "Ensemble",
                 genre = "Jazz",
                 year = 2024,
@@ -30,6 +31,10 @@ class AndroidSessionMetadataTest {
         ).build()
 
         assertEquals("Ensemble", metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST))
+        assertEquals(
+            "file:///data/user/0/dev.naominet.lazer/files/local-artwork/cover.png",
+            metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI),
+        )
         assertEquals("Jazz", metadata.getString(MediaMetadata.METADATA_KEY_GENRE))
         assertEquals(2024L, metadata.getLong(MediaMetadata.METADATA_KEY_YEAR))
         assertEquals(3L, metadata.getLong(MediaMetadata.METADATA_KEY_TRACK_NUMBER))

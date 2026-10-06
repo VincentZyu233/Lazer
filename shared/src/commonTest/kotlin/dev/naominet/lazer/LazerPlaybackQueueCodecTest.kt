@@ -38,6 +38,7 @@ class LazerPlaybackQueueCodecTest {
             artist = "Listener",
             album = "Demo",
             durationMillis = 90_000L,
+            coverUrl = "file:///data/user/0/dev.naominet.lazer/files/local-artwork/cover.png",
             source = LazerTrackSource.LocalFile("content://provider/document/track-1"),
             replayGain = LazerReplayGainTags(trackGainDb = 3.0, trackPeak = 0.5),
             albumArtist = "Demo ensemble",

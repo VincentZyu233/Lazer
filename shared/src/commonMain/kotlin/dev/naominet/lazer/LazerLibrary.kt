@@ -43,6 +43,7 @@ data class LazerPickedAudioFile(
     val artist: String = "",
     val album: String = "",
     val durationMillis: Long = 0L,
+    val coverUrl: String? = null,
     val replayGain: LazerReplayGainTags? = null,
     val albumArtist: String? = null,
     val genre: String? = null,
@@ -116,7 +117,9 @@ internal val lazerArtworkSizeParameter = ArtworkSizeParameter
  */
 fun enlargedArtworkUrl(raw: String?, sizePx: Int = 1024): String? {
     require(sizePx > 0)
-    val normalized = normalizedArtworkUrl(raw) ?: return null
+    val value = raw?.trim()?.takeIf(String::isNotBlank) ?: return null
+    val normalized = normalizedArtworkUrl(value)
+        ?: return value.takeIf { it.startsWith("file://", ignoreCase = true) }
     val host = normalized.substringAfter("://").substringBefore('/')
         .substringAfterLast('@').substringBefore(':')
     if (!host.equals("music.126.net", ignoreCase = true) &&

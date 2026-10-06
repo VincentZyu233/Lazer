@@ -684,6 +684,7 @@ class LazerGatewayController(private val device: LazerDevice) {
                     artist = file.artist,
                     album = file.album,
                     durationMillis = file.durationMillis.coerceAtLeast(0L),
+                    coverUrl = file.coverUrl,
                     source = LazerTrackSource.LocalFile(file.uri),
                     replayGain = file.replayGain,
                     albumArtist = file.albumArtist,

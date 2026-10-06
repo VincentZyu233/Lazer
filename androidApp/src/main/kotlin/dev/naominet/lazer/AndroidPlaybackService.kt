@@ -1397,7 +1397,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         artworkTrackId = track.id
         artworkBitmap = null
         scope.launch(Dispatchers.IO) {
-            val bitmap = runCatching { downloadArtwork(url) }
+            val bitmap = runCatching { loadArtwork(url) }
                 .onFailure { error -> Log.w(TAG, "Artwork failed for ${track.id}", error) }
                 .getOrNull()
             withContext(Dispatchers.Main.immediate) {
@@ -1637,6 +1637,28 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             directUacDeviceId = null
         }
         restartCurrentTrackForOutputModeChange()
+    }
+
+    private fun loadArtwork(source: String): Bitmap? {
+        val uri = Uri.parse(source)
+        return when (uri.scheme?.lowercase()) {
+            "file" -> uri.path?.let(::decodeLocalArtwork)
+            else -> downloadArtwork(source)
+        }
+    }
+
+    private fun decodeLocalArtwork(path: String): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sampleSize = 1
+        while (bounds.outWidth / sampleSize > 320 || bounds.outHeight / sampleSize > 320) {
+            sampleSize *= 2
+        }
+        return BitmapFactory.decodeFile(
+            path,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize },
+        )?.fitInsideNotificationArtwork()
     }
 
     private fun restartCurrentTrackForOutputModeChange() {
@@ -1952,8 +1974,11 @@ internal fun normalizedPlaybackUrl(raw: String?): String? {
     }
 }
 
-private fun notificationArtworkUrl(raw: String?): String? = normalizedArtworkUrl(raw)?.let { url ->
-    if (url.contains("music.126.net") && !url.contains("param=")) {
+private fun notificationArtworkUrl(raw: String?): String? {
+    val value = raw?.trim()?.takeIf(String::isNotBlank) ?: return null
+    if (value.startsWith("file://", ignoreCase = true)) return value
+    val url = normalizedArtworkUrl(value) ?: return null
+    return if (url.contains("music.126.net") && !url.contains("param=")) {
         "$url${if (url.contains('?')) '&' else '?'}param=320y320"
     } else {
         url

@@ -17,8 +17,10 @@ internal fun readAndroidLocalAudioFile(context: Context, uri: Uri): LazerPickedA
 
     val fallbackTitle = displayName.substringAfterLast('/').substringBeforeLast('.', displayName).ifBlank { "Audio file" }
     val retriever = MediaMetadataRetriever()
+    var embeddedPicture: ByteArray? = null
     val metadata = runCatching {
         retriever.setDataSource(context, uri)
+        embeddedPicture = runCatching { retriever.embeddedPicture }.getOrNull()
         val trackIndex = parseLocalAudioIndex(
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER),
         )
@@ -55,6 +57,7 @@ internal fun readAndroidLocalAudioFile(context: Context, uri: Uri): LazerPickedA
         LazerPickedAudioFile(uri = uri.toString(), title = fallbackTitle)
     }
     runCatching { retriever.release() }
+    val coverUrl = embeddedPicture?.let { persistAndroidEmbeddedArtwork(context, it) }
     val embeddedMetadata = runCatching {
         val format = androidLocalAudioContainer(displayName, mimeType) ?: return@runCatching null
         val descriptor = resolver.openAssetFileDescriptor(uri, "r") ?: return@runCatching null
@@ -88,6 +91,7 @@ internal fun readAndroidLocalAudioFile(context: Context, uri: Uri): LazerPickedA
         artist = embeddedMetadata?.artist?.takeIf(String::isNotBlank) ?: metadata.artist,
         album = embeddedMetadata?.album?.takeIf(String::isNotBlank) ?: metadata.album,
         durationMillis = durationMillis ?: 0L,
+        coverUrl = coverUrl,
         replayGain = embeddedMetadata?.replayGain,
         albumArtist = embeddedMetadata?.albumArtist?.takeIf(String::isNotBlank) ?: metadata.albumArtist,
         genre = embeddedMetadata?.genre?.takeIf(String::isNotBlank) ?: metadata.genre,
