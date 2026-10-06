@@ -656,7 +656,6 @@ bool IsoTransportSession::Flush(const std::uint32_t timeout_ms) {
         queue_size_ = 0;
         played_frames_since_flush_ = 0;
         packetizer_.ResetPhase();
-        dop_next_marker_ = 0x05;
         playing_ = false;
         return true;
     }
@@ -684,7 +683,6 @@ bool IsoTransportSession::Flush(const std::uint32_t timeout_ms) {
         queue_size_ = 0;
         played_frames_since_flush_ = 0;
         packetizer_.ResetPhase();
-        dop_next_marker_ = 0x05;
         playing_ = false;
         draining_ = false;
         last_playback_progress_ = std::chrono::steady_clock::now();

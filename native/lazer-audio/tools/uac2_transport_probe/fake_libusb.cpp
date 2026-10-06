@@ -44,6 +44,7 @@ int g_cancel_failures_remaining = 0;
 int g_event_failures_remaining = 0;
 int g_fault_error_code = LIBUSB_ERROR_IO;
 int g_wrapped_fd = -1;
+int g_data_transfer_completion_budget = -1;
 std::uint8_t g_streaming_subslot_size = 2;
 std::uint8_t g_streaming_bit_resolution = 16;
 std::uint32_t g_feedback_sample_rate_hz = 48000;
@@ -265,21 +266,38 @@ int LIBUSB_CALL libusb_handle_events_timeout_completed(
             ++g_event_error_count;
             return g_fault_error_code;
         }
-        if (g_pending.empty() && !g_interrupted) {
+        const auto dispatchable = [] {
+            return g_interrupted || std::any_of(g_pending.begin(), g_pending.end(), [](const auto* pending) {
+                return pending->endpoint != 0x01 || g_data_transfer_completion_budget != 0;
+            });
+        };
+        if (!dispatchable()) {
             const auto wait_duration = timeout == nullptr
                 ? std::chrono::milliseconds(1)
                 : std::min(
                     std::chrono::milliseconds(1),
                     std::chrono::milliseconds(timeout->tv_sec * 1000 + timeout->tv_usec / 1000));
-            g_changed.wait_for(lock, wait_duration, [] { return !g_pending.empty() || g_interrupted; });
+            g_changed.wait_for(lock, wait_duration, dispatchable);
         }
         if (g_interrupted && g_pending.empty()) {
             g_interrupted = false;
             return LIBUSB_ERROR_INTERRUPTED;
         }
-        if (g_pending.empty()) return LIBUSB_SUCCESS;
-        transfer = g_pending.front();
-        g_pending.pop_front();
+        const auto selected = std::find_if(g_pending.begin(), g_pending.end(), [](const auto* pending) {
+            return pending->endpoint != 0x01 || g_data_transfer_completion_budget != 0;
+        });
+        if (selected == g_pending.end()) {
+            if (g_interrupted) {
+                g_interrupted = false;
+                return LIBUSB_ERROR_INTERRUPTED;
+            }
+            return LIBUSB_SUCCESS;
+        }
+        transfer = *selected;
+        g_pending.erase(selected);
+        if (transfer->endpoint == 0x01 && g_data_transfer_completion_budget > 0) {
+            --g_data_transfer_completion_budget;
+        }
         g_dispatching.insert(transfer);
     }
 
@@ -353,6 +371,7 @@ void ResetFakeLibusbState() {
     g_event_failures_remaining = 0;
     g_fault_error_code = LIBUSB_ERROR_IO;
     g_wrapped_fd = -1;
+    g_data_transfer_completion_budget = -1;
     g_streaming_subslot_size = 2;
     g_streaming_bit_resolution = 16;
     g_feedback_sample_rate_hz = 48000;
@@ -368,6 +387,21 @@ void SetFakeStreamingFormat(const std::uint8_t subslot_size, const std::uint8_t 
 void SetFakeFeedbackSampleRate(const std::uint32_t sample_rate_hz) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_feedback_sample_rate_hz = sample_rate_hz;
+}
+
+void SetFakeDataTransferCompletionBudget(const int completions) {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_data_transfer_completion_budget = completions;
+    }
+    g_changed.notify_all();
+}
+
+int PendingDataTransferCount() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return static_cast<int>(std::count_if(g_pending.begin(), g_pending.end(), [](const auto* pending) {
+        return pending->endpoint == 0x01;
+    }));
 }
 
 std::vector<unsigned char> CapturedOutputBytes() {

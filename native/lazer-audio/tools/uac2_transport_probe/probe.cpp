@@ -1,5 +1,6 @@
 #include "android_uac2_iso_transport.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -31,6 +32,8 @@ int PendingTransferCount();
 int WrappedFd();
 void SetFakeStreamingFormat(std::uint8_t subslot_size, std::uint8_t bit_resolution);
 void SetFakeFeedbackSampleRate(std::uint32_t sample_rate_hz);
+void SetFakeDataTransferCompletionBudget(int completions);
+int PendingDataTransferCount();
 std::vector<unsigned char> CapturedOutputBytes();
 } // namespace lazer::uac2_transport_probe
 
@@ -142,6 +145,16 @@ bool ContainsDopPayloadFrames(const std::vector<unsigned char>& bytes) {
         if (matches) return true;
     }
     return false;
+}
+
+bool HasDopIdlePayloadFrames(const std::vector<unsigned char>& bytes, const std::size_t first_frame) {
+    if (bytes.size() % 6u != 0 || first_frame > bytes.size() / 6u) return false;
+    for (std::size_t frame = first_frame; frame < bytes.size() / 6u; ++frame) {
+        const auto* carrier = bytes.data() + frame * 6u;
+        if (carrier[0] != 0x69 || carrier[1] != 0x69 ||
+            carrier[3] != 0x69 || carrier[4] != 0x69) return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -266,6 +279,65 @@ int main() {
                "DoP packets must carry identical alternating markers on both channels, including idle frames")) return 1;
     if (!Check(ContainsDopPayloadFrames(dop_capture),
                "DoP transport must preserve queued channel payload bytes while rewriting marker phase")) return 1;
+
+    std::cout << "phase: DoP marker continuity across flush" << std::endl;
+    SetFakeDataTransferCompletionBudget(0);
+    const std::size_t captured_before_dop_flush = CapturedOutputBytes().size();
+    const int dop_flush_original_fd = OpenDummyFd();
+    if (!Check(dop_flush_original_fd >= 0, "Could not create a descriptor for the DoP flush test")) return 1;
+    auto dop_flush_session = IsoTransportSession::Open(dop_flush_original_fd, &error);
+    if (!Check(dop_flush_session != nullptr,
+               error.empty() ? "Could not open DoP flush session" : error.c_str())) return 1;
+    if (!Check(dop_flush_session->Start(dop_config, &error) == 0,
+               error.empty() ? "Could not start DoP flush session" : error.c_str())) return 1;
+    if (!Check(WaitFor([] { return PendingDataTransferCount() >= 4; }, std::chrono::milliseconds(500)),
+               "DoP data transfers were not queued for deterministic flush")) return 1;
+
+    std::atomic<bool> flush_entered{false};
+    bool dop_flush_succeeded = false;
+    std::thread dop_flush_thread([&] {
+        flush_entered.store(true, std::memory_order_release);
+        dop_flush_succeeded = dop_flush_session->Flush(1000);
+    });
+    const bool flush_thread_started = WaitFor(
+        [&] { return flush_entered.load(std::memory_order_acquire); },
+        std::chrono::milliseconds(500));
+    if (!flush_thread_started) {
+        SetFakeDataTransferCompletionBudget(-1);
+        dop_flush_thread.join();
+        if (!Check(false, "DoP flush thread did not start")) return 1;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    SetFakeDataTransferCompletionBudget(4);
+    dop_flush_thread.join();
+    if (!Check(dop_flush_succeeded, "DoP flush should complete after submitted packets return")) return 1;
+
+    const auto dop_flush_boundary = CapturedOutputBytes();
+    const std::size_t pre_flush_bytes = dop_flush_boundary.size() - captured_before_dop_flush;
+    if (!Check(pre_flush_bytes > 0 && pre_flush_bytes % 6u == 0,
+               "DoP flush fixture should end on a carrier-frame boundary")) return 1;
+    if (!Check(((pre_flush_bytes / 6u) % 2u) == 1u,
+               "DoP flush fixture must leave the next marker at 0xFA")) return 1;
+    if (!Check(WaitFor([&] { return PendingDataTransferCount() >= 4; }, std::chrono::milliseconds(500)),
+               "Flush should restart idle DoP transfers on the same session")) return 1;
+    SetFakeDataTransferCompletionBudget(1);
+    if (!Check(WaitFor([&] { return CapturedOutputBytes().size() > dop_flush_boundary.size(); },
+                       std::chrono::milliseconds(500)),
+               "DoP idle carrier did not resume after flush")) return 1;
+    SetFakeDataTransferCompletionBudget(-1);
+    if (!Check(dop_flush_session->Close(1000), "DoP flush session should close after marker verification")) return 1;
+    dop_flush_session.reset();
+    if (!Check(CloseDummyFd(dop_flush_original_fd) == 0,
+               "Java should close its original DoP flush descriptor after native close")) return 1;
+    const auto dop_flush_capture_all = CapturedOutputBytes();
+    const std::vector<unsigned char> dop_flush_capture(
+        dop_flush_capture_all.begin() + static_cast<std::ptrdiff_t>(captured_before_dop_flush),
+        dop_flush_capture_all.end());
+    if (!Check(HasValidDopMarkers(dop_flush_capture),
+               "DoP markers must alternate continuously across a successful flush on the same session")) return 1;
+    if (!Check(HasDopIdlePayloadFrames(dop_flush_capture, pre_flush_bytes / 6u),
+               "Post-flush DoP idle frames must contain 0x69 payload bytes and continuous markers")) return 1;
+    SetFakeDataTransferCompletionBudget(-1);
     SetFakeStreamingFormat(2, 16);
     SetFakeFeedbackSampleRate(48000);
 
@@ -321,7 +393,7 @@ int main() {
                "Unquiesced native session should be retained in quarantine")) return 1;
     if (!Check(FreedTransferCount() == frees_before_quarantine && LiveTransferCount() > 0,
                "Quarantine must preserve all transfer allocations and buffers")) return 1;
-    if (!Check(CloseCount() == 3 && ExitCount() == 3,
+    if (!Check(CloseCount() == 4 && ExitCount() == 4,
                "Quarantined session must keep its libusb handle and context open")) return 1;
 
     const int quarantined_duplicate_fd = WrappedFd();
