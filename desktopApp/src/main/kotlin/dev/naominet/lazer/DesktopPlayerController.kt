@@ -368,6 +368,7 @@ internal data class DesktopPlayerControllerTestOverrides(
     val enumerateOutputDevices: suspend () -> List<DesktopAudioOutputDevice>,
     val awaitRecoveryRetry: suspend (attempt: Int) -> Unit,
     val localPlaybackQueueStore: DesktopLocalPlaybackQueueStore,
+    val networkRendererDiscovery: DesktopUpnpRendererDiscovery? = null,
 )
 
 class DesktopPlayerController private constructor(
@@ -557,6 +558,8 @@ class DesktopPlayerController private constructor(
     internal var networkRendererQueueIsLocal by mutableStateOf(false)
         private set
     private val networkRendererClient = DesktopUpnpRendererClient()
+    private val networkRendererDiscovery = testOverrides?.networkRendererDiscovery
+        ?: DesktopUpnpRendererDiscovery()
     private val openHomePlaylistClient = DesktopOpenHomePlaylistClient()
     private val openHomeQueueCoordinator = DesktopOpenHomePlaylistQueueCoordinator(openHomePlaylistClient)
     private val openHomeMediaRetention = DesktopOpenHomeMediaResourceRetention()
@@ -2449,7 +2452,7 @@ class DesktopPlayerController private constructor(
         networkRendererDiscoveryError = null
         networkRendererDiscoveryJob = scope.launch {
             try {
-                val devices = DesktopUpnpRendererDiscovery().discover()
+                val devices = networkRendererDiscovery.discover()
                 if (generation == networkRendererDiscoveryGeneration) {
                     networkRendererDevices = devices
                 }
@@ -5015,7 +5018,7 @@ class DesktopPlayerController private constructor(
                 val originalRendererAddress = originalBinding.rendererAddress
                 val refreshRendererDescription = snapshot.connectionState == DesktopUpnpConnectionState.DISCONNECTED
                 val recoveryDevice = if (refreshRendererDescription) {
-                    DesktopUpnpRendererDiscovery().discover(timeoutMillis = 1_000L)
+                    networkRendererDiscovery.discover(timeoutMillis = 1_000L)
                         .firstOrNull { it.identity == originalDevice.identity && it.supportsAvTransport }
                         ?: throw IOException(tr("settings.network_renderer.recovery.device_not_found"))
                 } else {
