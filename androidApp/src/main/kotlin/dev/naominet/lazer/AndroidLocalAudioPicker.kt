@@ -19,6 +19,17 @@ internal fun readAndroidLocalAudioFile(context: Context, uri: Uri): LazerPickedA
     val retriever = MediaMetadataRetriever()
     val metadata = runCatching {
         retriever.setDataSource(context, uri)
+        val trackIndex = parseLocalAudioIndex(
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER),
+        )
+        val discIndex = parseLocalAudioIndex(
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER),
+        )
+        val totalTracks = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_NUM_TRACKS)
+            ?.toIntOrNull()?.takeIf { total ->
+                total in 1..99_999 && (trackIndex.first?.let { total >= it } ?: true)
+            }
+            ?: trackIndex.second
         LazerPickedAudioFile(
             uri = uri.toString(),
             title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
@@ -27,6 +38,18 @@ internal fun readAndroidLocalAudioFile(context: Context, uri: Uri): LazerPickedA
             album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty().trim(),
             durationMillis = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull()?.coerceAtLeast(0L) ?: 0L,
+            albumArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST)
+                ?.trim()?.takeIf(String::isNotEmpty),
+            genre = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE)
+                ?.trim()?.takeIf(String::isNotEmpty),
+            year = parseLocalAudioYear(
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR)
+                    ?: retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE),
+            ),
+            trackNumber = trackIndex.first,
+            totalTracks = totalTracks,
+            discNumber = discIndex.first,
+            totalDiscs = discIndex.second,
         )
     }.getOrElse {
         LazerPickedAudioFile(uri = uri.toString(), title = fallbackTitle)
@@ -54,13 +77,44 @@ internal fun readAndroidLocalAudioFile(context: Context, uri: Uri): LazerPickedA
         } else {
             null
         }
+    val trackNumber = embeddedMetadata?.trackNumber ?: metadata.trackNumber
+    val discNumber = embeddedMetadata?.discNumber ?: metadata.discNumber
+    val totalTracks = (embeddedMetadata?.totalTracks ?: metadata.totalTracks)
+        ?.takeIf { trackNumber == null || it >= trackNumber }
+    val totalDiscs = (embeddedMetadata?.totalDiscs ?: metadata.totalDiscs)
+        ?.takeIf { discNumber == null || it >= discNumber }
     return metadata.copy(
         title = embeddedMetadata?.title?.takeIf(String::isNotBlank) ?: metadata.title,
         artist = embeddedMetadata?.artist?.takeIf(String::isNotBlank) ?: metadata.artist,
         album = embeddedMetadata?.album?.takeIf(String::isNotBlank) ?: metadata.album,
         durationMillis = durationMillis ?: 0L,
         replayGain = embeddedMetadata?.replayGain,
+        albumArtist = embeddedMetadata?.albumArtist?.takeIf(String::isNotBlank) ?: metadata.albumArtist,
+        genre = embeddedMetadata?.genre?.takeIf(String::isNotBlank) ?: metadata.genre,
+        year = embeddedMetadata?.year ?: metadata.year,
+        trackNumber = trackNumber,
+        totalTracks = totalTracks,
+        discNumber = discNumber,
+        totalDiscs = totalDiscs,
     )
+}
+
+private fun parseLocalAudioYear(value: String?): Int? = value
+    ?.trim()
+    ?.takeIf { it.length >= 4 && it.take(4).all(Char::isDigit) }
+    ?.let { text ->
+        val next = text.getOrNull(4)
+        if (next != null && !next.isDigit() && next !in "-/. T") return@let null
+        text.take(4)
+    }
+    ?.toIntOrNull()
+    ?.takeIf { it in 1..9_999 }
+
+private fun parseLocalAudioIndex(value: String?): Pair<Int?, Int?> {
+    val parts = value?.trim()?.split('/', limit = 2) ?: return null to null
+    val number = parts[0].toIntOrNull()?.takeIf { it in 1..99_999 } ?: return null to null
+    val total = parts.getOrNull(1)?.toIntOrNull()?.takeIf { it in number..99_999 }
+    return number to total
 }
 
 internal fun androidLocalAudioContainer(displayName: String, mimeType: String?): String? {

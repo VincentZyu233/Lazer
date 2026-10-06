@@ -18,6 +18,13 @@ data class LazerTrack(
     val translatedTitle: String? = null,
     val source: LazerTrackSource = LazerTrackSource.GatewaySong,
     val replayGain: LazerReplayGainTags? = null,
+    val albumArtist: String? = null,
+    val genre: String? = null,
+    val year: Int? = null,
+    val trackNumber: Int? = null,
+    val totalTracks: Int? = null,
+    val discNumber: Int? = null,
+    val totalDiscs: Int? = null,
 ) {
     val durationLabel: String get() = formatPlaybackTime(durationMillis)
 }
@@ -37,6 +44,13 @@ data class LazerPickedAudioFile(
     val album: String = "",
     val durationMillis: Long = 0L,
     val replayGain: LazerReplayGainTags? = null,
+    val albumArtist: String? = null,
+    val genre: String? = null,
+    val year: Int? = null,
+    val trackNumber: Int? = null,
+    val totalTracks: Int? = null,
+    val discNumber: Int? = null,
+    val totalDiscs: Int? = null,
 )
 
 data class LazerLocalAudioPickerResult(

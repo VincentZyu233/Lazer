@@ -686,6 +686,13 @@ class LazerGatewayController(private val device: LazerDevice) {
                     durationMillis = file.durationMillis.coerceAtLeast(0L),
                     source = LazerTrackSource.LocalFile(file.uri),
                     replayGain = file.replayGain,
+                    albumArtist = file.albumArtist,
+                    genre = file.genre,
+                    year = file.year,
+                    trackNumber = file.trackNumber,
+                    totalTracks = file.totalTracks,
+                    discNumber = file.discNumber,
+                    totalDiscs = file.totalDiscs,
                 )
             }
         if (tracks.isEmpty()) return

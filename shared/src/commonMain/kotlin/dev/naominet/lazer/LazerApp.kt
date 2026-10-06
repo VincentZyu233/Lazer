@@ -4594,6 +4594,35 @@ private fun TranslatedTrackTitle(title: String?, color: Color = MaterialTheme.co
 }
 
 @Composable
+private fun LocalAudioMetadataCaption(track: LazerTrack) {
+    val details = buildList {
+        track.albumArtist?.takeIf { it.isNotBlank() && it != track.artist }?.let {
+            add(tr("metadata.album_artist", it))
+        }
+        track.genre?.takeIf(String::isNotBlank)?.let { add(tr("metadata.genre", it)) }
+        track.year?.let { add(tr("metadata.year", it)) }
+        track.trackNumber?.let { number ->
+            val index = if (track.totalTracks != null) "$number/${track.totalTracks}" else number.toString()
+            add(tr("metadata.track", index))
+        }
+        track.discNumber?.let { number ->
+            val index = if (track.totalDiscs != null) "$number/${track.totalDiscs}" else number.toString()
+            add(tr("metadata.disc", index))
+        }
+    }
+    if (details.isNotEmpty()) {
+        Text(
+            details.joinToString(" · "),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
 private fun MobileArtwork(
     url: String?,
     label: String,
@@ -4974,6 +5003,7 @@ private fun NowPlayingPage(
                             MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant,
                             offerCopy = true,
                         )
+                        LocalAudioMetadataCaption(track)
                         Spacer(Modifier.weight(1f))
                         Column(
                             Modifier.fillMaxWidth()
@@ -5132,6 +5162,7 @@ private fun NowPlayingPage(
                                 MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
                                 offerCopy = true,
                             )
+                            LocalAudioMetadataCaption(track)
                         }
                         // The liked state belongs to the song, so it stays beside its title
                         // instead of travelling with the transport controls below.

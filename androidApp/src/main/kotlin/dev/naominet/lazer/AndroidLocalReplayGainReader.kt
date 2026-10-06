@@ -16,9 +16,18 @@ internal data class AndroidLocalAudioMetadata(
     val artist: String? = null,
     val album: String? = null,
     val replayGain: LazerReplayGainTags? = null,
+    val albumArtist: String? = null,
+    val genre: String? = null,
+    val year: Int? = null,
+    val trackNumber: Int? = null,
+    val totalTracks: Int? = null,
+    val discNumber: Int? = null,
+    val totalDiscs: Int? = null,
 ) {
     val hasValues: Boolean
-        get() = title != null || artist != null || album != null || replayGain != null
+        get() = title != null || artist != null || album != null || replayGain != null ||
+            albumArtist != null || genre != null || year != null || trackNumber != null ||
+            totalTracks != null || discNumber != null || totalDiscs != null
 }
 
 /** Reads only bounded WAV/FLAC/DSF/DFF metadata; audio payloads are skipped and never buffered. */
@@ -41,12 +50,21 @@ internal object AndroidLocalReplayGainReader {
     private const val APE_FLAG_HEADER_PRESENT = 0x8000_0000L
     private const val APE_FLAG_NO_FOOTER = 0x4000_0000L
     private const val APE_FLAG_IS_HEADER = 0x2000_0000L
-    private val vorbisDisplayKeys = setOf("TITLE", "ARTIST", "ALBUM")
-    private val apeDisplayKeys = setOf("TITLE", "ARTIST", "ALBUM")
+    private val vorbisDisplayKeys = setOf(
+        "TITLE", "ARTIST", "ALBUM", "ALBUMARTIST", "ALBUM ARTIST", "GENRE", "DATE", "YEAR",
+        "TRACKNUMBER", "TRACK", "TOTALTRACKS", "TRACKTOTAL", "DISCNUMBER", "DISC", "TOTALDISCS",
+    )
+    private val apeDisplayKeys = vorbisDisplayKeys
     private val id3DisplayFrames = mapOf(
-        "TIT2" to "title",
-        "TPE1" to "artist",
-        "TALB" to "album",
+        "TIT2" to "TITLE",
+        "TPE1" to "ARTIST",
+        "TALB" to "ALBUM",
+        "TPE2" to "ALBUMARTIST",
+        "TCON" to "GENRE",
+        "TDRC" to "YEAR",
+        "TYER" to "YEAR",
+        "TRCK" to "TRACKNUMBER",
+        "TPOS" to "DISCNUMBER",
     )
     private val replayGainKeys = setOf(
         "REPLAYGAIN_TRACK_GAIN",
@@ -189,8 +207,13 @@ internal object AndroidLocalReplayGainReader {
                 val valueBytes = input.readBytesExact(valueLength.toInt()) ?: return null
                 val value = decodeApeTextValue(valueBytes)
                 if (value != null) {
-                    if (key in apeDisplayKeys && key !in displayValues) {
-                        normalizeDisplayText(value)?.let { displayValues[key] = it }
+                    if (key in apeDisplayKeys) {
+                        val canonicalKey = canonicalDisplayKey(key)
+                        if (canonicalKey !in displayValues) {
+                            normalizeDisplayText(value)?.let {
+                                putFirstValidDisplayValue(displayValues, canonicalKey, it)
+                            }
+                        }
                     } else if (key in replayGainKeys && key !in replayGainValues) {
                         parseReplayGain(key, value)?.let { replayGainValues[key] = it }
                     }
@@ -199,12 +222,7 @@ internal object AndroidLocalReplayGainReader {
             position = valueStart + valueLength
         }
 
-        return AndroidLocalAudioMetadata(
-            title = displayValues["TITLE"],
-            artist = displayValues["ARTIST"],
-            album = displayValues["ALBUM"],
-            replayGain = replayGainValues.toTags(),
-        ).takeIf(AndroidLocalAudioMetadata::hasValues)
+        return toAudioMetadata(displayValues, replayGainValues.toTags())
     }
 
     private fun decodeApeTextValue(bytes: ByteArray): String? {
@@ -436,20 +454,19 @@ internal object AndroidLocalReplayGainReader {
                     }
                 } else if (frameId in id3DisplayFrames) {
                     val key = id3DisplayFrames.getValue(frameId)
-                    if (key !in displayValues) {
-                        decodeId3TextValues(payload)?.let { displayValues[key] = it }
+                    if (key !in displayValues || (frameId == "TDRC" && key == "YEAR")) {
+                        decodeId3TextValues(payload)?.let { decoded ->
+                            normalizeDisplayText(decoded)?.let {
+                                putFirstValidDisplayValue(displayValues, key, it, overwrite = frameId == "TDRC")
+                            }
+                        }
                     }
                 }
             }
             cursor = payloadStart + frameSize.toInt()
             frames++
         }
-        return AndroidLocalAudioMetadata(
-            title = displayValues["title"],
-            artist = displayValues["artist"],
-            album = displayValues["album"],
-            replayGain = values.toTags(),
-        ).takeIf(AndroidLocalAudioMetadata::hasValues)
+        return toAudioMetadata(displayValues, values.toTags())
     }
 
     private fun decodeId3TextValues(payload: ByteArray): String? {
@@ -575,10 +592,10 @@ internal object AndroidLocalReplayGainReader {
                         if (key in replayGainKeys && key !in values) {
                             parseReplayGain(key, field.substring(separator + 1))?.let { value -> values[key] = value }
                         } else if (key in vorbisDisplayKeys) {
-                            val displayKey = key.lowercase()
+                            val displayKey = canonicalDisplayKey(key)
                             if (displayKey !in displayValues) {
                                 normalizeDisplayText(field.substring(separator + 1))?.let {
-                                    displayValues[displayKey] = it
+                                    putFirstValidDisplayValue(displayValues, displayKey, it)
                                 }
                             }
                         }
@@ -587,12 +604,99 @@ internal object AndroidLocalReplayGainReader {
             }
             cursor += length.toInt()
         }
+        return toAudioMetadata(displayValues, values.toTags())
+    }
+
+    private fun canonicalDisplayKey(key: String): String = when (key) {
+        "ALBUM ARTIST" -> "ALBUMARTIST"
+        "TRACK" -> "TRACKNUMBER"
+        "TRACKTOTAL" -> "TOTALTRACKS"
+        "DISC" -> "DISCNUMBER"
+        else -> key
+    }
+
+    private fun toAudioMetadata(
+        values: Map<String, String>,
+        replayGain: LazerReplayGainTags?,
+    ): AndroidLocalAudioMetadata? {
+        val track = parseIndexTag(values["TRACKNUMBER"])
+        val disc = parseIndexTag(values["DISCNUMBER"])
         return AndroidLocalAudioMetadata(
-            title = displayValues["title"],
-            artist = displayValues["artist"],
-            album = displayValues["album"],
-            replayGain = values.toTags(),
+            title = values["TITLE"],
+            artist = values["ARTIST"],
+            album = values["ALBUM"],
+            replayGain = replayGain,
+            albumArtist = values["ALBUMARTIST"],
+            genre = values["GENRE"],
+            year = parseYear(values["YEAR"] ?: values["DATE"]),
+            trackNumber = track.number,
+            totalTracks = totalNumber(track.number, track.total ?: parsePositiveNumber(values["TOTALTRACKS"])),
+            discNumber = disc.number,
+            totalDiscs = totalNumber(disc.number, disc.total ?: parsePositiveNumber(values["TOTALDISCS"])),
         ).takeIf(AndroidLocalAudioMetadata::hasValues)
+    }
+
+    private fun putFirstValidDisplayValue(
+        values: MutableMap<String, String>,
+        key: String,
+        value: String,
+        overwrite: Boolean = false,
+    ) {
+        if (!overwrite && key in values) return
+        val valid = when (key) {
+            "YEAR", "DATE" -> parseYear(value) != null
+            "TRACKNUMBER", "DISCNUMBER" -> parseIndexTag(value).number != null
+            "TOTALTRACKS", "TOTALDISCS" -> parsePositiveNumber(value) != null
+            else -> value.isNotBlank()
+        }
+        if (!valid) return
+        val count = parsePositiveNumber(value)
+        val index = when (key) {
+            "TOTALTRACKS" -> parseIndexTag(values["TRACKNUMBER"]).number
+            "TOTALDISCS" -> parseIndexTag(values["DISCNUMBER"]).number
+            else -> null
+        }
+        if (count != null && index != null && count < index) return
+        values[key] = value
+        when (key) {
+            "TRACKNUMBER" -> {
+                val number = parseIndexTag(value).number
+                if (number != null && parsePositiveNumber(values["TOTALTRACKS"])?.let { it < number } == true) {
+                    values.remove("TOTALTRACKS")
+                }
+            }
+            "DISCNUMBER" -> {
+                val number = parseIndexTag(value).number
+                if (number != null && parsePositiveNumber(values["TOTALDISCS"])?.let { it < number } == true) {
+                    values.remove("TOTALDISCS")
+                }
+            }
+        }
+    }
+
+    private data class IndexTag(val number: Int?, val total: Int?)
+
+    private fun parseIndexTag(value: String?): IndexTag {
+        val parts = value?.substringBefore(';')?.trim()?.split('/', limit = 2) ?: return IndexTag(null, null)
+        val number = parsePositiveNumber(parts[0]) ?: return IndexTag(null, null)
+        val total = parts.getOrNull(1)?.let(::parsePositiveNumber)?.takeIf { it >= number }
+        return IndexTag(number, total)
+    }
+
+    private fun totalNumber(number: Int?, total: Int?): Int? =
+        total?.takeIf { number == null || it >= number }
+
+    private fun parsePositiveNumber(value: String?): Int? = value
+        ?.trim()
+        ?.toIntOrNull()
+        ?.takeIf { it in 1..99_999 }
+
+    private fun parseYear(value: String?): Int? {
+        val text = value?.trim()?.takeIf { it.length >= 4 } ?: return null
+        if (!text.take(4).all(Char::isDigit)) return null
+        val next = text.getOrNull(4)
+        if (next != null && !next.isDigit() && next !in "-/. T") return null
+        return text.take(4).toIntOrNull()?.takeIf { it in 1..9_999 }
     }
 
     private fun normalizeDisplayText(value: String): String? = value
@@ -624,6 +728,13 @@ internal object AndroidLocalReplayGainReader {
             artist = existing.artist ?: next.artist,
             album = existing.album ?: next.album,
             replayGain = replayGain,
+            albumArtist = existing.albumArtist ?: next.albumArtist,
+            genre = existing.genre ?: next.genre,
+            year = existing.year ?: next.year,
+            trackNumber = existing.trackNumber ?: next.trackNumber,
+            totalTracks = existing.totalTracks ?: next.totalTracks,
+            discNumber = existing.discNumber ?: next.discNumber,
+            totalDiscs = existing.totalDiscs ?: next.totalDiscs,
         )
     }
 

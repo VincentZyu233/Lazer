@@ -1344,14 +1344,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
         if (key == sessionMetadataKey) return
         sessionMetadataKey = key
 
-        val metadata = MediaMetadata.Builder()
-            .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
-            .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, track.title)
-            .putString(MediaMetadata.METADATA_KEY_ARTIST, track.artist)
-            .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, track.artist)
-            .putString(MediaMetadata.METADATA_KEY_ALBUM, track.album)
-            .putString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI, track.coverUrl)
-            .putLong(MediaMetadata.METADATA_KEY_DURATION, track.durationMillis)
+        val metadata = androidSessionMetadataBuilder(track)
         if (hasArtwork) {
             val bitmap = artworkBitmap
             if (bitmap != null) {

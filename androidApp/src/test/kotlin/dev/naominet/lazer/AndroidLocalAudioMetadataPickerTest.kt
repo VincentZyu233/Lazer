@@ -30,6 +30,13 @@ class AndroidLocalAudioMetadataPickerTest {
             assertEquals("Embedded artist", picked.artist)
             assertEquals("Embedded album", picked.album)
             assertEquals(LazerReplayGainTags(trackGainDb = -6.0), picked.replayGain)
+            assertEquals("Embedded album artist", picked.albumArtist)
+            assertEquals("Shoegaze", picked.genre)
+            assertEquals(1991, picked.year)
+            assertEquals(2, picked.trackNumber)
+            assertEquals(11, picked.totalTracks)
+            assertEquals(1, picked.discNumber)
+            assertEquals(2, picked.totalDiscs)
         } finally {
             file.delete()
         }
@@ -39,6 +46,11 @@ class AndroidLocalAudioMetadataPickerTest {
         val id3Body = frame("TIT2", text("Embedded title")) +
             frame("TPE1", text("Embedded artist")) +
             frame("TALB", text("Embedded album")) +
+            frame("TPE2", text("Embedded album artist")) +
+            frame("TCON", text("Shoegaze")) +
+            frame("TYER", text("1991")) +
+            frame("TRCK", text("02/11")) +
+            frame("TPOS", text("1/2")) +
             frame("TXXX", byteArrayOf(3) + "REPLAYGAIN_TRACK_GAIN".toByteArray() + byteArrayOf(0) +
                 "-6.0 dB".toByteArray())
         val id3 = "ID3".bytes() + byteArrayOf(3, 0, 0) + synchsafe(id3Body.size) + id3Body

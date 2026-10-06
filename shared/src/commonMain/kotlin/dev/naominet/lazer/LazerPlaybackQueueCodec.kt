@@ -7,7 +7,7 @@ import kotlinx.serialization.json.Json
 
 /** Versioned, platform-neutral representation of the Android queue stored between launches. */
 object LazerPlaybackQueueCodec {
-    private const val SCHEMA_VERSION = 2
+    private const val SCHEMA_VERSION = 3
     private const val MAX_ENCODED_LENGTH = 20 * 1024 * 1024
     private const val MAX_METADATA_FIELD_LENGTH = 16 * 1024
     private const val MAX_TRACK_METADATA_LENGTH = 16 * 1024
@@ -69,12 +69,22 @@ object LazerPlaybackQueueCodec {
                 track.title.length <= MAX_METADATA_FIELD_LENGTH &&
                 track.artist.length <= MAX_METADATA_FIELD_LENGTH &&
                 track.album.length <= MAX_METADATA_FIELD_LENGTH &&
+                (track.albumArtist?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH &&
+                (track.genre?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH &&
                 (track.coverUrl?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH &&
                 (track.translatedTitle?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH &&
                 track.artists.size <= MAX_ARTISTS_PER_TRACK &&
                 track.artists.all { it.name.length <= MAX_METADATA_FIELD_LENGTH } &&
+                (track.year == null || track.year in 1..9_999) &&
+                (track.trackNumber == null || track.trackNumber in 1..99_999) &&
+                (track.totalTracks == null || track.totalTracks in 1..99_999) &&
+                (track.trackNumber == null || track.totalTracks == null || track.totalTracks >= track.trackNumber) &&
+                (track.discNumber == null || track.discNumber in 1..99_999) &&
+                (track.totalDiscs == null || track.totalDiscs in 1..99_999) &&
+                (track.discNumber == null || track.totalDiscs == null || track.totalDiscs >= track.discNumber) &&
                 (
                     track.title.length + track.artist.length + track.album.length +
+                        (track.albumArtist?.length ?: 0) + (track.genre?.length ?: 0) +
                         (track.coverUrl?.length ?: 0) + (track.translatedTitle?.length ?: 0) +
                         (track.source as? LazerTrackSource.LocalFile)?.uri.orEmpty().length +
                         track.artists.sumOf { it.name.length }
@@ -107,6 +117,13 @@ object LazerPlaybackQueueCodec {
         val sourceType: String = SOURCE_GATEWAY,
         val localUri: String? = null,
         val replayGain: PersistedReplayGainTags? = null,
+        val albumArtist: String? = null,
+        val genre: String? = null,
+        val year: Int? = null,
+        val trackNumber: Int? = null,
+        val totalTracks: Int? = null,
+        val discNumber: Int? = null,
+        val totalDiscs: Int? = null,
     ) {
         constructor(track: LazerTrack) : this(
             id = track.id,
@@ -123,6 +140,13 @@ object LazerPlaybackQueueCodec {
             },
             localUri = (track.source as? LazerTrackSource.LocalFile)?.uri,
             replayGain = track.replayGain?.toPersistedReplayGain(),
+            albumArtist = track.albumArtist,
+            genre = track.genre,
+            year = track.year,
+            trackNumber = track.trackNumber,
+            totalTracks = track.totalTracks,
+            discNumber = track.discNumber,
+            totalDiscs = track.totalDiscs,
         )
 
         fun toTrack(): LazerTrack {
@@ -130,6 +154,8 @@ object LazerPlaybackQueueCodec {
             require(title.length <= MAX_METADATA_FIELD_LENGTH)
             require(artist.length <= MAX_METADATA_FIELD_LENGTH)
             require(album.length <= MAX_METADATA_FIELD_LENGTH)
+            require((albumArtist?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH)
+            require((genre?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH)
             require((coverUrl?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH)
             require((translatedTitle?.length ?: 0) <= MAX_METADATA_FIELD_LENGTH)
             require(artists.size <= MAX_ARTISTS_PER_TRACK)
@@ -156,6 +182,13 @@ object LazerPlaybackQueueCodec {
                 translatedTitle = translatedTitle,
                 source = source,
                 replayGain = replayGain?.toLazerReplayGain(),
+                albumArtist = albumArtist,
+                genre = genre,
+                year = year,
+                trackNumber = trackNumber,
+                totalTracks = totalTracks,
+                discNumber = discNumber,
+                totalDiscs = totalDiscs,
             )
         }
     }
@@ -192,5 +225,5 @@ object LazerPlaybackQueueCodec {
 
     private const val SOURCE_GATEWAY = "gateway"
     private const val SOURCE_LOCAL = "local"
-    private val SUPPORTED_SCHEMA_VERSIONS = setOf(1, SCHEMA_VERSION)
+    private val SUPPORTED_SCHEMA_VERSIONS = setOf(1, 2, SCHEMA_VERSION)
 }

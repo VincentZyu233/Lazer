@@ -190,6 +190,67 @@ class AndroidLocalAudioPickerTest {
     }
 
     @Test
+    fun readsExtendedId3AndVorbisMetadataWithBoundedTrackAndDiscNumbers() {
+        val id3 = wav(
+            chunk(
+                "ID3 ",
+                id3v24(
+                    id3TextFrameV24("TPE2", "Album artist", encoding = 1),
+                    id3TextFrameV24("TCON", "Progressive rock"),
+                    id3TextFrameV24("TYER", "1998"),
+                    id3TextFrameV24("TRCK", "03/12"),
+                    id3TextFrameV24("TPOS", "2/3"),
+                    id3TextFrameV24("TDRC", "2001-04-03"),
+                ),
+            ),
+        )
+        assertEquals(
+            AndroidLocalAudioMetadata(
+                albumArtist = "Album artist",
+                genre = "Progressive rock",
+                year = 2001,
+                trackNumber = 3,
+                totalTracks = 12,
+                discNumber = 2,
+                totalDiscs = 3,
+            ),
+            AndroidLocalReplayGainReader.readMetadata(CountingSource(id3), "wav"),
+        )
+
+        val vorbis = flac(
+            block(
+                type = 4,
+                last = true,
+                payload = vorbisComments(
+                    "ALBUM ARTIST=FLAC album artist",
+                    "GENRE=Jazz",
+                    "GENRE=Ignored duplicate",
+                    "YEAR=not-a-year",
+                    "DATE=1977-02-18",
+                    "TRACKNUMBER=0",
+                    "TRACKNUMBER=4",
+                    "TRACKTOTAL=3",
+                    "TRACKTOTAL=9",
+                    "DISCNUMBER=0/2",
+                    "DISCNUMBER=2/3",
+                ),
+            ),
+        )
+        assertEquals(
+            AndroidLocalAudioMetadata(
+                albumArtist = "FLAC album artist",
+                genre = "Jazz",
+                year = 1977,
+                trackNumber = 4,
+                totalTracks = 9,
+                discNumber = 2,
+                totalDiscs = 3,
+            ),
+            AndroidLocalReplayGainReader.readMetadata(CountingSource(vorbis), "flac"),
+        )
+    }
+
+    @Test
     fun readsDffReplayGainAfterRawAndDstAudioChunksWithPadding() {
         val tag = id3v24(
             txxx("REPLAYGAIN_ALBUM_GAIN", "-8.25 dB"),
@@ -312,6 +373,11 @@ class AndroidLocalAudioPickerTest {
             ApeItem.text("TITLE", "APE title must not replace WAV title"),
             ApeItem.text("ARTIST", "APE 艺人"),
             ApeItem.text("ALBUM", "APE album"),
+            ApeItem.text("ALBUM ARTIST", "APE album artist"),
+            ApeItem.text("GENRE", "Classical"),
+            ApeItem.text("YEAR", "1965"),
+            ApeItem.text("TRACK", "7/10"),
+            ApeItem.text("DISC", "2/2"),
             ApeItem.text("REPLAYGAIN_TRACK_GAIN", "-12 dB"),
             ApeItem.text("REPLAYGAIN_TRACK_PEAK", "0.75"),
             ApeItem.text("REPLAYGAIN_ALBUM_GAIN", "-8.5 dB"),
@@ -334,6 +400,13 @@ class AndroidLocalAudioPickerTest {
                 artist = "APE 艺人",
                 album = "APE album",
                 replayGain = LazerReplayGainTags(-3.0, 0.75, -8.5),
+                albumArtist = "APE album artist",
+                genre = "Classical",
+                year = 1965,
+                trackNumber = 7,
+                totalTracks = 10,
+                discNumber = 2,
+                totalDiscs = 2,
             ),
             AndroidLocalReplayGainReader.readMetadata(input, "wav"),
         )

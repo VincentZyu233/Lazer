@@ -40,6 +40,13 @@ class LazerPlaybackQueueCodecTest {
             durationMillis = 90_000L,
             source = LazerTrackSource.LocalFile("content://provider/document/track-1"),
             replayGain = LazerReplayGainTags(trackGainDb = 3.0, trackPeak = 0.5),
+            albumArtist = "Demo ensemble",
+            genre = "Jazz",
+            year = 1965,
+            trackNumber = 3,
+            totalTracks = 10,
+            discNumber = 1,
+            totalDiscs = 2,
         )
         val expected = LazerPlaybackQueueSnapshot(
             tracks = listOf(online, local),
@@ -48,7 +55,7 @@ class LazerPlaybackQueueCodecTest {
         )
 
         val encoded = LazerPlaybackQueueCodec.encode(expected)
-        assertTrue(encoded.contains("\"schemaVersion\":2"))
+        assertTrue(encoded.contains("\"schemaVersion\":3"))
         val restored = LazerPlaybackQueueCodec.decode(encoded)
 
         assertEquals(expected, restored)
@@ -56,7 +63,7 @@ class LazerPlaybackQueueCodecTest {
 
     @Test
     fun `decoder rejects unsupported schema malformed selection and oversized queues`() {
-        assertNull(LazerPlaybackQueueCodec.decode("{\"schemaVersion\":3,\"tracks\":[],\"index\":-1,\"mode\":\"ListLoop\"}"))
+        assertNull(LazerPlaybackQueueCodec.decode("{\"schemaVersion\":4,\"tracks\":[],\"index\":-1,\"mode\":\"ListLoop\"}"))
         assertNull(LazerPlaybackQueueCodec.decode("{\"schemaVersion\":1,\"tracks\":[],\"index\":0,\"mode\":\"ListLoop\"}"))
         assertNull(LazerPlaybackQueueCodec.decode("{not-json"))
 
@@ -79,6 +86,25 @@ class LazerPlaybackQueueCodecTest {
         assertEquals(1, restored?.tracks?.size)
         assertEquals("Legacy", restored?.tracks?.single()?.title)
         assertNull(restored?.tracks?.single()?.replayGain)
+    }
+
+    @Test
+    fun `schema two queues restore with new local tags absent`() {
+        val schemaTwo = """
+            {"schemaVersion":2,"tracks":[{"id":-3,"title":"Legacy local","artist":"Artist","album":"Album","durationMillis":90000,"sourceType":"local","localUri":"content://provider/track","replayGain":{"trackGainDb":-4.0}}],"index":0,"mode":"ListLoop"}
+        """.trimIndent()
+
+        val track = LazerPlaybackQueueCodec.decode(schemaTwo)?.tracks?.single()
+
+        assertEquals("Legacy local", track?.title)
+        assertEquals(LazerReplayGainTags(trackGainDb = -4.0), track?.replayGain)
+        assertNull(track?.albumArtist)
+        assertNull(track?.genre)
+        assertNull(track?.year)
+        assertNull(track?.trackNumber)
+        assertNull(track?.totalTracks)
+        assertNull(track?.discNumber)
+        assertNull(track?.totalDiscs)
     }
 
     @Test
