@@ -88,6 +88,38 @@ class AndroidLocalAudioLibraryRepositoryTest {
     }
 
     @Test
+    fun largeFlatDirectoryStreamsTenThousandTracksAndReusesTheirMetadataOnRescan() {
+        val files = (0 until 10_000).map { index ->
+            file(
+                id = "track-$index",
+                name = "track-$index.flac",
+                mime = "audio/flac",
+                size = 1_000L + index,
+                modified = 10_000L + index,
+            )
+        }
+        val tree = FakeDocuments(root()).apply {
+            children["root"] = files + files.first()
+        }
+        val reads = mutableListOf<String>()
+        val repository = repository(tree, reads)
+
+        repository.addRoot(treeUri)
+
+        assertEquals(10_000, reads.size)
+        assertEquals(10_000, repository.state.value.tracks.size)
+        assertEquals(10_001, repository.state.value.scannedFileCount)
+        assertNull(repository.state.value.issue)
+
+        repository.rescan()
+
+        assertEquals("Unchanged document metadata should be reused across a large rescan", 10_000, reads.size)
+        assertEquals(10_000, repository.state.value.tracks.size)
+        assertEquals(10_001, repository.state.value.scannedFileCount)
+        assertNull(repository.state.value.issue)
+    }
+
+    @Test
     fun successfulRescanDropsDeletedDocumentsAndPersistsTheCatalogForNextInstance() {
         val tree = FakeDocuments(root()).apply {
             children["root"] = listOf(
@@ -205,14 +237,20 @@ class AndroidLocalAudioLibraryRepositoryTest {
         val tree = FakeDocuments(root()).apply {
             children["root"] = listOf(file("one", "one.flac", "audio/flac", 100, 10))
         }
-        val repository = repository(tree, mutableListOf())
+        val reads = mutableListOf<String>()
+        val repository = repository(tree, reads)
         repository.addRoot(treeUri)
         val oldSnapshot = repository.state.value.tracks
-        tree.cancelAtParent = "root"
+        tree.children["root"] = listOf(
+            file("two", "two.flac", "audio/flac", 200, 20),
+            file("three", "three.flac", "audio/flac", 300, 30),
+        )
+        tree.cancelAfterDocumentId = "two"
 
         repository.rescan()
 
         assertEquals(oldSnapshot, repository.state.value.tracks)
+        assertEquals("The scan should have processed an item before cancellation", 2, reads.size)
         assertNull(repository.state.value.issue)
         assertFalse(repository.state.value.isScanning)
     }
@@ -241,8 +279,8 @@ class AndroidLocalAudioLibraryRepositoryTest {
     ): AndroidLocalAudioLibraryRepository {
         val readMetadata: (Uri) -> LazerPickedAudioFile? = { uri ->
             reads += uri.toString()
-            val isUpdated = tree.children.values.flatten().any {
-                it.documentId == uri.lastPathSegment && it.sizeBytes == 101L
+            val isUpdated = uri.lastPathSegment == "one" && tree.children.values.any { siblings ->
+                siblings.any { it.documentId == "one" && it.sizeBytes == 101L }
             }
             LazerPickedAudioFile(
                 uri = uri.toString(),
@@ -329,19 +367,26 @@ class AndroidLocalAudioLibraryRepositoryTest {
         val childQueries = mutableListOf<String>()
         val failureParents = mutableSetOf<String>()
         var rootFailure: Throwable? = null
-        var cancelAtParent: String? = null
+        var cancelAfterDocumentId: String? = null
 
         override fun queryTreeRoot(treeUri: Uri): AndroidLocalAudioDocument {
             rootFailure?.let { throw it }
             return roots[treeUri.toString()] ?: root
         }
 
-        override fun queryChildren(treeUri: Uri, parentDocumentId: String): List<AndroidLocalAudioDocument> {
+        override fun forEachChild(
+            treeUri: Uri,
+            parentDocumentId: String,
+            consume: (AndroidLocalAudioDocument) -> Unit,
+        ) {
             childQueries += parentDocumentId
-            if (parentDocumentId == cancelAtParent) throw CancellationException("scan cancelled")
             if (parentDocumentId in failureParents) throw java.io.IOException("provider failed")
-            return children[parentDocumentId].orEmpty().map { child ->
-                child.copy(uri = "${treeUri}/document/${child.documentId}")
+            for (child in children[parentDocumentId].orEmpty()) {
+                val document = child.copy(uri = "${treeUri}/document/${child.documentId}")
+                consume(document)
+                if (document.documentId == cancelAfterDocumentId) {
+                    throw CancellationException("scan cancelled during child traversal")
+                }
             }
         }
     }

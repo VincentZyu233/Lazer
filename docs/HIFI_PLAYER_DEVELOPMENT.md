@@ -1,5 +1,7 @@
 # Lazer HiFi 播放器开发方案
 
+> **2026-10-06 Android SAF 大目录扫描：** `AndroidLocalAudioDocumentSource` 现从 DocumentsProvider Cursor 逐行回调子项；扫描器逐行处理并检查取消，不再先把整个扁平目录复制成临时 `List`。进度每处理 100 个支持文件发布一次，避免大目录扫描产生过密状态更新。Robolectric 假树用 10,000 个唯一文件加一个重复项验证去重、索引数量与二次扫描元数据复用；遍历中途取消仍保留旧曲库快照。`:androidApp:testDebugUnitTest` 240/240 通过，`:androidApp:assembleDebug` 成功。该合成测试不代表实体 Android 上的 DocumentsProvider 并发读取行为或 10,000 首曲库的实际扫描耗时；完整曲库快照和 track 列表仍按曲目数占用内存。
+
 > **2026-10-06 Android SAF 本地曲库首版：** Library 页面现支持无需登录的 Android 本地曲库：通过 `OpenDocumentTree` 记住多个文件夹，在后台递归扫描 WAV/WAVE、FLAC、DSF、DFF，按 provider authority + document ID 去重，按文件大小/修改时间复用已有标签；可搜索并按专辑、碟序、曲序稳定排序，点选后进入普通本地播放队列。完整扫描成功才替换持久快照；取消、文件夹失效或存储提交失败会保留旧曲目；移除目录仅在提交成功后生效；目录或本地播放队列仍引用的持久读授权会保留，队列替换/清空后清理孤儿 grant。本地曲目负 ID 分配全局同步，主动取消扫描不记为失败。曲库索引走 app-private `AtomicFile`，格式能力仍复用现有 Android 播放链；Android CUE 暂不支持。`:androidApp:testDebugUnitTest` 239/239、`:shared:jvmTest` 158/158 通过，`:androidApp:assembleDebug` 成功。仓库与 URI 授权使用 Robolectric/假 SAF 树测试；本机没有 Android emulator/实体设备，系统 DocumentsProvider 行为、实机授权恢复、真实大曲库扫描速度、实际播放与 DAC 输出仍待验证。
 
 > **2026-10-06 Android UAC2 DoP 与 Media3 浮点输出：** Media3 1.11.1 为高分辨率 PCM24 启用 float 输出时，会先把整数样本转换为 float；DoP 因此不能只接受 packed PCM24。UAC2 provider 现在只在 high-resolution PCM 输出已启用且 DoP 载波采样率匹配时接受该 float 格式；包装器仅将精确落在 signed PCM24 格点上的立体声样本无抖动地重新打包为 packed PCM24，非有限、越界或离开该格点的样本均拒绝发送。回归通过 Media3 实际 `ToFloatPcmAudioProcessor` 生成 float carrier，并逐字节核对原始 DoP 载波；另验证离开格点的样本会被拒绝。`:androidApp:testDebugUnitTest` 221/221 通过。未连接 Android 实体 DAC；DoP 锁定及数字回采仍待验证。

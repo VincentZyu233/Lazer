@@ -46,7 +46,13 @@ internal data class AndroidLocalAudioDocument(
 /** The narrow SAF surface used by the scanner, replaceable by an in-memory document tree in tests. */
 internal interface AndroidLocalAudioDocumentSource {
     fun queryTreeRoot(treeUri: Uri): AndroidLocalAudioDocument
-    fun queryChildren(treeUri: Uri, parentDocumentId: String): List<AndroidLocalAudioDocument>
+
+    /** Calls [consume] for each child row without materializing the full directory. */
+    fun forEachChild(
+        treeUri: Uri,
+        parentDocumentId: String,
+        consume: (AndroidLocalAudioDocument) -> Unit,
+    )
 }
 
 /**
@@ -248,6 +254,7 @@ class AndroidLocalAudioLibraryRepository internal constructor(
         stateFlow.value = initial.copy(isScanning = true, scannedFileCount = 0, issue = null)
         var fileCount = 0
         try {
+            val scanContext = currentCoroutineContext()
             val oldEntries = catalogEntries.associateBy { it.document.identity }
             val roots = mutableListOf<LazerLocalLibraryRoot>()
             val entries = linkedMapOf<String, AndroidLocalAudioCatalogEntry>()
@@ -274,56 +281,55 @@ class AndroidLocalAudioLibraryRepository internal constructor(
                 while (pending.isNotEmpty()) {
                     currentCoroutineContext().ensureActive()
                     val parentId = pending.removeLast()
-                    val children = try {
-                        documents.queryChildren(treeUri, parentId)
+                    try {
+                        documents.forEachChild(treeUri, parentId) { child ->
+                            scanContext.ensureActive()
+                            if (child.isDirectory) {
+                                if (visitedDirectories.add(child.documentId)) pending.addLast(child.documentId)
+                                return@forEachChild
+                            }
+                            if (!isSupportedAndroidLocalAudio(child.displayName, child.mimeType)) return@forEachChild
+                            fileCount += 1
+                            val alreadyFound = entries[child.identity]
+                            if (alreadyFound != null) {
+                                if (alreadyFound.ownerRootUri != root.uri && root.uri !in alreadyFound.alsoPresentInRoots) {
+                                    entries[child.identity] = alreadyFound.copy(
+                                        alsoPresentInRoots = alreadyFound.alsoPresentInRoots + root.uri,
+                                    )
+                                }
+                                return@forEachChild
+                            }
+
+                            val previous = oldEntries[child.identity]
+                            val reusable = previous?.takeIf {
+                                child.sizeBytes != null && child.lastModifiedMillis != null &&
+                                    it.document.sizeBytes == child.sizeBytes &&
+                                    it.document.lastModifiedMillis == child.lastModifiedMillis
+                            }
+                            val entry = reusable?.copy(
+                                document = child,
+                                track = reusable.track.copy(source = LazerTrackSource.LocalFile(child.uri)),
+                                ownerRootUri = root.uri,
+                                alsoPresentInRoots = emptyList(),
+                            ) ?: run {
+                                val picked = readMetadata(Uri.parse(child.uri))
+                                    ?: throw IOException("Metadata reader rejected supported URI ${child.uri}")
+                                val id = previous?.track?.id ?: nextLocalTrackId()
+                                AndroidLocalAudioCatalogEntry(
+                                    document = child,
+                                    track = picked.toCatalogTrack(id, child.uri),
+                                    ownerRootUri = root.uri,
+                                )
+                            }
+                            entries[child.identity] = entry
+                            if (fileCount % PROGRESS_UPDATE_INTERVAL == 0) {
+                                stateFlow.value = stateFlow.value.copy(scannedFileCount = fileCount)
+                            }
+                        }
                     } catch (denied: SecurityException) {
                         throw AndroidLocalAudioRootUnavailable(root.uri, denied)
                     } catch (invalid: IllegalArgumentException) {
                         throw AndroidLocalAudioRootUnavailable(root.uri, invalid)
-                    }
-                    for (child in children) {
-                        currentCoroutineContext().ensureActive()
-                        if (child.isDirectory) {
-                            if (visitedDirectories.add(child.documentId)) pending.addLast(child.documentId)
-                            continue
-                        }
-                        if (!isSupportedAndroidLocalAudio(child.displayName, child.mimeType)) continue
-                        fileCount += 1
-                        val alreadyFound = entries[child.identity]
-                        if (alreadyFound != null) {
-                            if (alreadyFound.ownerRootUri != root.uri && root.uri !in alreadyFound.alsoPresentInRoots) {
-                                entries[child.identity] = alreadyFound.copy(
-                                    alsoPresentInRoots = alreadyFound.alsoPresentInRoots + root.uri,
-                                )
-                            }
-                            continue
-                        }
-
-                        val previous = oldEntries[child.identity]
-                        val reusable = previous?.takeIf {
-                            child.sizeBytes != null && child.lastModifiedMillis != null &&
-                                it.document.sizeBytes == child.sizeBytes &&
-                                it.document.lastModifiedMillis == child.lastModifiedMillis
-                        }
-                        val entry = reusable?.copy(
-                            document = child,
-                            track = reusable.track.copy(source = LazerTrackSource.LocalFile(child.uri)),
-                            ownerRootUri = root.uri,
-                            alsoPresentInRoots = emptyList(),
-                        ) ?: run {
-                            val picked = readMetadata(Uri.parse(child.uri))
-                                ?: throw IOException("Metadata reader rejected supported URI ${child.uri}")
-                            val id = previous?.track?.id ?: nextLocalTrackId()
-                            AndroidLocalAudioCatalogEntry(
-                                document = child,
-                                track = picked.toCatalogTrack(id, child.uri),
-                                ownerRootUri = root.uri,
-                            )
-                        }
-                        entries[child.identity] = entry
-                        if (fileCount % PROGRESS_UPDATE_INTERVAL == 0) {
-                            stateFlow.value = stateFlow.value.copy(scannedFileCount = fileCount)
-                        }
                     }
                 }
             }
@@ -537,7 +543,7 @@ class AndroidLocalAudioLibraryRepository internal constructor(
     private companion object {
         const val TAG = "AndroidLocalLibrary"
         const val CATALOG_SCHEMA_VERSION = 1
-        const val PROGRESS_UPDATE_INTERVAL = 10
+        const val PROGRESS_UPDATE_INTERVAL = 100
 
         fun emptyLibrarySnapshot() = LazerLocalLibrarySnapshot(
             roots = emptyList(),
@@ -593,22 +599,25 @@ private class AndroidSafLocalAudioDocumentSource(context: Context) : AndroidLoca
         )
     }
 
-    override fun queryChildren(treeUri: Uri, parentDocumentId: String): List<AndroidLocalAudioDocument> {
+    override fun forEachChild(
+        treeUri: Uri,
+        parentDocumentId: String,
+        consume: (AndroidLocalAudioDocument) -> Unit,
+    ) {
         val uri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
         val cursor = resolver.query(uri, PROJECTION, null, null, null)
             ?: throw IOException("Document provider returned no children cursor")
-        return cursor.use { rows ->
-            val result = ArrayList<AndroidLocalAudioDocument>()
+        cursor.use { rows ->
             while (rows.moveToNext()) {
                 val id = rows.stringOrNull(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
                     ?: throw IOException("Document provider returned a child without an ID")
-                result += rows.toDocument(
+                val document = rows.toDocument(
                     treeUri,
                     id,
                     DocumentsContract.buildDocumentUriUsingTree(treeUri, id).toString(),
                 )
+                consume(document)
             }
-            result
         }
     }
 
