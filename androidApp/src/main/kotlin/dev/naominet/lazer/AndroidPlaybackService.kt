@@ -872,14 +872,18 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                                         mixerPreferenceAccepted = null,
                                         appDspMayModifySamples = false,
                                         directPath = DirectPathSnapshot(
-                                            status = if (inputIsFloat) DirectPathStatus.Unknown else DirectPathStatus.Negotiated,
-                                            reason = if (inputIsFloat) {
+                                            status = if (inputIsFloat && !doPOutput) {
+                                                DirectPathStatus.Unknown
+                                            } else {
+                                                DirectPathStatus.Negotiated
+                                            },
+                                            reason = if (inputIsFloat && !doPOutput) {
                                                 DirectPathReason.BitDepthConversion
                                             } else {
                                                 DirectPathReason.DigitalCaptureNotVerified
                                             },
                                             detail = if (doPOutput) {
-                                                "Raw DSD is packed into PCM24 DoP carriers; DAC lock and digital capture are not verified"
+                                                "Media3 high-resolution PCM24 float conversion is repacked without dither; DAC lock and digital capture are not verified"
                                             } else if (inputIsFloat) {
                                                 "Media3 high-resolution float PCM is dithered to the USB integer format"
                                             } else null,

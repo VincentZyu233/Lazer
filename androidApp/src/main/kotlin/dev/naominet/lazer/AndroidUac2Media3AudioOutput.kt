@@ -104,8 +104,10 @@ internal class AndroidUac2PcmTransportException(
 ) : Exception(message, cause)
 
 /**
- * Media3 [AudioOutput] for the direct UAC2 USB transport. DoP carriers remain packed PCM24 and reject
- * every non-unity volume request; ordinary PCM volume requests use only verified hardware control.
+ * Media3 [AudioOutput] for the direct UAC2 USB transport. DoP carriers remain packed PCM24; when
+ * Media3 promotes high-resolution PCM24 to float, the wrapper accepts only exact signed-24-bit
+ * lattice values and repacks them without dither. DoP rejects every non-unity volume request;
+ * ordinary PCM volume requests use only verified hardware control.
  */
 internal class AndroidUac2Media3AudioOutput(
     config: AudioOutputProvider.OutputConfig,
@@ -156,8 +158,9 @@ internal class AndroidUac2Media3AudioOutput(
         require(config.encoding in ANDROID_UAC2_PCM_SOURCE_BYTES_PER_SAMPLE) {
             "UAC2 output supports integer or float PCM input only"
         }
-        require(!doP || config.encoding == C.ENCODING_PCM_24BIT) {
-            "DoP output requires unchanged packed PCM24 carrier input"
+        require(!doP || (config.encoding == C.ENCODING_PCM_24BIT ||
+            config.encoding == C.ENCODING_PCM_FLOAT)) {
+            "DoP output requires packed PCM24 or Media3 high-resolution float carrier input"
         }
         require(!config.useOffloadGapless) { "UAC2 PCM output does not support offload gapless playback" }
 
@@ -216,12 +219,20 @@ internal class AndroidUac2Media3AudioOutput(
             val offeredFrames = buffer.remaining() / frameSizeBytes
             val sourcePosition = buffer.position()
             val view = if (inputEncoding == C.ENCODING_PCM_FLOAT) {
-                floatPcmToEndpointInteger(
-                    source = buffer,
-                    frameCount = offeredFrames,
-                    channels = transport.channelCount,
-                    targetBytesPerSample = transport.bytesPerSample,
-                )
+                if (doP) {
+                    floatPcm24CarrierToPackedInteger(
+                        source = buffer,
+                        frameCount = offeredFrames,
+                        channels = transport.channelCount,
+                    )
+                } else {
+                    floatPcmToEndpointInteger(
+                        source = buffer,
+                        frameCount = offeredFrames,
+                        channels = transport.channelCount,
+                        targetBytesPerSample = transport.bytesPerSample,
+                    )
+                }
             } else {
                 buffer.asReadOnlyBuffer().order(ByteOrder.nativeOrder()).apply {
                     limit(sourcePosition + offeredFrames * frameSizeBytes)
@@ -412,6 +423,42 @@ internal class AndroidUac2Media3AudioOutput(
     private companion object {
         const val ANDROID_UAC2_WRITE_ERROR_UNKNOWN = -1
     }
+}
+
+/** Re-packs Media3's exact PCM24-to-float representation without dither for DoP carriers. */
+internal fun floatPcm24CarrierToPackedInteger(
+    source: ByteBuffer,
+    frameCount: Int,
+    channels: Int,
+): ByteBuffer {
+    require(source.isDirect) { "DoP carrier conversion requires a direct input buffer" }
+    require(source.order() == ByteOrder.nativeOrder()) { "DoP float input must use native byte order" }
+    require(frameCount >= 0 && channels == 2) { "DoP float input must contain stereo frames" }
+    val sampleCount = Math.multiplyExact(frameCount, channels)
+    val requiredInputBytes = Math.multiplyExact(sampleCount, Float.SIZE_BYTES)
+    require(requiredInputBytes <= source.remaining()) { "DoP float slice is shorter than the requested frames" }
+
+    val output = ByteBuffer.allocateDirect(Math.multiplyExact(sampleCount, 3))
+        .order(ByteOrder.nativeOrder())
+    val input = source.asReadOnlyBuffer().order(ByteOrder.nativeOrder())
+    val scale = 8_388_608.0
+    repeat(sampleCount) {
+        val sample = input.float
+        require(sample.isFinite() && sample >= -1f && sample < 1f) {
+            "DoP float carrier sample is outside the signed PCM24 range"
+        }
+        val quantized = kotlin.math.round(sample.toDouble() * scale).toLong()
+        require(quantized in -8_388_608L..8_388_607L &&
+            quantized.toFloat() / 8_388_608f == sample
+        ) {
+            "DoP float carrier sample is not an exact signed PCM24 value"
+        }
+        output.put(quantized.toByte())
+        output.put((quantized shr 8).toByte())
+        output.put((quantized shr 16).toByte())
+    }
+    output.flip()
+    return output
 }
 
 /** Converts Media3's float PCM to the selected packed integer subslot using TPDF dither. */

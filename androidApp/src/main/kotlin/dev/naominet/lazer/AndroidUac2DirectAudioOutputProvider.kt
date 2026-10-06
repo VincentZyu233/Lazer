@@ -148,9 +148,10 @@ internal class AndroidUac2DirectAudioOutputProvider(
         require(config.channelMask == PlatformAudioFormat.CHANNEL_OUT_STEREO) {
             "Media3 selected a channel layout other than stereo"
         }
-        require(!doP || (config.encoding == C.ENCODING_PCM_24BIT &&
+        require(!doP || ((config.encoding == C.ENCODING_PCM_24BIT ||
+            config.encoding == C.ENCODING_PCM_FLOAT) &&
             config.sampleRate in ANDROID_UAC2_DOP_SAMPLE_RATES_HZ)) {
-            "The DoP stream must remain stereo packed PCM24 at its exact carrier sample rate"
+            "DoP output requires an exact stereo PCM24 carrier rate"
         }
 
         val device = usbManager.deviceList[deviceId]
@@ -226,13 +227,22 @@ internal class AndroidUac2DirectAudioOutputProvider(
 private const val ANDROID_UAC2_ASYNC_SYNC = 1
 private val ANDROID_UAC2_DOP_SAMPLE_RATES_HZ = setOf(176_400, 352_800, 705_600)
 
-private fun androidUac2DoPFormatSupport(
+internal fun androidUac2DoPFormatSupport(
     config: AudioOutputProvider.FormatConfig,
-): Boolean = config.format.sampleMimeType == MimeTypes.AUDIO_RAW &&
-    config.format.pcmEncoding == C.ENCODING_PCM_24BIT &&
-    config.format.channelCount == 2 &&
-    config.format.sampleRate in ANDROID_UAC2_DOP_SAMPLE_RATES_HZ &&
-    !config.enablePlaybackParameters && !config.enableOffload && !config.enableTunneling
+): Boolean {
+    val encoding = config.format.pcmEncoding
+    val carrierIsPcm24 = encoding == C.ENCODING_PCM_24BIT
+    // Media3's high-resolution path converts 24-bit PCM to float before calling AudioOutput.
+    // Float is safe for DoP only when the sink explicitly reports that this is a >16-bit source;
+    // the output wrapper then accepts only values on the exact signed-24-bit sample lattice.
+    val carrierIsLosslessFloat = encoding == C.ENCODING_PCM_FLOAT &&
+        config.enableHighResolutionPcmOutput
+    return config.format.sampleMimeType == MimeTypes.AUDIO_RAW &&
+        (carrierIsPcm24 || carrierIsLosslessFloat) &&
+        config.format.channelCount == 2 &&
+        config.format.sampleRate in ANDROID_UAC2_DOP_SAMPLE_RATES_HZ &&
+        !config.enablePlaybackParameters && !config.enableOffload && !config.enableTunneling
+}
 
 private fun androidUac2DirectPcmFormatSupport(
     config: AudioOutputProvider.FormatConfig,

@@ -6,6 +6,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.audio.AudioOutput
 import androidx.media3.exoplayer.audio.AudioOutputProvider
+import androidx.media3.exoplayer.audio.Media3Pcm24FloatTestBridge
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.junit.Assert.assertArrayEquals
@@ -155,6 +156,96 @@ class AndroidUac2Media3AudioOutputTest {
         output.setVolume(1f)
         assertThrows(IllegalStateException::class.java) { output.setVolume(0.99f) }
         assertTrue(transport.hardwareVolumes.isEmpty())
+    }
+
+    @Test
+    fun `Media3 high resolution float conversion preserves DoP PCM24 carrier bytes`() {
+        assertEquals(ByteOrder.LITTLE_ENDIAN, ByteOrder.nativeOrder())
+        val words = intArrayOf(
+            0x052211, 0x054433,
+            0xFA6655, 0xFA8877,
+            0x051122, 0x053344,
+            0xFA5566, 0xFA7788,
+        )
+        val packedCarrier = ByteBuffer.allocateDirect(words.size * 3).order(ByteOrder.LITTLE_ENDIAN)
+        words.forEach { word ->
+            packedCarrier.put(word.toByte())
+            packedCarrier.put((word shr 8).toByte())
+            packedCarrier.put((word shr 16).toByte())
+        }
+        packedCarrier.flip()
+        val expectedCarrierBytes = bytes(packedCarrier)
+
+        // This is the same high-resolution integer-to-float processor that DefaultAudioSink uses
+        // when ExoPlayer's float-output option is enabled for 24-bit PCM.
+        val floatCarrier = Media3Pcm24FloatTestBridge.convert(packedCarrier)
+        assertEquals(0, packedCarrier.remaining())
+
+        val transport = FakeTransport(bytesPerSample = 3, sampleRateHz = 176_400)
+        val output = output(
+            transport,
+            config(encoding = C.ENCODING_PCM_FLOAT, sampleRate = 176_400),
+            doP = true,
+        )
+        assertTrue(output.write(floatCarrier, 1, 0L))
+        assertArrayEquals(expectedCarrierBytes, transport.acceptedBytes.toByteArray())
+        assertEquals(floatCarrier.limit(), floatCarrier.position())
+    }
+
+    @Test
+    fun `DoP float repacking rejects samples altered from the exact PCM24 lattice`() {
+        val transport = FakeTransport(bytesPerSample = 3, sampleRateHz = 176_400)
+        val output = output(
+            transport,
+            config(encoding = C.ENCODING_PCM_FLOAT, sampleRate = 176_400),
+            doP = true,
+        )
+        val altered = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder())
+            .putFloat(0.25000003f)
+            .putFloat(-0.25f)
+            .flip() as ByteBuffer
+
+        assertThrows(IllegalArgumentException::class.java) { output.write(altered, 1, 0L) }
+        assertTrue(transport.acceptedBytes.isEmpty())
+    }
+
+    @Test
+    fun `DoP negotiation accepts only packed PCM24 or Media3 high resolution float carriers`() {
+        assertTrue(
+            androidUac2DoPFormatSupport(
+                formatConfig(
+                    encoding = C.ENCODING_PCM_24BIT,
+                    sampleRate = 176_400,
+                ),
+            ),
+        )
+        assertTrue(
+            androidUac2DoPFormatSupport(
+                formatConfig(
+                    encoding = C.ENCODING_PCM_FLOAT,
+                    sampleRate = 176_400,
+                    enableHighResolutionPcmOutput = true,
+                ),
+            ),
+        )
+        assertFalse(
+            androidUac2DoPFormatSupport(
+                formatConfig(
+                    encoding = C.ENCODING_PCM_FLOAT,
+                    sampleRate = 176_400,
+                    enableHighResolutionPcmOutput = false,
+                ),
+            ),
+        )
+        assertFalse(
+            androidUac2DoPFormatSupport(
+                formatConfig(
+                    encoding = C.ENCODING_PCM_FLOAT,
+                    sampleRate = 192_000,
+                    enableHighResolutionPcmOutput = true,
+                ),
+            ),
+        )
     }
 
     @Test
@@ -349,6 +440,8 @@ class AndroidUac2Media3AudioOutputTest {
 
     private fun formatConfig(
         encoding: Int = C.ENCODING_PCM_16BIT,
+        sampleRate: Int = 48_000,
+        enableHighResolutionPcmOutput: Boolean = false,
         enablePlaybackParameters: Boolean = false,
         enableOffload: Boolean = false,
         enableTunneling: Boolean = false,
@@ -356,10 +449,11 @@ class AndroidUac2Media3AudioOutputTest {
         Format.Builder()
             .setSampleMimeType(MimeTypes.AUDIO_RAW)
             .setPcmEncoding(encoding)
-            .setSampleRate(48_000)
+            .setSampleRate(sampleRate)
             .setChannelCount(2)
             .build(),
     )
+        .setEnableHighResolutionPcmOutput(enableHighResolutionPcmOutput)
         .setEnablePlaybackParameters(enablePlaybackParameters)
         .setEnableOffload(enableOffload)
         .setEnableTunneling(enableTunneling)
