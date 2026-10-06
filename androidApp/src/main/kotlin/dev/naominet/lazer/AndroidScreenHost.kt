@@ -54,6 +54,9 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
     private val audioManager = activity.getSystemService(AudioManager::class.java)
     private val usbManager = activity.getSystemService(UsbManager::class.java)
     private val usbOutputTargetStore = AndroidUsbAudioTargetStore(activity)
+    private val localAudioLibraryRepository = AndroidLocalAudioLibraryRegistry
+        .get(activity.applicationContext)
+        .also { it.initialize() }
     private val mutableUsbAudioTargetSelection = MutableStateFlow(LazerUsbAudioTargetSnapshot())
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = refreshAudioOutputDevices()
@@ -169,6 +172,32 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
             callback?.invoke(LazerLocalAudioPickerResult(files, (uris.size - files.size).coerceAtLeast(0)))
         }
     }
+    private val localAudioLibraryRootLauncher = registry.register(
+        KEY_LOCAL_AUDIO_LIBRARY_ROOT,
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            val hasPersistentReadGrant = runCatching {
+                activity.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+                activity.contentResolver.persistedUriPermissions.any { grant ->
+                    grant.isReadPermission && persistedReadGrantCovers(grant.uri, uri)
+                }
+            }.getOrDefault(false)
+            if (hasPersistentReadGrant) {
+                val rootUri = uri.toString()
+                AndroidPlaybackConnection.markLocalAudioLibraryRootGrantPending(rootUri)
+                localAudioLibraryRepository.addRoot(uri) {
+                    AndroidPlaybackConnection.completeLocalAudioLibraryRootGrant(
+                        activity.applicationContext,
+                        rootUri,
+                    )
+                }
+            } else localAudioLibraryRepository.reportFolderAccessUnavailable()
+        }
+    }
     private val exportLauncher = registry.register(KEY_EXPORT, ActivityResultContracts.CreateDocument("image/jpeg")) { uri ->
         pendingTarget?.invoke(uri?.toString())
         pendingTarget = null
@@ -243,6 +272,10 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
     override val supportsLocalReplayGain: Boolean get() = true
 
     override val supportsLocalAudioFiles: Boolean get() = true
+
+    override val supportsLocalAudioLibrary: Boolean get() = true
+
+    override val localAudioLibraryState get() = localAudioLibraryRepository.state
 
     override val supportsUsbAudioTargetSelection: Boolean get() = true
 
@@ -599,6 +632,19 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
         localAudioLauncher.launch(arrayOf("audio/*"))
     }
 
+    override fun pickLocalAudioLibraryRoot() {
+        localAudioLibraryRootLauncher.launch(null)
+    }
+
+    override fun rescanLocalAudioLibrary() = localAudioLibraryRepository.rescan()
+
+    override fun removeLocalAudioLibraryRoot(uri: String) {
+        localAudioLibraryRepository.removeRoot(uri) removal@{ removed ->
+            if (!removed) return@removal
+            AndroidPlaybackConnection.reconcilePersistedLocalAudioGrants(activity.applicationContext)
+        }
+    }
+
     override fun pickExportDestination(suggestedName: String, onPicked: (target: String?) -> Unit) {
         pendingTarget = onPicked
         exportLauncher.launch(suggestedName)
@@ -649,6 +695,7 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
 
         const val KEY_BACKGROUND = "lazer.background"
         const val KEY_LOCAL_AUDIO = "lazer.local_audio"
+        const val KEY_LOCAL_AUDIO_LIBRARY_ROOT = "lazer.local_audio_library_root"
         const val KEY_EXPORT = "lazer.export"
         const val KEY_SCAN = "lazer.scan"
         const val KEY_MICROPHONE = "lazer.microphone"

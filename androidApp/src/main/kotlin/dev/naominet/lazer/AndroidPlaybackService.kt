@@ -30,6 +30,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.media3.common.AudioAttributes as Media3AudioAttributes
@@ -72,11 +73,66 @@ import kotlin.math.roundToInt
 object AndroidPlaybackConnection {
     val snapshot: StateFlow<LazerPlaybackSnapshot> = LazerPlaybackStateStore.snapshot
     @Volatile private var selectedUacDirectOutputDeviceId: String? = null
+    private val localAudioGrantLock = Any()
+    private val pendingLocalAudioLibraryRootGrants = mutableSetOf<String>()
+    private val localAudioGrantMaintenanceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var didRestorePersistedQueue = false
     private var restoredLocalTracksWithoutPermission: Set<Long> = emptySet()
 
     fun currentQueue(): List<LazerTrack> = LazerPlaybackQueue.tracks.toList()
+
+    fun markLocalAudioLibraryRootGrantPending(uri: String) {
+        synchronized(localAudioGrantLock) { pendingLocalAudioLibraryRootGrants += uri }
+    }
+
+    fun completeLocalAudioLibraryRootGrant(context: Context, uri: String) {
+        synchronized(localAudioGrantLock) { pendingLocalAudioLibraryRootGrants -= uri }
+        reconcilePersistedLocalAudioGrants(context)
+    }
+
+    /** Releases SAF read grants that are no longer needed by a library root or saved queue. */
+    fun reconcilePersistedLocalAudioGrants(context: Context) {
+        val appContext = context.applicationContext
+        localAudioGrantMaintenanceScope.launch {
+            try {
+                val repository = AndroidLocalAudioLibraryRegistry.get(appContext)
+                repository.awaitInitialized()
+                val roots = repository.state.value.roots.mapNotNull { root ->
+                    runCatching { Uri.parse(root.uri) }.getOrNull()
+                }
+                val queuedFiles = currentQueue().mapNotNull { track ->
+                    val local = track.source as? LazerTrackSource.LocalFile ?: return@mapNotNull null
+                    runCatching { Uri.parse(local.uri) }.getOrNull()
+                }
+                val pendingRoots = synchronized(localAudioGrantLock) {
+                    pendingLocalAudioLibraryRootGrants.toSet()
+                }
+                val resolver = appContext.contentResolver
+                resolver.persistedUriPermissions.toList().forEach { grant ->
+                    if (!grant.isReadPermission) return@forEach
+                    val stillNeeded = persistedReadGrantIsRequired(
+                        grantedUri = grant.uri,
+                        rootUris = roots,
+                        queuedFileUris = queuedFiles,
+                        pendingRootUris = pendingRoots,
+                    )
+                    if (!stillNeeded) {
+                        runCatching {
+                            resolver.releasePersistableUriPermission(
+                                grant.uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.w("AndroidPlaybackConnection", "Could not reconcile persisted local audio permissions", failure)
+            }
+        }
+    }
 
     /** The queue and its advance rule, observable so the player card redraws after an edit. */
     val queue: StateFlow<LazerPlaybackQueueSnapshot> = LazerPlaybackQueue.snapshot
@@ -91,6 +147,7 @@ object AndroidPlaybackConnection {
         val persisted = store.loadQueue()
         if (persisted == null || !LazerPlaybackQueue.restoreSnapshot(persisted)) {
             LazerPlaybackQueue.restoreMode(settings.playMode)
+            reconcilePersistedLocalAudioGrants(context)
             return
         }
 
@@ -119,6 +176,7 @@ object AndroidPlaybackConnection {
                 message = if (missingPermission) tr("status.local_file_permission_lost") else null,
             ),
         )
+        reconcilePersistedLocalAudioGrants(context)
     }
 
     fun setPlayMode(context: Context, mode: LazerPlayMode) {
@@ -144,6 +202,7 @@ object AndroidPlaybackConnection {
     fun removeAt(context: Context, position: Int) {
         val edit = LazerPlaybackQueue.removeAt(position)
         saveQueue(context)
+        reconcilePersistedLocalAudioGrants(context)
         when (edit) {
             LazerQueueEdit.Kept -> Unit
             // The queue has already settled on its successor; asking for the removed index again
@@ -172,6 +231,7 @@ object AndroidPlaybackConnection {
             savePosition(track.id, positionMillis, commit = true)
         }
         restoredLocalTracksWithoutPermission = emptySet()
+        reconcilePersistedLocalAudioGrants(context)
         LazerPlaybackStateStore.update(
             LazerPlaybackSnapshot(
                 track = track,
@@ -326,7 +386,7 @@ object AndroidPlaybackConnection {
         val uri = runCatching { Uri.parse(uriValue) }.getOrNull() ?: return false
         if (uri.scheme != "content") return true
         return context.contentResolver.persistedUriPermissions.any { permission ->
-            permission.uri == uri && permission.isReadPermission
+            permission.isReadPermission && persistedReadGrantCovers(permission.uri, uri)
         }
     }
 
@@ -1984,6 +2044,31 @@ private fun notificationArtworkUrl(raw: String?): String? {
         url
     }
 }
+
+/**
+ * A persisted SAF tree grant authorizes documents addressed through that tree URI. Keep this check
+ * scoped to the same provider and tree document ID; a plain document grant still only matches the
+ * exact URI that was granted.
+ */
+internal fun persistedReadGrantCovers(grantedUri: Uri, targetUri: Uri): Boolean {
+    if (grantedUri == targetUri) return true
+    if (grantedUri.authority != targetUri.authority || !DocumentsContract.isTreeUri(grantedUri)) return false
+    val grantedTreeId = runCatching { DocumentsContract.getTreeDocumentId(grantedUri) }.getOrNull()
+        ?: return false
+    val targetTreeId = runCatching {
+        if (DocumentsContract.isTreeUri(targetUri)) DocumentsContract.getTreeDocumentId(targetUri) else null
+    }.getOrNull()
+    return targetTreeId == grantedTreeId
+}
+
+internal fun persistedReadGrantIsRequired(
+    grantedUri: Uri,
+    rootUris: List<Uri>,
+    queuedFileUris: List<Uri>,
+    pendingRootUris: Set<String> = emptySet(),
+): Boolean = grantedUri.toString() in pendingRootUris ||
+    rootUris.any { persistedReadGrantCovers(grantedUri, it) } ||
+    queuedFileUris.any { persistedReadGrantCovers(grantedUri, it) }
 
 private fun Bitmap.fitInsideNotificationArtwork(maxSide: Int = 320): Bitmap {
     val longestSide = maxOf(width, height)

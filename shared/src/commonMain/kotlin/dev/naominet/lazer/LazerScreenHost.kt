@@ -90,6 +90,22 @@ interface LazerScreenHost {
     /** Whether this platform can hand local audio documents to the shared playback queue. */
     val supportsLocalAudioFiles: Boolean get() = false
 
+    /** Whether this platform offers a persistent, browsable local audio library. */
+    val supportsLocalAudioLibrary: Boolean get() = false
+
+    /** Platform-managed folders and indexed tracks, kept separate from the transient play queue. */
+    val localAudioLibraryState: StateFlow<LazerLocalLibrarySnapshot>
+        get() = LazerEmptyLocalLibraryState
+
+    /** Opens the platform folder picker and adds the selected folder to the local library. */
+    fun pickLocalAudioLibraryRoot() { }
+
+    /** Rescans all folders currently registered with the local library. */
+    fun rescanLocalAudioLibrary() { }
+
+    /** Removes a previously registered folder from the local library. */
+    fun removeLocalAudioLibraryRoot(uri: String) { }
+
     /** Opens the platform document picker and returns readable audio items with best-effort tags. */
     fun pickLocalAudioFiles(onPicked: (LazerLocalAudioPickerResult) -> Unit) {
         onPicked(LazerLocalAudioPickerResult())

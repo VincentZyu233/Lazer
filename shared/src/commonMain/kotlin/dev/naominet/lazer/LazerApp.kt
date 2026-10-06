@@ -1355,8 +1355,8 @@ private fun LazerRootContent(
                 LazerRootDestination.SEARCH -> SearchPage(controller, currentTrackId) { track ->
                     onPlay(controller.searchResults, track)
                 }
-                LazerRootDestination.LIBRARY -> LibraryPage(controller, currentTrackId) { track ->
-                    onPlay(controller.homeTracks, track)
+                LazerRootDestination.LIBRARY -> LibraryPage(controller, currentTrackId) { queue, track ->
+                    onPlay(queue, track)
                 }
                 LazerRootDestination.ME -> MePage(controller)
             }
@@ -1478,7 +1478,20 @@ private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onP
 }
 
 @Composable
-private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
+private fun LibraryPage(
+    controller: LazerGatewayController,
+    currentId: Long?,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
+) {
+    val screen = LocalLazerScreenHost.current
+    val localLibrary = screen.localAudioLibraryState.collectAsState().value
+    var localSearchQuery by remember { mutableStateOf("") }
+    val orderedLocalTracks = remember(localLibrary.tracks) {
+        orderLazerLocalLibraryTracks(localLibrary.tracks)
+    }
+    val visibleLocalTracks = remember(orderedLocalTracks, localSearchQuery) {
+        filterLazerLocalLibraryTracks(orderedLocalTracks, localSearchQuery)
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
@@ -1497,6 +1510,133 @@ private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, on
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (screen.supportsLocalAudioLibrary) {
+            item {
+                SectionTitle(tr("library.local.title"), tr("library.local.count", localLibrary.tracks.size))
+            }
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ThemeTextButton(
+                        onClick = screen::pickLocalAudioLibraryRoot,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(tr("library.local.add_folder"))
+                    }
+                    ThemeTextButton(
+                        onClick = screen::rescanLocalAudioLibrary,
+                        modifier = Modifier.weight(1f),
+                        enabled = localLibrary.roots.isNotEmpty() && !localLibrary.isScanning,
+                    ) {
+                        Text(tr("library.local.scan"))
+                    }
+                }
+            }
+            if (localLibrary.roots.isNotEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        localLibrary.roots.forEach { root ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+                                        Text(
+                                            root.displayName.ifBlank { root.uri },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (!root.available) {
+                                            Text(
+                                                tr("library.local.root_unavailable"),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                    }
+                                    ThemeTextButton(
+                                        onClick = { screen.removeLocalAudioLibraryRoot(root.uri) },
+                                        enabled = !localLibrary.isScanning,
+                                    ) {
+                                        Text(tr("library.local.remove_folder"))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (localLibrary.isScanning) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            tr("library.local.scanning_count", localLibrary.scannedFileCount),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            when (localLibrary.issue) {
+                LazerLocalLibraryIssue.ScanFailed -> item {
+                    Text(
+                        tr("library.local.scan_failed"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                LazerLocalLibraryIssue.RootUnavailable -> item {
+                    Text(
+                        tr("library.local.root_unavailable"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                null -> Unit
+            }
+            if (localLibrary.tracks.isEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        QuietState(tr("library.local.empty"))
+                        Text(
+                            tr("library.local.empty.hint"),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                item {
+                    OutlinedTextField(
+                        value = localSearchQuery,
+                        onValueChange = { localSearchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                        placeholder = { Text(tr("library.local.search")) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                }
+                if (visibleLocalTracks.isEmpty()) {
+                    item { QuietState(tr("library.local.no_results")) }
+                } else {
+                    items(visibleLocalTracks, key = { "local-${it.id}" }) { track ->
+                        TrackRow(track, track.id == currentId) { onPlay(visibleLocalTracks, track) }
+                    }
+                }
+            }
+        }
         when {
             !controller.isSignedIn -> item { SignInInvitation(controller::openLogin) }
             controller.userPlaylists.isEmpty() && controller.isLoading -> item { QuietState(tr("library.syncing")) }
@@ -1505,7 +1645,9 @@ private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, on
         }
         if (controller.homeTracks.isNotEmpty()) {
             item { SectionTitle(tr("library.continue")) }
-            items(controller.homeTracks.take(5), key = LazerTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
+            items(controller.homeTracks.take(5), key = LazerTrack::id) {
+                TrackRow(it, it.id == currentId) { onPlay(controller.homeTracks, it) }
+            }
         }
     }
 }

@@ -1,6 +1,7 @@
 package dev.naominet.lazer
 
 import dev.naominet.lazer.gateway.model.Artist
+import kotlinx.coroutines.sync.Mutex
 
 /**
  * What the player and the screens need to know about one track. It stays independent from the
@@ -63,17 +64,32 @@ data class LazerLocalAudioPickerResult(
 /** Allocates IDs outside the positive Gateway song-ID space for local queue entries. */
 object LazerLocalTrackIdentity {
     private var nextId = Long.MIN_VALUE
+    private val lock = Mutex()
 
-    fun nextId(): Long {
+    fun nextId(): Long = withLock {
         check(nextId < 0L) { "Local track identity space exhausted" }
-        return nextId++
+        nextId++
     }
 
     /** Keeps newly picked local tracks unique after queue IDs have been restored from disk. */
     fun reserve(ids: Collection<Long>) {
-        val highestUsedId = ids.asSequence().filter { it < 0L }.maxOrNull() ?: return
-        val firstFreeId = if (highestUsedId == -1L) 0L else highestUsedId + 1L
-        if (nextId < firstFreeId) nextId = firstFreeId
+        withLock {
+            val highestUsedId = ids.asSequence().filter { it < 0L }.maxOrNull() ?: return@withLock
+            val firstFreeId = if (highestUsedId == -1L) 0L else highestUsedId + 1L
+            if (nextId < firstFreeId) nextId = firstFreeId
+        }
+    }
+
+    private inline fun <T> withLock(block: () -> T): T {
+        while (!lock.tryLock()) {
+            // The critical section only reads or advances one counter. A contending caller waits
+            // for that small operation to finish without blocking a platform-specific thread.
+        }
+        return try {
+            block()
+        } finally {
+            lock.unlock()
+        }
     }
 }
 
