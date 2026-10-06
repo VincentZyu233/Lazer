@@ -26,19 +26,26 @@ def main() -> None:
         fixtures = Path(temporary)
         run_generator(
             tools / "generate_dsf_test_fixtures.py",
-            str(fixtures), "--duration-ms", "250", "--rates", "64",
+            str(fixtures), "--duration-ms", "100", "--rates",
+            "64", "128", "256", "512", "1024",
         )
         run_generator(
             tools / "generate_dff_test_fixtures.py",
-            str(fixtures), "--duration-ms", "250", "--rates", "64",
+            str(fixtures), "--duration-ms", "100", "--rates",
+            "64", "128", "256", "512", "1024",
         )
         run_generator(
             tools / "generate_dst_test_fixtures.py",
             str(fixtures), "--frames", "75", "--rate", "64",
         )
 
-        # Keep the Android test APK small and include only the three exercised containers.
-        for name in ("dsd64_test.dsf", "dff64_test.dff", "dst64_verbatim.dff"):
+        # Keep fixtures short while covering every PCM rate and each Android DoP rate.
+        names = [
+            *(f"dsd{rate}_test.dsf" for rate in (64, 128, 256, 512, 1024)),
+            *(f"dff{rate}_test.dff" for rate in (64, 128, 256, 512, 1024)),
+            "dst64_verbatim.dff",
+        ]
+        for name in names:
             shutil.copyfile(fixtures / name, output / name)
 
         # Keep a recognizable .dsf name/MIME while making the native parser reject the container.

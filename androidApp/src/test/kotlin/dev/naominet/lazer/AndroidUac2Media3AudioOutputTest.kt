@@ -181,15 +181,18 @@ class AndroidUac2Media3AudioOutputTest {
         val floatCarrier = Media3Pcm24FloatTestBridge.convert(packedCarrier)
         assertEquals(0, packedCarrier.remaining())
 
-        val transport = FakeTransport(bytesPerSample = 3, sampleRateHz = 176_400)
-        val output = output(
-            transport,
-            config(encoding = C.ENCODING_PCM_FLOAT, sampleRate = 176_400),
-            doP = true,
-        )
-        assertTrue(output.write(floatCarrier, 1, 0L))
-        assertArrayEquals(expectedCarrierBytes, transport.acceptedBytes.toByteArray())
-        assertEquals(floatCarrier.limit(), floatCarrier.position())
+        for (sampleRate in listOf(176_400, 352_800, 705_600)) {
+            val transport = FakeTransport(bytesPerSample = 3, sampleRateHz = sampleRate)
+            val output = output(
+                transport,
+                config(encoding = C.ENCODING_PCM_FLOAT, sampleRate = sampleRate),
+                doP = true,
+            )
+            val carrier = floatCarrier.duplicate().order(floatCarrier.order())
+            assertTrue(output.write(carrier, 1, 0L))
+            assertArrayEquals(expectedCarrierBytes, transport.acceptedBytes.toByteArray())
+            assertEquals(carrier.limit(), carrier.position())
+        }
     }
 
     @Test
@@ -211,23 +214,17 @@ class AndroidUac2Media3AudioOutputTest {
 
     @Test
     fun `DoP negotiation accepts only packed PCM24 or Media3 high resolution float carriers`() {
-        assertTrue(
-            androidUac2DoPFormatSupport(
-                formatConfig(
-                    encoding = C.ENCODING_PCM_24BIT,
-                    sampleRate = 176_400,
-                ),
-            ),
-        )
-        assertTrue(
-            androidUac2DoPFormatSupport(
-                formatConfig(
-                    encoding = C.ENCODING_PCM_FLOAT,
-                    sampleRate = 176_400,
-                    enableHighResolutionPcmOutput = true,
-                ),
-            ),
-        )
+        for (sampleRate in listOf(176_400, 352_800, 705_600)) {
+            assertTrue("$sampleRate packed PCM24", androidUac2DoPFormatSupport(formatConfig(
+                encoding = C.ENCODING_PCM_24BIT,
+                sampleRate = sampleRate,
+            )))
+            assertTrue("$sampleRate Media3 float carrier", androidUac2DoPFormatSupport(formatConfig(
+                encoding = C.ENCODING_PCM_FLOAT,
+                sampleRate = sampleRate,
+                enableHighResolutionPcmOutput = true,
+            )))
+        }
         assertFalse(
             androidUac2DoPFormatSupport(
                 formatConfig(
@@ -246,6 +243,17 @@ class AndroidUac2Media3AudioOutputTest {
                 ),
             ),
         )
+        for (unsupportedRate in listOf(192_000, 768_000, 1_411_200)) {
+            assertFalse(
+                "$unsupportedRate is outside Android DoP carrier rates",
+                androidUac2DoPFormatSupport(
+                    formatConfig(
+                        encoding = C.ENCODING_PCM_24BIT,
+                        sampleRate = unsupportedRate,
+                    ),
+                ),
+            )
+        }
     }
 
     @Test

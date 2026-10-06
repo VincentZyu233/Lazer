@@ -12,6 +12,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.abs
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -26,27 +27,33 @@ class AndroidDsdPcmNativeInstrumentedTest {
 
     @Test
     fun productionJniDecodesDsfRawDffAndVerbatimDstAndSeeksOnPcmFrameGrid() {
-        val expectedFrames = mapOf(
-            "dsd64_test.dsf" to 44_100L,
-            "dff64_test.dff" to 44_100L,
-            "dst64_verbatim.dff" to 176_400L,
-        )
-        val decoded = expectedFrames.mapValues { (name, frames) ->
-            val stream = readVirtualWav(name, position = 0L)
-            val parsed = parseFloatWav(stream.bytes)
-            assertEquals(176_400, parsed.sampleRate, "$name PCM rate")
-            assertEquals(2, parsed.channels, "$name channel count")
-            assertEquals(frames, parsed.frameCount, "$name decoded frame count")
-            assertPcmIsFiniteAndAudible(name, parsed.pcm)
-            assertSeekMatchesFullDecode(name, parsed)
-            parsed
+        for (rate in DSD_RATES) {
+            val expectedSampleRate = if (rate == 64) 176_400 else 192_000
+            val expectedFrames = expectedSampleRate / 10L
+            for (name in listOf("dsd${rate}_test.dsf", "dff${rate}_test.dff")) {
+                assertPcmFixture(name, expectedSampleRate, expectedFrames)
+            }
         }
 
+        assertPcmFixture("dst64_verbatim.dff", sampleRate = 176_400, expectedFrames = 176_400L)
+
+        val dsf64 = parseFloatWav(readVirtualWav("dsd64_test.dsf", position = 0L).bytes)
+        val dff64 = parseFloatWav(readVirtualWav("dff64_test.dff", position = 0L).bytes)
         assertPcmClose(
             "DSF and raw DFF carry the same DSD channel bits",
-            decoded.getValue("dsd64_test.dsf").pcm,
-            decoded.getValue("dff64_test.dff").pcm,
+            dsf64.pcm,
+            dff64.pcm,
         )
+    }
+
+    private fun assertPcmFixture(name: String, sampleRate: Int, expectedFrames: Long) {
+        val stream = readVirtualWav(name, position = 0L)
+        val parsed = parseFloatWav(stream.bytes)
+        assertEquals(sampleRate, parsed.sampleRate, "$name PCM rate")
+        assertEquals(2, parsed.channels, "$name channel count")
+        assertEquals(expectedFrames, parsed.frameCount, "$name decoded frame count")
+        assertPcmIsFiniteAndAudible(name, parsed.pcm)
+        assertSeekMatchesFullDecode(name, parsed)
     }
 
     @Test
@@ -60,7 +67,7 @@ class AndroidDsdPcmNativeInstrumentedTest {
             val parsed = parseFloatWav(readVirtualWav(uri, position = 0L).bytes)
             assertEquals(176_400, parsed.sampleRate, "$mode $name PCM rate")
             assertEquals(2, parsed.channels, "$mode $name channel count")
-            assertEquals(44_100L, parsed.frameCount, "$mode $name decoded frame count")
+            assertEquals(17_640L, parsed.frameCount, "$mode $name decoded frame count")
             assertPcmIsFiniteAndAudible("$mode $name", parsed.pcm)
             assertSeekMatchesFullDecode(name, uri, parsed)
         }
@@ -68,19 +75,31 @@ class AndroidDsdPcmNativeInstrumentedTest {
 
     @Test
     fun productionJniEmitsRawDsdAsDoPCarriersAndRejectsDst() {
-        for (name in listOf("dsd64_test.dsf", "dff64_test.dff")) {
-            val full = parsePcm24Wav(
-                readVirtualWav(name, position = 0L, outputMode = AndroidDsdOutputMode.DoP).bytes,
-            )
-            assertEquals(176_400, full.sampleRate, "$name DoP carrier rate")
-            assertEquals(2, full.channels, "$name DoP channel count")
-            assertEquals(44_100L, full.frameCount, "$name DoP frame count")
-            assertDoPMarkers(name, full.pcm, firstMarker = 0x05)
-            assertDoPSeekMatchesFullDecode(name, full)
+        for ((rate, carrierRate) in DOP_RATES) {
+            var referenceCarrier: ByteArray? = null
+            for (name in listOf("dsd${rate}_test.dsf", "dff${rate}_test.dff")) {
+                val full = parsePcm24Wav(
+                    readVirtualWav(name, position = 0L, outputMode = AndroidDsdOutputMode.DoP).bytes,
+                )
+                assertEquals(carrierRate, full.sampleRate, "$name DoP carrier rate")
+                assertEquals(2, full.channels, "$name DoP channel count")
+                assertEquals(carrierRate / 10L, full.frameCount, "$name DoP frame count")
+                assertDoPMarkers(name, full.pcm, firstMarker = 0x05)
+                assertDoPSeekMatchesFullDecode(name, full)
+                referenceCarrier?.let {
+                    assertContentEquals(it, full.pcm, "DSF and raw DFF $rate DoP carriers")
+                } ?: run { referenceCarrier = full.pcm }
+            }
         }
 
-        assertFailsWith<IOException> {
-            readVirtualWav("dst64_verbatim.dff", 0L, AndroidDsdOutputMode.DoP)
+        for (unsupported in listOf(
+            "dst64_verbatim.dff",
+            "dsd512_test.dsf", "dff512_test.dff",
+            "dsd1024_test.dsf", "dff1024_test.dff",
+        )) {
+            assertFailsWith<IOException>("$unsupported must not be exposed as DoP") {
+                readVirtualWav(unsupported, 0L, AndroidDsdOutputMode.DoP)
+            }
         }
     }
 
@@ -119,7 +138,7 @@ class AndroidDsdPcmNativeInstrumentedTest {
         full: DecodedWav,
     ) {
         val frameBytes = full.channels * Float.SIZE_BYTES
-        val targetFrame = full.sampleRate.toLong() * 103L / 1_000L + 7L
+        val targetFrame = full.sampleRate.toLong() * 23L / 1_000L + 7L
         val pcmByteOffset = Math.multiplyExact(targetFrame, frameBytes.toLong())
         val sourcePosition = full.headerBytes + pcmByteOffset
         val actual = readAtPosition(sourcePosition).bytes
@@ -205,7 +224,7 @@ class AndroidDsdPcmNativeInstrumentedTest {
     }
 
     private fun assertDoPSeekMatchesFullDecode(name: String, full: DecodedWav) {
-        val targetFrame = full.sampleRate.toLong() * 103L / 1_000L + 7L
+        val targetFrame = full.sampleRate.toLong() * 23L / 1_000L + 7L
         val carrierByteOffset = Math.multiplyExact(targetFrame, 6L)
         val actual = readVirtualWav(
             name,
@@ -313,6 +332,8 @@ class AndroidDsdPcmNativeInstrumentedTest {
     private data class ReadResult(val bytes: ByteArray)
 
     private companion object {
+        val DSD_RATES = listOf(64, 128, 256, 512, 1024)
+        val DOP_RATES = listOf(64 to 176_400, 128 to 352_800, 256 to 705_600)
         const val MAX_SEEK_SAMPLE_DIFFERENCE = 0.00001f
     }
 }
