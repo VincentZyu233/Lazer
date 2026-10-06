@@ -36,6 +36,7 @@ struct NativeStreamConfig final {
     std::uint16_t feedback_maximum_packet_size_bytes = 0;
     std::uint8_t feedback_transactions_per_interval = 0;
     std::uint8_t feedback_interval = 0;
+    bool doP = false;
 };
 
 /**
@@ -124,6 +125,7 @@ private:
     std::size_t frame_bytes_ = 0;
     std::size_t maximum_data_packet_bytes_ = 0;
     std::uint8_t data_packets_per_transfer_ = 0;
+    std::uint8_t dop_next_marker_ = 0x05;
     std::size_t in_flight_count_ = 0;
     std::size_t in_flight_data_count_ = 0;
     std::uint64_t played_frames_since_flush_ = 0;

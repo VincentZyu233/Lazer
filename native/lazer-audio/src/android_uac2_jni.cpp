@@ -54,12 +54,12 @@ std::shared_ptr<BridgeSession> FindSession(JNIEnv* env, const jlong id) {
 }
 
 bool ReadConfig(JNIEnv* env, const jintArray input, NativeStreamConfig* output) {
-    if (input == nullptr || output == nullptr || env->GetArrayLength(input) != 17) {
-        Throw(env, "java/lang/IllegalArgumentException", "UAC2 stream config must contain exactly 17 integers");
+    if (input == nullptr || output == nullptr || env->GetArrayLength(input) != 18) {
+        Throw(env, "java/lang/IllegalArgumentException", "UAC2 stream config must contain exactly 18 integers");
         return false;
     }
-    jint values[17]{};
-    env->GetIntArrayRegion(input, 0, 17, values);
+    jint values[18]{};
+    env->GetIntArrayRegion(input, 0, 18, values);
     if (env->ExceptionCheck()) return false;
     const auto fits_u8 = [](const jint value) { return value >= 0 && value <= 0xff; };
     const auto fits_u16 = [](const jint value) { return value >= 0 && value <= 0xffff; };
@@ -68,7 +68,7 @@ bool ReadConfig(JNIEnv* env, const jintArray input, NativeStreamConfig* output) 
         !fits_u8(values[7]) || !fits_u8(values[8]) || !fits_u8(values[9]) ||
         !fits_u16(values[10]) || !fits_u8(values[11]) || !fits_u8(values[12]) ||
         !fits_u8(values[13]) || !fits_u16(values[14]) ||
-        !fits_u8(values[15]) || !fits_u8(values[16])) {
+        !fits_u8(values[15]) || !fits_u8(values[16]) || (values[17] != 0 && values[17] != 1)) {
         Throw(env, "java/lang/IllegalArgumentException", "UAC2 stream config contains out-of-range fields");
         return false;
     }
@@ -89,6 +89,7 @@ bool ReadConfig(JNIEnv* env, const jintArray input, NativeStreamConfig* output) 
     output->feedback_maximum_packet_size_bytes = static_cast<std::uint16_t>(values[14]);
     output->feedback_transactions_per_interval = static_cast<std::uint8_t>(values[15]);
     output->feedback_interval = static_cast<std::uint8_t>(values[16]);
+    output->doP = values[17] == 1;
     return true;
 }
 

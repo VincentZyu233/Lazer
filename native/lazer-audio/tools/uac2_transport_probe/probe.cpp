@@ -29,6 +29,9 @@ int EventErrorCount();
 int CancelErrorCount();
 int PendingTransferCount();
 int WrappedFd();
+void SetFakeStreamingFormat(std::uint8_t subslot_size, std::uint8_t bit_resolution);
+void SetFakeFeedbackSampleRate(std::uint32_t sample_rate_hz);
+std::vector<unsigned char> CapturedOutputBytes();
 } // namespace lazer::uac2_transport_probe
 
 namespace {
@@ -97,6 +100,48 @@ NativeStreamConfig TestStreamConfig() {
     config.feedback_transactions_per_interval = 1;
     config.feedback_interval = 1;
     return config;
+}
+
+NativeStreamConfig TestDopStreamConfig() {
+    NativeStreamConfig config = TestStreamConfig();
+    config.sample_rate_hz = 176400;
+    config.subslot_size_bytes = 3;
+    config.valid_bit_resolution = 24;
+    config.doP = true;
+    return config;
+}
+
+bool HasValidDopMarkers(const std::vector<unsigned char>& bytes) {
+    if (bytes.empty() || bytes.size() % 6u != 0) return false;
+    std::uint8_t expected = 0x05;
+    for (std::size_t offset = 0; offset < bytes.size(); offset += 6u) {
+        if (bytes[offset + 2] != expected || bytes[offset + 5] != expected) return false;
+        expected = expected == 0x05 ? 0xFA : 0x05;
+    }
+    return true;
+}
+
+bool ContainsDopPayloadFrames(const std::vector<unsigned char>& bytes) {
+    constexpr unsigned char frames[][6] = {
+        {0x11, 0x22, 0x05, 0x33, 0x44, 0x05},
+        {0x55, 0x66, 0xFA, 0x77, 0x88, 0xFA},
+        {0x99, 0xAA, 0x05, 0xBB, 0xCC, 0x05},
+    };
+    if (bytes.size() < sizeof(frames)) return false;
+    for (std::size_t offset = 0; offset + sizeof(frames) <= bytes.size(); offset += 6u) {
+        bool matches = true;
+    constexpr std::size_t frame_count = sizeof(frames) / sizeof(frames[0]);
+    for (std::size_t frame = 0; frame < frame_count; ++frame) {
+            const auto* actual = bytes.data() + offset + frame * 6u;
+            if (actual[0] != frames[frame][0] || actual[1] != frames[frame][1] ||
+                actual[3] != frames[frame][3] || actual[4] != frames[frame][4]) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -185,6 +230,45 @@ int main() {
     if (!Check(CloseDummyFd(original_fd) == 0,
                "Java should be able to close its original FD after native close")) return 1;
 
+    std::cout << "phase: DoP carrier and idle markers" << std::endl;
+    SetFakeStreamingFormat(3, 24);
+    SetFakeFeedbackSampleRate(176400);
+    const std::size_t captured_before_dop = CapturedOutputBytes().size();
+    const int dop_original_fd = OpenDummyFd();
+    if (!Check(dop_original_fd >= 0, "Could not create a descriptor for the DoP transport test")) return 1;
+    auto dop_session = IsoTransportSession::Open(dop_original_fd, &error);
+    if (!Check(dop_session != nullptr,
+               error.empty() ? "Could not open DoP transport session" : error.c_str())) return 1;
+    const auto dop_config = TestDopStreamConfig();
+    if (!Check(dop_session->Start(dop_config, &error) == 0,
+               error.empty() ? "Could not start the stereo PCM24 DoP carrier" : error.c_str())) return 1;
+    const unsigned char dop_frames[] = {
+        0x11, 0x22, 0x05, 0x33, 0x44, 0x05,
+        0x55, 0x66, 0xFA, 0x77, 0x88, 0xFA,
+        0x99, 0xAA, 0x05, 0xBB, 0xCC, 0x05,
+    };
+    if (!Check(dop_session->Write(dop_frames, sizeof(dop_frames), 0) ==
+                   static_cast<int>(sizeof(dop_frames)),
+               "DoP queue should accept complete packed 24-bit carrier frames")) return 1;
+    dop_session->SetPlaying(true);
+    if (!Check(WaitFor([&] { return dop_session->played_frames_since_flush() >= 3; },
+                       std::chrono::milliseconds(500)),
+               "DoP transport did not submit queued carrier frames")) return 1;
+    dop_session->SetPlaying(false);
+    if (!Check(dop_session->Close(1000), "DoP transport should close after marker verification")) return 1;
+    dop_session.reset();
+    if (!Check(CloseDummyFd(dop_original_fd) == 0,
+               "Java should close its original DoP USB descriptor after native close")) return 1;
+    const auto all_captured = CapturedOutputBytes();
+    const std::vector<unsigned char> dop_capture(
+        all_captured.begin() + static_cast<std::ptrdiff_t>(captured_before_dop), all_captured.end());
+    if (!Check(HasValidDopMarkers(dop_capture),
+               "DoP packets must carry identical alternating markers on both channels, including idle frames")) return 1;
+    if (!Check(ContainsDopPayloadFrames(dop_capture),
+               "DoP transport must preserve queued channel payload bytes while rewriting marker phase")) return 1;
+    SetFakeStreamingFormat(2, 16);
+    SetFakeFeedbackSampleRate(48000);
+
     std::cout << "phase: transient cancellation errors" << std::endl;
     const int cancel_failure_fd = OpenDummyFd();
     if (!Check(cancel_failure_fd >= 0, "Could not create a descriptor for cancellation retry test")) return 1;
@@ -237,7 +321,7 @@ int main() {
                "Unquiesced native session should be retained in quarantine")) return 1;
     if (!Check(FreedTransferCount() == frees_before_quarantine && LiveTransferCount() > 0,
                "Quarantine must preserve all transfer allocations and buffers")) return 1;
-    if (!Check(CloseCount() == 2 && ExitCount() == 2,
+    if (!Check(CloseCount() == 3 && ExitCount() == 3,
                "Quarantined session must keep its libusb handle and context open")) return 1;
 
     const int quarantined_duplicate_fd = WrappedFd();

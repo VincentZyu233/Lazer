@@ -25,7 +25,8 @@ struct DsdPcmFormat {
 /*
  * Owns an AudioSource pump thread and a small PCM ring. Reads are frame-aligned, seek requests
  * discard queued pre-seek samples, and close interrupts both the reader and a back-pressured pump.
- * The target is interleaved float32 PCM; the platform audio renderer remains outside this class.
+ * The target is interleaved float32 PCM or packed 24-bit DoP; the platform audio renderer remains
+ * outside this class.
  */
 class DsdPcmDecoder final : private SourceConsumer {
 public:
@@ -35,7 +36,8 @@ public:
     DsdPcmDecoder(const DsdPcmDecoder &) = delete;
     DsdPcmDecoder &operator=(const DsdPcmDecoder &) = delete;
 
-    int32_t open(const LazerAudioReader &reader, int32_t targetSampleRate, DsdPcmFormat &format);
+    int32_t open(const LazerAudioReader &reader, int32_t targetSampleRate, DsdPcmFormat &format,
+        bool doP = false);
     /* Returns LazerAudioOk; frameCount is zero only at clean EOF after the queue is drained. */
     int32_t readFrames(uint8_t *destination, int32_t capacityFrames,
         int32_t &frameCount, bool &endOfStream);

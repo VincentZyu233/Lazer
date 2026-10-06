@@ -100,7 +100,7 @@ DecoderHandle *fromHandle(jlong handle) {
 extern "C" JNIEXPORT jlong JNICALL
 Java_dev_naominet_lazer_AndroidDsdPcmNative_nativeOpen(
     JNIEnv *environment, jclass, jint descriptor, jlong startOffset, jlong length,
-    jint targetSampleRate, jlongArray outputInfo) {
+    jint targetSampleRate, jboolean doP, jlongArray outputInfo) {
     lastOpenError.clear();
     if (descriptor < 0 || startOffset < 0 || length <= 0 || targetSampleRate < 0 ||
         outputInfo == nullptr || environment->GetArrayLength(outputInfo) < 5 ||
@@ -133,7 +133,8 @@ Java_dev_naominet_lazer_AndroidDsdPcmNative_nativeOpen(
     reader.close = &closeFd;
     reader.context = readerContext;
     reader.cancel = &cancelFd;
-    const int32_t result = handle->decoder.open(reader, targetSampleRate, handle->format);
+    const int32_t result = handle->decoder.open(reader, targetSampleRate, handle->format,
+        doP == JNI_TRUE);
     if (result != LazerAudioOk) {
         lastOpenError = handle->decoder.lastError();
         if (lastOpenError.empty()) lastOpenError = "the selected file is not a supported DSD stream";

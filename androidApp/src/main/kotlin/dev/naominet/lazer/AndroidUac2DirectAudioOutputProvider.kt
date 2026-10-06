@@ -23,6 +23,7 @@ import java.io.IOException
 internal class AndroidUac2DirectAudioOutputProvider(
     context: Context,
     private val deviceId: String,
+    private val doP: Boolean = false,
     private val onOutputConfigured: (AudioOutputProvider.OutputConfig, String, Int) -> Unit = { _, _, _ -> },
     private val onOutputFailed: (Throwable) -> Unit = {},
 ) : AutoCloseable {
@@ -43,6 +44,9 @@ internal class AndroidUac2DirectAudioOutputProvider(
             ) {
                 return AudioOutputProvider.FormatSupport.UNSUPPORTED
             }
+            if (doP && !androidUac2DoPFormatSupport(config)) {
+                return AudioOutputProvider.FormatSupport.UNSUPPORTED
+            }
             return androidUac2DirectPcmFormatSupport(config)
         }
 
@@ -54,7 +58,7 @@ internal class AndroidUac2DirectAudioOutputProvider(
             lifecycle.createOutput(
                 createTransport = { createTransport(config) },
                 createAudioOutput = { transport ->
-                    AndroidUac2Media3AudioOutput(config, transport).also {
+                    AndroidUac2Media3AudioOutput(config, transport, doP).also {
                         onOutputConfigured(
                             config,
                             requireNotNull(usbManager.deviceList[deviceId]).productName?.toString().orEmpty(),
@@ -102,6 +106,9 @@ internal class AndroidUac2DirectAudioOutputProvider(
         require(format.pcmEncoding in ANDROID_UAC2_DIRECT_PCM_BYTES_BY_ENCODING) {
             "USB direct output supports integer PCM or Media3 high-resolution float PCM"
         }
+        require(!doP || androidUac2DoPFormatSupport(config)) {
+            "DoP requires stereo packed PCM24 at an Android USB carrier rate supported by the direct output"
+        }
 
         val encoding = format.pcmEncoding
         val sampleRate = format.sampleRate
@@ -140,6 +147,10 @@ internal class AndroidUac2DirectAudioOutputProvider(
         }
         require(config.channelMask == PlatformAudioFormat.CHANNEL_OUT_STEREO) {
             "Media3 selected a channel layout other than stereo"
+        }
+        require(!doP || (config.encoding == C.ENCODING_PCM_24BIT &&
+            config.sampleRate in ANDROID_UAC2_DOP_SAMPLE_RATES_HZ)) {
+            "The DoP stream must remain stereo packed PCM24 at its exact carrier sample rate"
         }
 
         val device = usbManager.deviceList[deviceId]
@@ -183,10 +194,10 @@ internal class AndroidUac2DirectAudioOutputProvider(
             device = device,
             plan = plan,
             gateway = AndroidFrameworkUac2PlaybackSessionGateway(usbManager),
-            volumeControl = findAndroidUacPlaybackVolumeControl(descriptors),
+            volumeControl = if (doP) null else findAndroidUacPlaybackVolumeControl(descriptors),
         )
         session.openAndConfigure()
-        return AndroidUac2NativeIsochronousTransport(session, plan)
+        return AndroidUac2NativeIsochronousTransport(session, plan, doP)
     }
 
     private fun readRawDescriptors(device: UsbDevice): ByteArray {
@@ -213,6 +224,15 @@ internal class AndroidUac2DirectAudioOutputProvider(
 }
 
 private const val ANDROID_UAC2_ASYNC_SYNC = 1
+private val ANDROID_UAC2_DOP_SAMPLE_RATES_HZ = setOf(176_400, 352_800, 705_600)
+
+private fun androidUac2DoPFormatSupport(
+    config: AudioOutputProvider.FormatConfig,
+): Boolean = config.format.sampleMimeType == MimeTypes.AUDIO_RAW &&
+    config.format.pcmEncoding == C.ENCODING_PCM_24BIT &&
+    config.format.channelCount == 2 &&
+    config.format.sampleRate in ANDROID_UAC2_DOP_SAMPLE_RATES_HZ &&
+    !config.enablePlaybackParameters && !config.enableOffload && !config.enableTunneling
 
 private fun androidUac2DirectPcmFormatSupport(
     config: AudioOutputProvider.FormatConfig,

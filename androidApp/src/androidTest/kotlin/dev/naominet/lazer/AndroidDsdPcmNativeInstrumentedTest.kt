@@ -67,6 +67,24 @@ class AndroidDsdPcmNativeInstrumentedTest {
     }
 
     @Test
+    fun productionJniEmitsRawDsdAsDoPCarriersAndRejectsDst() {
+        for (name in listOf("dsd64_test.dsf", "dff64_test.dff")) {
+            val full = parsePcm24Wav(
+                readVirtualWav(name, position = 0L, outputMode = AndroidDsdOutputMode.DoP).bytes,
+            )
+            assertEquals(176_400, full.sampleRate, "$name DoP carrier rate")
+            assertEquals(2, full.channels, "$name DoP channel count")
+            assertEquals(44_100L, full.frameCount, "$name DoP frame count")
+            assertDoPMarkers(name, full.pcm, firstMarker = 0x05)
+            assertDoPSeekMatchesFullDecode(name, full)
+        }
+
+        assertFailsWith<IOException> {
+            readVirtualWav("dst64_verbatim.dff", 0L, AndroidDsdOutputMode.DoP)
+        }
+    }
+
+    @Test
     fun productionJniRejectsMalformedPipeBackedDsdAndDeletesTemporaryCopy() {
         val uri = Uri.parse(
             "content://dev.naominet.lazer.androidtest.dsd/pipe/malformed_test.dsf",
@@ -162,23 +180,87 @@ class AndroidDsdPcmNativeInstrumentedTest {
         )
     }
 
-    private fun readVirtualWav(name: String, position: Long): ReadResult {
+    private fun parsePcm24Wav(wav: ByteArray): DecodedWav {
+        assertTrue(wav.size >= 44, "virtual WAV contains a complete header")
+        assertEquals("RIFF", fourCc(wav, 0))
+        assertEquals("WAVE", fourCc(wav, 8))
+        assertEquals("fmt ", fourCc(wav, 12))
+        assertEquals(16L, readLe32(wav, 16))
+        assertEquals(1, readLe16(wav, 20), "integer PCM WAVE format")
+        val channels = readLe16(wav, 22)
+        val sampleRate = readLe32(wav, 24).toInt()
+        assertEquals(24, readLe16(wav, 34), "packed PCM24 carrier width")
+        assertEquals("data", fourCc(wav, 36))
+        val dataBytes = readLe32(wav, 40).toInt()
+        assertEquals(dataBytes, wav.size - 44, "WAVE data chunk length")
+        val frameBytes = channels * 3
+        assertEquals(0, dataBytes % frameBytes, "DoP carrier ends on a complete frame")
+        return DecodedWav(
+            headerBytes = 44L,
+            sampleRate = sampleRate,
+            channels = channels,
+            frameCount = dataBytes.toLong() / frameBytes,
+            pcm = wav.copyOfRange(44, wav.size),
+        )
+    }
+
+    private fun assertDoPSeekMatchesFullDecode(name: String, full: DecodedWav) {
+        val targetFrame = full.sampleRate.toLong() * 103L / 1_000L + 7L
+        val carrierByteOffset = Math.multiplyExact(targetFrame, 6L)
+        val actual = readVirtualWav(
+            name,
+            full.headerBytes + carrierByteOffset,
+            AndroidDsdOutputMode.DoP,
+        ).bytes
+        val expected = full.pcm.copyOfRange(carrierByteOffset.toInt(), full.pcm.size)
+        assertEquals(expected.size, actual.size, "$name DoP seek suffix byte count")
+        assertDoPMarkers(name, actual, firstMarker = 0x05)
+        for (offset in actual.indices) {
+            if (offset % 3 != 2) {
+                assertEquals(expected[offset].toInt() and 0xff, actual[offset].toInt() and 0xff,
+                    "$name DoP seek DSD payload byte $offset")
+            }
+        }
+    }
+
+    private fun assertDoPMarkers(name: String, carrier: ByteArray, firstMarker: Int) {
+        assertEquals(0, carrier.size % 6, "$name stereo DoP frame alignment")
+        var marker = firstMarker
+        for (frameOffset in carrier.indices step 6) {
+            val leftMarker = carrier[frameOffset + 2].toInt() and 0xff
+            val rightMarker = carrier[frameOffset + 5].toInt() and 0xff
+            assertEquals(marker, leftMarker, "$name left marker at frame ${frameOffset / 6}")
+            assertEquals(marker, rightMarker, "$name right marker at frame ${frameOffset / 6}")
+            marker = if (marker == 0x05) 0xFA else 0x05
+        }
+    }
+
+    private fun readVirtualWav(
+        name: String,
+        position: Long,
+        outputMode: AndroidDsdOutputMode = AndroidDsdOutputMode.Pcm,
+    ): ReadResult {
         val fixture = File(targetContext.cacheDir, name)
         instrumentation.context.assets.open(name).use { input ->
             fixture.outputStream().use { output -> input.copyTo(output) }
         }
         return try {
-            readVirtualWav(Uri.fromFile(fixture), position)
+            readVirtualWav(Uri.fromFile(fixture), position, outputMode)
         } finally {
             fixture.delete()
         }
     }
 
-    private fun readVirtualWav(uri: Uri, position: Long): ReadResult {
+    private fun readVirtualWav(
+        uri: Uri,
+        position: Long,
+        outputMode: AndroidDsdOutputMode = AndroidDsdOutputMode.Pcm,
+    ): ReadResult {
         val name = uri.lastPathSegment ?: uri.toString()
         val source = AndroidDsdPcmDataSourceFactory(
             context = targetContext,
             upstreamFactory = DataSource.Factory { error("Local DSD must use the native decoder.") },
+            outputMode = outputMode,
         ).createDataSource()
         try {
             val expectedLength = source.open(

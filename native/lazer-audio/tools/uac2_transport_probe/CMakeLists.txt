@@ -20,7 +20,8 @@ add_executable(lazer-uac2-transport-probe
     probe.cpp
     fake_libusb.cpp
     "${CMAKE_CURRENT_LIST_DIR}/../../src/android_uac2_iso_transport.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/../../src/android_uac2_packetizer.cpp")
+    "${CMAKE_CURRENT_LIST_DIR}/../../src/android_uac2_packetizer.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../src/dop_packer.cpp")
 target_include_directories(lazer-uac2-transport-probe PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/../../src"
     "${libusb_SOURCE_DIR}/libusb")

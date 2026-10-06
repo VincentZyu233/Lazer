@@ -66,7 +66,8 @@ if(ANDROID)
         add_library(lazer-uac2 SHARED
             src/android_uac2_jni.cpp
             src/android_uac2_iso_transport.cpp
-            src/android_uac2_packetizer.cpp)
+            src/android_uac2_packetizer.cpp
+            src/dop_packer.cpp)
         target_include_directories(lazer-uac2 PRIVATE
             "${CMAKE_CURRENT_LIST_DIR}/src"
             "${_lazer_libusb_root}/libusb")

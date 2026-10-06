@@ -144,6 +144,20 @@ class AndroidUac2Media3AudioOutputTest {
     }
 
     @Test
+    fun `DoP carrier allows unity volume and rejects digital and hardware volume`() {
+        val transport = FakeTransport(bytesPerSample = 3, sampleRateHz = 176_400)
+        val output = output(
+            transport,
+            config(encoding = C.ENCODING_PCM_24BIT, sampleRate = 176_400),
+            doP = true,
+        )
+
+        output.setVolume(1f)
+        assertThrows(IllegalStateException::class.java) { output.setVolume(0.99f) }
+        assertTrue(transport.hardwareVolumes.isEmpty())
+    }
+
+    @Test
     fun `playback rate and pitch must remain at unity`() {
         val output = output(FakeTransport())
         output.setPlaybackParameters(PlaybackParameters.DEFAULT)
@@ -315,7 +329,8 @@ class AndroidUac2Media3AudioOutputTest {
     private fun output(
         transport: FakeTransport,
         config: AudioOutputProvider.OutputConfig = config(),
-    ) = AndroidUac2Media3AudioOutput(config, transport)
+        doP: Boolean = false,
+    ) = AndroidUac2Media3AudioOutput(config, transport, doP)
 
     private fun config(
         encoding: Int = C.ENCODING_PCM_16BIT,
@@ -378,8 +393,8 @@ class AndroidUac2Media3AudioOutputTest {
         private val acceptFramesPerWrite: ArrayDeque<Int> = ArrayDeque(),
         override val supportsHardwareVolume: Boolean = true,
         override val bytesPerSample: Int = 2,
+        override val sampleRateHz: Int = 48_000,
     ) : AndroidUac2PcmTransport {
-        override val sampleRateHz = 48_000
         override val channelCount = 2
         override val bufferSizeInFrames = 8L
         override var audioSessionId = C.AUDIO_SESSION_ID_UNSET

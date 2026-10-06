@@ -16,17 +16,23 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Routes local DSD assets through the native DSD -> float PCM reader, wrapped as a virtual WAV. */
+internal enum class AndroidDsdOutputMode {
+    Pcm,
+    DoP,
+}
+
+/** Routes local DSD assets through the native PCM or DoP reader, wrapped as a virtual WAV. */
 @UnstableApi
 internal class AndroidDsdPcmDataSourceFactory(
     context: Context,
     private val upstreamFactory: DataSource.Factory,
     private val decoderFactory: AndroidDsdPcmDecoderFactory = NativeAndroidDsdPcmDecoderFactory,
+    private val outputMode: AndroidDsdOutputMode = AndroidDsdOutputMode.Pcm,
 ) : DataSource.Factory {
     private val appContext = context.applicationContext
 
     override fun createDataSource(): DataSource =
-        AndroidDsdPcmDataSource(appContext, upstreamFactory, decoderFactory)
+        AndroidDsdPcmDataSource(appContext, upstreamFactory, decoderFactory, outputMode)
 }
 
 @UnstableApi
@@ -34,6 +40,7 @@ private class AndroidDsdPcmDataSource(
     private val context: Context,
     private val upstreamFactory: DataSource.Factory,
     private val decoderFactory: AndroidDsdPcmDecoderFactory,
+    private val outputMode: AndroidDsdOutputMode,
 ) : DataSource {
     private val listeners = mutableListOf<TransferListener>()
     private var upstream: DataSource? = null
@@ -69,6 +76,7 @@ private class AndroidDsdPcmDataSource(
                 openedFile.descriptor.fd,
                 openedFile.startOffset,
                 openedFile.length,
+                outputMode,
             )
             val virtualSource = AndroidFloatPcmWavDataSource(decoder, uri)
             floatPcmDataSource = virtualSource
@@ -131,7 +139,12 @@ private class AndroidDsdPcmDataSource(
 /** Opens the JNI decoder in production and allows deterministic decoder seams in JVM tests. */
 internal fun interface AndroidDsdPcmDecoderFactory {
     @Throws(IOException::class)
-    fun open(fileDescriptor: Int, startOffset: Long, length: Long): AndroidFloatPcmDecoder
+    fun open(
+        fileDescriptor: Int,
+        startOffset: Long,
+        length: Long,
+        outputMode: AndroidDsdOutputMode,
+    ): AndroidFloatPcmDecoder
 }
 
 private object NativeAndroidDsdPcmDecoderFactory : AndroidDsdPcmDecoderFactory {
@@ -139,6 +152,7 @@ private object NativeAndroidDsdPcmDecoderFactory : AndroidDsdPcmDecoderFactory {
         fileDescriptor: Int,
         startOffset: Long,
         length: Long,
+        outputMode: AndroidDsdOutputMode,
     ): AndroidFloatPcmDecoder {
         val outputInfo = LongArray(5)
         val handle = AndroidDsdPcmNative.nativeOpen(
@@ -146,6 +160,7 @@ private object NativeAndroidDsdPcmDecoderFactory : AndroidDsdPcmDecoderFactory {
             startOffset,
             length,
             0, // Retain DSD64 at 176.4 kHz and cap higher rates at 192 kHz.
+            outputMode == AndroidDsdOutputMode.DoP,
             outputInfo,
         )
         if (handle == 0L) {
@@ -157,18 +172,31 @@ private object NativeAndroidDsdPcmDecoderFactory : AndroidDsdPcmDecoderFactory {
         val sampleRate = outputInfo[0].toInt()
         val channelCount = outputInfo[1].toInt()
         val totalFrames = outputInfo[4]
-        if (sampleRate <= 0 || channelCount !in 1..8 || totalFrames <= 0L) {
-            AndroidDsdPcmNative.nativeClose(handle)
-            throw IOException("The DSD stream has no supported PCM format or exact duration.")
+        val outputEncoding = when (outputMode) {
+            AndroidDsdOutputMode.Pcm -> C.ENCODING_PCM_FLOAT
+            AndroidDsdOutputMode.DoP -> C.ENCODING_PCM_24BIT
         }
-        return NativeAndroidFloatPcmDecoder(handle, sampleRate, channelCount, totalFrames)
+        if (sampleRate <= 0 || channelCount !in 1..8 || totalFrames <= 0L ||
+            (outputMode == AndroidDsdOutputMode.DoP &&
+                (channelCount != 2 || sampleRate > ANDROID_UAC2_DOP_MAX_SAMPLE_RATE_HZ))
+        ) {
+            AndroidDsdPcmNative.nativeClose(handle)
+            throw IOException(when (outputMode) {
+                AndroidDsdOutputMode.Pcm -> "The DSD stream has no supported PCM format or exact duration."
+                AndroidDsdOutputMode.DoP -> "Android USB DoP supports stereo carriers up to 768 kHz."
+            })
+        }
+        return NativeAndroidFloatPcmDecoder(handle, sampleRate, channelCount, totalFrames, outputEncoding)
     }
 }
+
+private const val ANDROID_UAC2_DOP_MAX_SAMPLE_RATE_HZ = 768_000
 
 internal interface AndroidFloatPcmDecoder : AutoCloseable {
     val sampleRateHz: Int
     val channelCount: Int
     val totalFrames: Long
+    val pcmEncoding: Int get() = C.ENCODING_PCM_FLOAT
 
     fun read(destination: ByteArray, capacityFrames: Int): Int
     fun seekToMillis(positionMillis: Long): Int
@@ -180,6 +208,7 @@ private class NativeAndroidFloatPcmDecoder(
     override val sampleRateHz: Int,
     override val channelCount: Int,
     override val totalFrames: Long,
+    override val pcmEncoding: Int,
 ) : AndroidFloatPcmDecoder {
     override fun read(destination: ByteArray, capacityFrames: Int): Int =
         AndroidDsdPcmNative.nativeRead(handle, destination, capacityFrames)
@@ -196,7 +225,7 @@ private class NativeAndroidFloatPcmDecoder(
     }
 }
 
-/** WAV/RF64 DataSource shared by native DSD playback and Media3 extractor tests. */
+/** WAV/RF64 DataSource shared by native DSD-to-PCM and DSD-to-DoP playback. */
 @UnstableApi
 internal class AndroidFloatPcmWavDataSource(
     private val decoder: AndroidFloatPcmDecoder,
@@ -231,9 +260,20 @@ internal class AndroidFloatPcmWavDataSource(
             if (sampleRate <= 0 || channelCount !in 1..8 || totalFrames <= 0L) {
                 throw IOException("The DSD stream has no supported PCM format or exact duration.")
             }
-            pcmFrameBytes = Math.multiplyExact(channelCount, Float.SIZE_BYTES)
+            val bytesPerSample = when (decoder.pcmEncoding) {
+                C.ENCODING_PCM_FLOAT -> Float.SIZE_BYTES
+                C.ENCODING_PCM_24BIT -> 3
+                else -> throw IOException("The DSD decoder selected an unsupported WAV sample format.")
+            }
+            pcmFrameBytes = Math.multiplyExact(channelCount, bytesPerSample)
             val sampleDataBytes = Math.multiplyExact(totalFrames, pcmFrameBytes.toLong())
-            wavHeader = buildAndroidDsdWavHeader(sampleRate, channelCount, totalFrames, sampleDataBytes)
+            wavHeader = buildAndroidDsdWavHeader(
+                sampleRate,
+                channelCount,
+                totalFrames,
+                sampleDataBytes,
+                decoder.pcmEncoding,
+            )
             totalLength = Math.addExact(wavHeader.size.toLong(), sampleDataBytes)
             if (position < 0L || position > totalLength) {
                 throw IOException("The requested DSD position is outside the decoded stream.")
@@ -442,6 +482,7 @@ internal fun readAndroidDsdDurationMillis(context: Context, uri: Uri): Long? {
             openedFile.startOffset,
             openedFile.length,
             0,
+            false,
             outputInfo,
         )
         if (nativeHandle != 0L) durationMillis = outputInfo[3].takeIf { it > 0L }
@@ -458,7 +499,7 @@ internal fun readAndroidDsdDurationMillis(context: Context, uri: Uri): Long? {
     return durationMillis
 }
 
-private fun isLocalDsdUri(context: Context, uri: Uri): Boolean {
+internal fun isLocalDsdUri(context: Context, uri: Uri): Boolean {
     if (!uri.scheme.equals("content", ignoreCase = true) &&
         !uri.scheme.equals("file", ignoreCase = true)
     ) return false
@@ -478,9 +519,17 @@ internal fun buildAndroidDsdWavHeader(
     channels: Int,
     totalFrames: Long,
     sampleDataBytes: Long,
+    pcmEncoding: Int = C.ENCODING_PCM_FLOAT,
 ): ByteArray {
     require(sampleRate > 0 && channels in 1..8 && totalFrames > 0L && sampleDataBytes > 0L)
-    val frameBytes = Math.multiplyExact(channels, Float.SIZE_BYTES)
+    val bitsPerSample = when (pcmEncoding) {
+        C.ENCODING_PCM_FLOAT -> 32
+        C.ENCODING_PCM_24BIT -> 24
+        else -> throw IllegalArgumentException("Only float32 PCM and packed PCM24 WAV are supported.")
+    }
+    val bytesPerSample = bitsPerSample / Byte.SIZE_BITS
+    val formatTag = if (pcmEncoding == C.ENCODING_PCM_FLOAT) 3 else 1
+    val frameBytes = Math.multiplyExact(channels, bytesPerSample)
     require(sampleDataBytes == Math.multiplyExact(totalFrames, frameBytes.toLong()))
     val useRf64 = sampleDataBytes + 36L > 0xffff_ffffL
     val header = ByteArray(if (useRf64) 80 else 44)
@@ -499,12 +548,12 @@ internal fun buildAndroidDsdWavHeader(
     }
     putFourCc(header, formatOffset, "fmt ")
     putLe32(header, formatOffset + 4, 16L)
-    putLe16(header, formatOffset + 8, 3)
+    putLe16(header, formatOffset + 8, formatTag)
     putLe16(header, formatOffset + 10, channels)
     putLe32(header, formatOffset + 12, sampleRate.toLong())
     putLe32(header, formatOffset + 16, sampleRate.toLong() * frameBytes)
     putLe16(header, formatOffset + 20, frameBytes)
-    putLe16(header, formatOffset + 22, 32)
+    putLe16(header, formatOffset + 22, bitsPerSample)
     putFourCc(header, formatOffset + 24, "data")
     putLe32(header, formatOffset + 28, if (useRf64) 0xffff_ffffL else sampleDataBytes)
     return header
@@ -547,6 +596,7 @@ internal object AndroidDsdPcmNative {
         startOffset: Long,
         length: Long,
         targetSampleRate: Int,
+        doP: Boolean,
         outputInfo: LongArray,
     ): Long
 

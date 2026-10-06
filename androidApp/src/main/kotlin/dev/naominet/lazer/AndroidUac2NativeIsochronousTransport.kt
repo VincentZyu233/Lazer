@@ -7,20 +7,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
-/** Native libusb USB 2.0 isochronous PCM transport for an Android session that has already
+/** Native libusb USB 2.0 isochronous PCM/DoP transport for an Android session that has already
  * selected its configuration, claimed AudioControl/AudioStreaming, set the UAC2 Clock Source,
  * and selected the plan's streaming alternate setting. This class owns that configured session:
  * every exit closes the native libusb wrapper first and the Java connection second.
  *
- * The implementation uses a bounded native PCM queue and whole-frame, nonblocking writes. Startup
- * is paused; queued writes remain buffered until [play]. Pausing sends paced zero packets and
- * retains queued PCM. [flush] waits for in-flight packets, discards the queue, resets the playhead,
- * and leaves the endpoint paused. This is an async USB transport foundation; it makes no claim of
- * DAC compatibility, bit-perfect playback, or verified physical output.
+ * The implementation uses a bounded native queue and whole-frame, nonblocking writes. Startup is
+ * paused; queued writes remain buffered until [play]. PCM sends zero packets while paused. DoP
+ * sends valid idle carriers with alternating markers and retains queued frames. [flush] waits for
+ * in-flight packets, discards the queue, resets the playhead, and leaves the endpoint paused.
  */
 internal class AndroidUac2NativeIsochronousTransport(
     private val playbackSession: AndroidUac2PlaybackSession,
     private val plan: AndroidUac2PlaybackStreamPlan,
+    private val doP: Boolean = false,
 ) : AndroidUac2PcmTransport {
     private val lock = Any()
     private val bridge = AndroidUac2NativeIsoBridge()
@@ -38,13 +38,16 @@ internal class AndroidUac2NativeIsochronousTransport(
     override val channelCount: Int = plan.channelCount
     override val bytesPerSample: Int = plan.subslotSizeBytes
     override val bufferSizeInFrames: Long
-    override val supportsHardwareVolume: Boolean = playbackSession.supportsHardwareVolume
+    override val supportsHardwareVolume: Boolean = !doP && playbackSession.supportsHardwareVolume
 
     init {
         require(sampleRateHz in 8000..768000) { "UAC2 sample rate is outside the supported USB 2.0 range" }
         require(channelCount > 0 && channelCount <= 32) { "UAC2 channel count is unsupported" }
         require(bytesPerSample in 2..4 && plan.validBitResolution == bytesPerSample * 8) {
             "This transport accepts packed 16/24/32-bit PCM matching the endpoint subslot width"
+        }
+        require(!doP || (channelCount == 2 && bytesPerSample == 3 && plan.validBitResolution == 24)) {
+            "DoP transport requires stereo packed 24-bit carrier samples"
         }
         require(plan.dataEndpoint.synchronizationType in 1..3) {
             "UAC2 endpoint synchronization type is unsupported"
@@ -59,7 +62,7 @@ internal class AndroidUac2NativeIsochronousTransport(
         try {
             val connection: UsbDeviceConnection = playbackSession.requireConfiguredConnection()
             bridge.open(connection)
-            bridge.start(plan)
+            bridge.start(plan, doP)
             bufferSizeInFrames = bridge.bufferSizeInFrames()
             check(bufferSizeInFrames > 0L) { "Native UAC2 queue was not initialized" }
         } catch (error: Throwable) {
@@ -133,7 +136,7 @@ internal class AndroidUac2NativeIsochronousTransport(
             ensureHealthy()
             try {
                 if (eosStopped) {
-                    bridge.start(plan)
+                    bridge.start(plan, doP)
                     eosStopped = false
                 }
                 check(bridge.flush(FLUSH_TIMEOUT_MS)) { "Native UAC2 flush timed out or failed" }
@@ -178,6 +181,7 @@ internal class AndroidUac2NativeIsochronousTransport(
         synchronized(lock) {
             ensureOpen()
             ensureHealthy()
+            check(!doP) { "Hardware volume is disabled while transmitting DoP carriers" }
             try {
                 playbackSession.setHardwareVolume(volume)
             } catch (error: Exception) {

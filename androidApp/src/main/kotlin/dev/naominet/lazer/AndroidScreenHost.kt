@@ -339,12 +339,17 @@ class AndroidScreenHost(private val activity: ComponentActivity) : LazerScreenHo
     }
 
     override fun readUsbUacVolume() {
+        if (isDoPOutputActive()) return
         usbUacVolumeSession.request(increase = null)
     }
 
     override fun adjustUsbUacVolume(increase: Boolean) {
+        if (isDoPOutputActive()) return
         usbUacVolumeSession.request(increase)
     }
+
+    private fun isDoPOutputActive(): Boolean =
+        LazerPlaybackStateStore.snapshot.value.output?.outputDataFormat?.encodingLabel?.startsWith("DoP") == true
 
     fun refreshPcmTestToneCapabilities() {
         val queried = runCatching { AndroidPcmTestToneOutput.queryCapabilities(activity) }.getOrNull() ?: return

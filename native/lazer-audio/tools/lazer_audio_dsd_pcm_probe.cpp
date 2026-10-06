@@ -1,4 +1,4 @@
-/* Exercises the pull-style DSD-to-float-PCM decoder without an Android or desktop audio device. */
+/* Exercises pull-style Android DSD decoding without an audio device. */
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -82,7 +82,8 @@ struct OpenDecoder {
 };
 
 int32_t openDecoder(
-    OpenDecoder &opened, const std::string &path, int32_t sampleRate, FileReaderContext **contextOut) {
+    OpenDecoder &opened, const std::string &path, int32_t sampleRate,
+    FileReaderContext **contextOut, bool doP = false) {
     auto *context = new FileReaderContext(path);
     if (!context->stream || context->length < 0) {
         delete context;
@@ -95,7 +96,7 @@ int32_t openDecoder(
     reader.close = &closeFile;
     reader.context = context;
     reader.cancel = &cancelFile;
-    const int32_t result = opened.decoder.open(reader, sampleRate, opened.format);
+    const int32_t result = opened.decoder.open(reader, sampleRate, opened.format, doP);
     if (result == LazerAudioOk) {
         if (contextOut != nullptr) *contextOut = context;
     }
@@ -179,11 +180,104 @@ int runCancelProbe(const std::string &path, int32_t sampleRate) {
     return 0;
 }
 
+bool verifyDopMarkers(const std::vector<uint8_t> &carrier) {
+    if (carrier.empty() || carrier.size() % 6 != 0) return false;
+    uint8_t expected = 0x05;
+    for (size_t offset = 0; offset < carrier.size(); offset += 6) {
+        if (carrier[offset + 2] != expected || carrier[offset + 5] != expected) return false;
+        expected = expected == 0x05 ? 0xFA : 0x05;
+    }
+    return true;
+}
+
+bool compareDopPayload(const std::vector<uint8_t> &expected, const std::vector<uint8_t> &actual) {
+    if (expected.size() != actual.size() || expected.size() % 6 != 0) return false;
+    for (size_t offset = 0; offset < actual.size(); offset += 6) {
+        if (actual[offset] != expected[offset] || actual[offset + 1] != expected[offset + 1] ||
+            actual[offset + 3] != expected[offset + 3] || actual[offset + 4] != expected[offset + 4]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int runDopProbe(const std::string &path) {
+    OpenDecoder opened;
+    const int32_t result = openDecoder(opened, path, 0, nullptr, true);
+    if (result != LazerAudioOk) {
+        std::fprintf(stderr, "DoP open failed: %d %s\n", result, opened.decoder.lastError().c_str());
+        return 1;
+    }
+    if (opened.format.channels != 2 || opened.format.dsdRateMultiplier < 64 ||
+        opened.format.dsdRateMultiplier > 256) {
+        std::fprintf(stderr, "DoP returned an unsupported channel layout or Android carrier rate\n");
+        return 1;
+    }
+    const int32_t expectedRate = 44'100 * opened.format.dsdRateMultiplier / 16;
+    const int32_t frameBytes = opened.decoder.frameBytes();
+    if (opened.format.sampleRate != expectedRate || frameBytes != 6) {
+        std::fprintf(stderr, "DoP must use the exact stereo PCM24 carrier rate and six-byte frame\n");
+        return 1;
+    }
+
+    std::vector<uint8_t> full;
+    if (!readToEnd(opened.decoder, frameBytes, full) || !verifyDopMarkers(full)) {
+        std::fprintf(stderr, "DoP decode failed or emitted invalid alternating channel markers: %s\n",
+            opened.decoder.lastError().c_str());
+        return 1;
+    }
+    const int64_t fullFrames = static_cast<int64_t>(full.size() / 6);
+    if (opened.format.totalFrames > 0 && fullFrames != opened.format.totalFrames) {
+        std::fprintf(stderr, "DoP decoded %lld frames but the source declared %lld\n",
+            static_cast<long long>(fullFrames), static_cast<long long>(opened.format.totalFrames));
+        return 1;
+    }
+
+    constexpr int64_t seekMillis = 100;
+    OpenDecoder seeked;
+    if (openDecoder(seeked, path, 0, nullptr, true) != LazerAudioOk ||
+        seeked.decoder.seek(seekMillis) != LazerAudioOk) {
+        std::fprintf(stderr, "DoP seek setup failed: %s\n", seeked.decoder.lastError().c_str());
+        return 1;
+    }
+    std::vector<uint8_t> tail;
+    if (!readToEnd(seeked.decoder, seeked.decoder.frameBytes(), tail) || !verifyDopMarkers(tail)) {
+        std::fprintf(stderr, "DoP seek suffix has invalid carrier frames: %s\n",
+            seeked.decoder.lastError().c_str());
+        return 1;
+    }
+    const int64_t skippedFrames = static_cast<int64_t>(std::llround(
+        static_cast<double>(seekMillis) * opened.format.sampleRate / 1000.0));
+    if (skippedFrames > fullFrames ||
+        !compareDopPayload(
+            std::vector<uint8_t>(full.begin() + skippedFrames * 6, full.end()), tail)) {
+        std::fprintf(stderr, "DoP seek did not preserve the exact DSD payload suffix\n");
+        return 1;
+    }
+    std::printf("DSD%d DoP: %d Hz PCM24 carrier, %lld frames, seek and marker phases verified\n",
+        opened.format.dsdRateMultiplier, opened.format.sampleRate,
+        static_cast<long long>(fullFrames));
+    return 0;
+}
+
+int runExpectDopUnsupported(const std::string &path) {
+    OpenDecoder opened;
+    const int32_t result = openDecoder(opened, path, 0, nullptr, true);
+    if (result == LazerAudioOk) {
+        opened.decoder.close();
+        std::fprintf(stderr, "DST must not be converted to a DoP carrier\n");
+        return 1;
+    }
+    std::printf("unsupported DoP source rejected as required: %s\n", opened.decoder.lastError().c_str());
+    return 0;
+}
+
 int runProbe(int argc, char **argv) {
     if (argc < 3) {
         std::fprintf(stderr,
             "usage: lazer-audio-dsd-pcm-probe <file.dsf|file.dff> <target-rate> [seek-ms] [full.raw] [seek.raw]\n"
-            "       lazer-audio-dsd-pcm-probe <file.dsf|file.dff> <target-rate> --cancel-only\n");
+            "       lazer-audio-dsd-pcm-probe <file.dsf|file.dff> <target-rate> --cancel-only\n"
+            "       lazer-audio-dsd-pcm-probe <file.dsf|file.dff> 0 --dop|--expect-dop-unsupported\n");
         return 2;
     }
     const std::string path = argv[1];
@@ -195,6 +289,10 @@ int runProbe(int argc, char **argv) {
         return 2;
     }
     int32_t sampleRate = static_cast<int32_t>(parsedRate);
+    if (argc > 3 && std::string(argv[3]) == "--dop") return runDopProbe(path);
+    if (argc > 3 && std::string(argv[3]) == "--expect-dop-unsupported") {
+        return runExpectDopUnsupported(path);
+    }
     if (argc > 3 && std::string(argv[3]) == "--cancel-only") {
         return runCancelProbe(path, sampleRate);
     }

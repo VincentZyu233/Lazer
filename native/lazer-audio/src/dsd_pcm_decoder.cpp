@@ -52,7 +52,7 @@ DsdPcmDecoder::~DsdPcmDecoder() {
 }
 
 int32_t DsdPcmDecoder::open(
-    const LazerAudioReader &reader, int32_t targetSampleRate, DsdPcmFormat &format) {
+    const LazerAudioReader &reader, int32_t targetSampleRate, DsdPcmFormat &format, bool doP) {
     close();
     {
         std::lock_guard guard(mutex_);
@@ -62,7 +62,7 @@ int32_t DsdPcmDecoder::open(
         cancelled_.store(false, std::memory_order_release);
     }
     if (reader.read == nullptr || targetSampleRate < 0) {
-        setFailure("DSD decoder requires a readable source and a non-negative PCM sample rate");
+        setFailure("DSD decoder requires a readable source and a non-negative output sample rate");
         return LazerAudioErrorInvalidArgument;
     }
 
@@ -94,9 +94,23 @@ int32_t DsdPcmDecoder::open(
         return LazerAudioErrorUnsupported;
     }
 
-    /* Keep DSD64 at the common 176.4 kHz PCM rate and cap higher-rate DSD at 192 kHz, which
-     * AudioTrack devices commonly accept. Callers may still request a specific PCM rate. */
-    if (targetSampleRate == 0) {
+    if (doP) {
+        if (!description.rawDsd || description.channels != 2 || description.sampleRate <= 0 ||
+            description.sampleRate % 2 != 0) {
+            setFailure("Android DoP requires raw stereo DSD with an exact carrier clock");
+            source_.close();
+            return LazerAudioErrorUnsupported;
+        }
+        const int32_t carrierRate = description.sampleRate / 2;
+        if (targetSampleRate != 0 && targetSampleRate != carrierRate) {
+            setFailure("DoP requires the exact 24-bit carrier rate at half the DSD byte clock");
+            source_.close();
+            return LazerAudioErrorUnsupported;
+        }
+        targetSampleRate = carrierRate;
+    } else if (targetSampleRate == 0) {
+        /* Keep DSD64 at the common 176.4 kHz PCM rate and cap higher-rate DSD at 192 kHz, which
+         * AudioTrack devices commonly accept. Callers may still request a specific PCM rate. */
         targetSampleRate = std::min(description.sampleRate / 2, 192'000);
         if (targetSampleRate <= 0) {
             setFailure("DSD source rate cannot be mapped to an Android PCM output rate");
@@ -108,8 +122,9 @@ int32_t DsdPcmDecoder::open(
     TargetFormat target{};
     target.sampleRate = targetSampleRate;
     target.channels = description.channels;
-    target.bitsPerSample = 0;  // interleaved float32 keeps the Media3 EQ path in floating point
+    target.bitsPerSample = doP ? 24 : 0;
     target.containerBitsPerSample = 0;
+    target.doP = doP;
     result = source_.setTargetFormat(target);
     if (result != LazerAudioOk) {
         setFailure(source_.lastError().empty() ? "could not configure DSD-to-PCM conversion"
@@ -118,7 +133,8 @@ int32_t DsdPcmDecoder::open(
         return result;
     }
 
-    const int64_t frameBytes = static_cast<int64_t>(description.channels) * sizeof(float);
+    const int64_t bytesPerSample = doP ? 3 : static_cast<int64_t>(sizeof(float));
+    const int64_t frameBytes = static_cast<int64_t>(description.channels) * bytesPerSample;
     if (frameBytes <= 0 || frameBytes > std::numeric_limits<int32_t>::max()) {
         setFailure("DSD output channel layout is invalid");
         source_.close();

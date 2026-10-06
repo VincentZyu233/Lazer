@@ -55,6 +55,26 @@ class AndroidDsdPcmDataSourceTest {
     }
 
     @Test
+    fun `DoP WAV header advertises packed integer PCM24 carrier words`() {
+        val header = buildAndroidDsdWavHeader(
+            sampleRate = 176_400,
+            channels = 2,
+            totalFrames = 10,
+            sampleDataBytes = 60,
+            pcmEncoding = C.ENCODING_PCM_24BIT,
+        )
+
+        assertEquals(44, header.size)
+        assertEquals(1, le16(header, 20)) // WAVE_FORMAT_PCM, not IEEE float
+        assertEquals(2, le16(header, 22))
+        assertEquals(176_400L, le32(header, 24))
+        assertEquals(1_058_400L, le32(header, 28))
+        assertEquals(6, le16(header, 32))
+        assertEquals(24, le16(header, 34))
+        assertEquals(60L, le32(header, 40))
+    }
+
+    @Test
     fun `large float WAV header uses RF64 ds64 lengths`() {
         val dataBytes = 0x1_0000_0000L
         val frameCount = dataBytes / 8
@@ -138,7 +158,10 @@ class AndroidDsdPcmDataSourceTest {
             upstreamFactory = DataSource.Factory {
                 error("A local DSF URI should not be delegated to the upstream source.")
             },
-            decoderFactory = AndroidDsdPcmDecoderFactory { _, _, _ -> decoder },
+            decoderFactory = AndroidDsdPcmDecoderFactory { _, _, _, outputMode ->
+                assertEquals(AndroidDsdOutputMode.Pcm, outputMode)
+                decoder
+            },
         ).createDataSource()
         val extractor = WavExtractor()
         val output = RecordingExtractorOutput()
@@ -155,6 +178,55 @@ class AndroidDsdPcmDataSourceTest {
             assertEquals(2, output.track.format?.channelCount)
             assertEquals(C.ENCODING_PCM_FLOAT, output.track.format?.pcmEncoding)
             assertEquals(pcm.toList(), output.track.sampleBytes.toByteArray().toList())
+        } finally {
+            extractor.release()
+            source.close()
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `selected DoP mode preserves packed PCM24 through the virtual WAV extractor`() {
+        val carrier = byteArrayOf(
+            0x12, 0x34, 0x05, 0x56, 0x78, 0x05,
+            0x9a.toByte(), 0xbc.toByte(), 0xfa.toByte(), 0xde.toByte(), 0xf0.toByte(), 0xfa.toByte(),
+        )
+        val file = File.createTempFile("lazer-dsd-", ".dsf").apply {
+            writeBytes(byteArrayOf(0x44, 0x53, 0x44, 0x20))
+        }
+        val decoder = FakeFloatPcmDecoder(
+            sampleRateHz = 176_400,
+            channelCount = 2,
+            totalFrames = 2,
+            pcm = carrier,
+            pcmEncoding = C.ENCODING_PCM_24BIT,
+        )
+        val source = AndroidDsdPcmDataSourceFactory(
+            context = RuntimeEnvironment.getApplication(),
+            upstreamFactory = DataSource.Factory {
+                error("A local DSF URI should not be delegated to the upstream source.")
+            },
+            decoderFactory = AndroidDsdPcmDecoderFactory { _, _, _, outputMode ->
+                assertEquals(AndroidDsdOutputMode.DoP, outputMode)
+                decoder
+            },
+            outputMode = AndroidDsdOutputMode.DoP,
+        ).createDataSource()
+        val extractor = WavExtractor()
+        val output = RecordingExtractorOutput()
+
+        try {
+            val inputLength = source.open(DataSpec.Builder().setUri(Uri.fromFile(file)).build())
+            val input = DefaultExtractorInput(source, 0L, inputLength)
+            assertTrue(extractor.sniff(input), "Media3 did not recognize the virtual DoP WAV")
+            input.resetPeekPosition()
+            extractor.init(output)
+            readToEnd(extractor, input)
+
+            assertEquals(176_400, output.track.format?.sampleRate)
+            assertEquals(2, output.track.format?.channelCount)
+            assertEquals(C.ENCODING_PCM_24BIT, output.track.format?.pcmEncoding)
+            assertEquals(carrier.toList(), output.track.sampleBytes.toByteArray().toList())
         } finally {
             extractor.release()
             source.close()
@@ -276,13 +348,15 @@ class AndroidDsdPcmDataSourceTest {
         override val channelCount: Int,
         override val totalFrames: Long,
         private val pcm: ByteArray,
+        override val pcmEncoding: Int = C.ENCODING_PCM_FLOAT,
     ) : AndroidFloatPcmDecoder {
         private var offset = 0
         var lastSeekMillis: Long? = null
             private set
 
         override fun read(destination: ByteArray, capacityFrames: Int): Int {
-            val frameBytes = channelCount * Float.SIZE_BYTES
+            val bytesPerSample = if (pcmEncoding == C.ENCODING_PCM_24BIT) 3 else Float.SIZE_BYTES
+            val frameBytes = channelCount * bytesPerSample
             val count = minOf(capacityFrames * frameBytes, pcm.size - offset)
             if (count <= 0) return 0
             pcm.copyInto(destination, 0, offset, offset + count)
@@ -293,7 +367,8 @@ class AndroidDsdPcmDataSourceTest {
         override fun seekToMillis(positionMillis: Long): Int {
             if (positionMillis < 0L) return -1
             val frame = (positionMillis * sampleRateHz + 500L) / 1_000L
-            val byteOffset = frame * channelCount * Float.SIZE_BYTES
+            val bytesPerSample = if (pcmEncoding == C.ENCODING_PCM_24BIT) 3 else Float.SIZE_BYTES
+            val byteOffset = frame * channelCount * bytesPerSample
             if (byteOffset > pcm.size) return -1
             offset = byteOffset.toInt()
             lastSeekMillis = positionMillis

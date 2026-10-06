@@ -2004,6 +2004,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         )
                         val operationRunning = usbUacState.status == LazerUsbUacVolumeStatus.AwaitingPermission ||
                             usbUacState.status == LazerUsbUacVolumeStatus.Reading
+                        val doPOutputActive = playbackOutput?.outputDataFormat?.encodingLabel?.startsWith("DoP") == true
                         if (screen.supportsUsbUacDirectOutput) {
                             val directOutputAwaitingPermission =
                                 usbUacDirectOutputState.status == LazerUsbUacDirectOutputStatus.AwaitingPermission
@@ -2075,10 +2076,10 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                             Spacer(Modifier.weight(1f))
                             ThemeTextButton(
                                 onClick = screen::readUsbUacVolume,
-                                enabled = selectedUacDevice != null && !operationRunning,
+                                enabled = selectedUacDevice != null && !operationRunning && !doPOutputActive,
                             ) { Text(tr(if (operationRunning) "settings.hifi.usb_uac.working" else "settings.hifi.usb_uac.read")) }
                         }
-                        val statusKey = when (usbUacState.status) {
+                        val statusKey = if (doPOutputActive) "settings.hifi.usb_uac.dop_volume_disabled" else when (usbUacState.status) {
                             LazerUsbUacVolumeStatus.Idle -> null
                             LazerUsbUacVolumeStatus.AwaitingPermission -> "settings.hifi.usb_uac.permission_prompt"
                             LazerUsbUacVolumeStatus.Reading -> "settings.hifi.usb_uac.reading"
@@ -2090,7 +2091,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         statusKey?.let {
                             Text(tr(it), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
                         }
-                        if (usbUacState.status == LazerUsbUacVolumeStatus.Ready) {
+                        if (usbUacState.status == LazerUsbUacVolumeStatus.Ready && !doPOutputActive) {
                             val volumeText = if (usbUacState.muted) {
                                 tr("settings.hifi.usb_uac.muted")
                             } else {
@@ -2118,12 +2119,12 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 ThemeTextButton(
                                     onClick = { screen.adjustUsbUacVolume(increase = false) },
-                                    enabled = usbUacState.canDecrease && !operationRunning,
+                                    enabled = usbUacState.canDecrease && !operationRunning && !doPOutputActive,
                                 ) { Text(tr("settings.hifi.usb_uac.down")) }
                                 Spacer(Modifier.weight(1f))
                                 ThemeTextButton(
                                     onClick = { screen.adjustUsbUacVolume(increase = true) },
-                                    enabled = usbUacState.canIncrease && !operationRunning,
+                                    enabled = usbUacState.canIncrease && !operationRunning && !doPOutputActive,
                                 ) { Text(tr("settings.hifi.usb_uac.up")) }
                             }
                             Text(

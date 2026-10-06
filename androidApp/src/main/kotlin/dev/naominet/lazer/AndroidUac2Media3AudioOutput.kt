@@ -104,14 +104,13 @@ internal class AndroidUac2PcmTransportException(
 ) : Exception(message, cause)
 
 /**
- * PCM-only Media3 [AudioOutput] for the direct UAC2 USB transport. All volume requests go to the
- * transport's verified hardware-volume API; no digital gain is applied here. Float PCM conversion
- * and any enabled DSP may still alter source samples, so this class alone does not prove bit-perfect
- * delivery to a physical DAC.
+ * Media3 [AudioOutput] for the direct UAC2 USB transport. DoP carriers remain packed PCM24 and reject
+ * every non-unity volume request; ordinary PCM volume requests use only verified hardware control.
  */
 internal class AndroidUac2Media3AudioOutput(
     config: AudioOutputProvider.OutputConfig,
     private val transport: AndroidUac2PcmTransport,
+    private val doP: Boolean = false,
 ) : AudioOutput {
     private data class PendingBuffer(
         val buffer: ByteBuffer,
@@ -156,6 +155,9 @@ internal class AndroidUac2Media3AudioOutput(
         require(config.sampleRate > 0) { "PCM sample rate must be positive" }
         require(config.encoding in ANDROID_UAC2_PCM_SOURCE_BYTES_PER_SAMPLE) {
             "UAC2 output supports integer or float PCM input only"
+        }
+        require(!doP || config.encoding == C.ENCODING_PCM_24BIT) {
+            "DoP output requires unchanged packed PCM24 carrier input"
         }
         require(!config.useOffloadGapless) { "UAC2 PCM output does not support offload gapless playback" }
 
@@ -287,6 +289,10 @@ internal class AndroidUac2Media3AudioOutput(
     override fun setVolume(volume: Float) = synchronized(lock) {
         ensureNotReleased()
         require(volume.isFinite() && volume in 0f..1f) { "Volume must be finite and between 0 and 1" }
+        if (doP) {
+            check(volume == 1f) { "Digital and hardware volume are disabled while transmitting DoP carriers" }
+            return@synchronized
+        }
         if (!transport.supportsHardwareVolume) {
             check(volume == 1f) { "This UAC2 device has no hardware volume control; digital gain is disabled" }
             return@synchronized

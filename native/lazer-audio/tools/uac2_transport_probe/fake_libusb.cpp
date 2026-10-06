@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -10,6 +11,7 @@
 #include <new>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 struct libusb_context final {};
 
@@ -42,9 +44,13 @@ int g_cancel_failures_remaining = 0;
 int g_event_failures_remaining = 0;
 int g_fault_error_code = LIBUSB_ERROR_IO;
 int g_wrapped_fd = -1;
+std::uint8_t g_streaming_subslot_size = 2;
+std::uint8_t g_streaming_bit_resolution = 16;
+std::uint32_t g_feedback_sample_rate_hz = 48000;
+std::vector<unsigned char> g_captured_output;
 libusb_device g_device;
 
-const unsigned char kStreamingExtra[] = {
+unsigned char kStreamingExtra[] = {
     16, 0x24, 0x01, 1, 0, 1, 1, 0, 0, 0, 2, 3, 0, 0, 0, 0,
     6, 0x24, 0x02, 1, 2, 16,
 };
@@ -55,6 +61,8 @@ libusb_interface g_interfaces[1]{};
 libusb_config_descriptor g_configuration{};
 
 void InitializeDescriptors() {
+    kStreamingExtra[sizeof(kStreamingExtra) - 2] = g_streaming_subslot_size;
+    kStreamingExtra[sizeof(kStreamingExtra) - 1] = g_streaming_bit_resolution;
     g_endpoints[0].bLength = LIBUSB_DT_ENDPOINT_SIZE;
     g_endpoints[0].bDescriptorType = LIBUSB_DT_ENDPOINT;
     g_endpoints[0].bEndpointAddress = 0x01;
@@ -103,12 +111,14 @@ void CompleteTransfer(libusb_transfer* transfer, const bool cancelled) {
             for (int packet_index = 0; packet_index < transfer->num_iso_packets; ++packet_index) {
                 auto& packet = transfer->iso_packet_desc[packet_index];
                 auto* bytes = libusb_get_iso_packet_buffer_simple(transfer, packet_index);
-                // High-speed feedback: 6.0 PCM sample frames per microframe.
+                // High-speed feedback is a 16.16 samples-per-microframe value.
                 if (packet.length >= 4) {
-                    bytes[0] = 0x00;
-                    bytes[1] = 0x00;
-                    bytes[2] = 0x06;
-                    bytes[3] = 0x00;
+                    const std::uint32_t feedback = static_cast<std::uint32_t>(
+                        (static_cast<std::uint64_t>(g_feedback_sample_rate_hz) * 65536u + 4000u) / 8000u);
+                    bytes[0] = static_cast<unsigned char>(feedback & 0xffu);
+                    bytes[1] = static_cast<unsigned char>((feedback >> 8u) & 0xffu);
+                    bytes[2] = static_cast<unsigned char>((feedback >> 16u) & 0xffu);
+                    bytes[3] = static_cast<unsigned char>((feedback >> 24u) & 0xffu);
                     packet.actual_length = 4;
                 }
                 packet.status = LIBUSB_TRANSFER_COMPLETED;
@@ -120,6 +130,13 @@ void CompleteTransfer(libusb_transfer* transfer, const bool cancelled) {
                 packet.actual_length = static_cast<int>(packet.length);
                 packet.status = LIBUSB_TRANSFER_COMPLETED;
                 transfer->actual_length += packet.actual_length;
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (transfer->buffer != nullptr && transfer->length > 0) {
+                    g_captured_output.insert(g_captured_output.end(), transfer->buffer,
+                        transfer->buffer + transfer->length);
+                }
             }
         }
     }
@@ -336,6 +353,26 @@ void ResetFakeLibusbState() {
     g_event_failures_remaining = 0;
     g_fault_error_code = LIBUSB_ERROR_IO;
     g_wrapped_fd = -1;
+    g_streaming_subslot_size = 2;
+    g_streaming_bit_resolution = 16;
+    g_feedback_sample_rate_hz = 48000;
+    g_captured_output.clear();
+}
+
+void SetFakeStreamingFormat(const std::uint8_t subslot_size, const std::uint8_t bit_resolution) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_streaming_subslot_size = subslot_size;
+    g_streaming_bit_resolution = bit_resolution;
+}
+
+void SetFakeFeedbackSampleRate(const std::uint32_t sample_rate_hz) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_feedback_sample_rate_hz = sample_rate_hz;
+}
+
+std::vector<unsigned char> CapturedOutputBytes() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_captured_output;
 }
 
 int CloseCount() {

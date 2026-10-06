@@ -1,5 +1,7 @@
 #include "android_uac2_iso_transport.h"
 
+#include "dop_packer.h"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -233,6 +235,7 @@ int IsoTransportSession::Start(const NativeStreamConfig& config, std::string* er
     playing_ = false;
     event_loop_exit_ = false;
     played_frames_since_flush_ = 0;
+    dop_next_marker_ = 0x05;
     last_playback_progress_ = std::chrono::steady_clock::now();
 
     auto* device = libusb_get_device(device_handle_);
@@ -417,8 +420,15 @@ int IsoTransportSession::ValidatePreparedStreamLocked(
         config.data_interval == 0 || config.data_interval > 16 ||
         (speed == UsbSpeed::Full && config.data_interval != 1) ||
         (is_async != has_feedback)) {
-        if (error != nullptr) *error = "UAC2 PCM stream plan contains unsupported or inconsistent endpoint fields";
+        if (error != nullptr) *error = config.doP
+            ? "UAC2 DoP stream plan contains unsupported or inconsistent endpoint fields"
+            : "UAC2 PCM stream plan contains unsupported or inconsistent endpoint fields";
         return LIBUSB_ERROR_INVALID_PARAM;
+    }
+    if (config.doP && (config.channel_count != 2 || config.subslot_size_bytes != 3 ||
+        config.valid_bit_resolution != 24)) {
+        if (error != nullptr) *error = "DoP transport requires stereo packed 24-bit carrier samples";
+        return LIBUSB_ERROR_NOT_SUPPORTED;
     }
     if (has_feedback &&
         ((config.feedback_endpoint_address & 0x80u) == 0 ||
@@ -646,6 +656,7 @@ bool IsoTransportSession::Flush(const std::uint32_t timeout_ms) {
         queue_size_ = 0;
         played_frames_since_flush_ = 0;
         packetizer_.ResetPhase();
+        dop_next_marker_ = 0x05;
         playing_ = false;
         return true;
     }
@@ -673,6 +684,7 @@ bool IsoTransportSession::Flush(const std::uint32_t timeout_ms) {
         queue_size_ = 0;
         played_frames_since_flush_ = 0;
         packetizer_.ResetPhase();
+        dop_next_marker_ = 0x05;
         playing_ = false;
         draining_ = false;
         last_playback_progress_ = std::chrono::steady_clock::now();
@@ -999,11 +1011,23 @@ int IsoTransportSession::PrepareAndSubmitDataLocked(TransferSlot* slot) noexcept
         transfer->iso_packet_desc[packet_index].length = static_cast<unsigned int>(packet_bytes);
         transfer->iso_packet_desc[packet_index].actual_length = 0;
         transfer->iso_packet_desc[packet_index].status = LIBUSB_TRANSFER_COMPLETED;
+        std::size_t audio_frames = 0;
         if (packet_bytes > 0 && playing_) {
             const std::size_t queued_before = queue_size_;
-            slot->payload_frames += std::min(queued_before, packet_bytes) / frame_bytes_;
+            audio_frames = std::min(queued_before, packet_bytes) / frame_bytes_;
+            slot->payload_frames += audio_frames;
             CopyFromQueueLocked(slot->buffer.data() + byte_offset, packet_bytes);
             if (queued_before < packet_bytes) ++underrun_packets_;
+        }
+        if (stream_config_.doP) {
+            const int32_t prepared_frames = lazer::audio::prepareDopCarrierFrames(
+                slot->buffer.data() + byte_offset,
+                static_cast<int32_t>(frames),
+                static_cast<int32_t>(audio_frames),
+                stream_config_.channel_count,
+                true,
+                dop_next_marker_);
+            if (prepared_frames != static_cast<int32_t>(frames)) return LIBUSB_ERROR_NOT_SUPPORTED;
         }
         byte_offset += packet_bytes;
     }

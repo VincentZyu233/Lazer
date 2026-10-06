@@ -25,7 +25,7 @@ internal class AndroidUac2NativeIsoBridge {
 
     /** Starts transfers for the descriptor-backed plan already applied by Android's USB session. */
     @Synchronized
-    fun start(plan: AndroidUac2PlaybackStreamPlan) {
+    fun start(plan: AndroidUac2PlaybackStreamPlan, doP: Boolean = false) {
         nativeHandle()
         val sampleRate = Math.toIntExact(plan.sampleRateHz)
         val feedback = plan.feedbackEndpoint
@@ -47,6 +47,7 @@ internal class AndroidUac2NativeIsoBridge {
             feedback?.maximumPacketSizeBytes ?: 0,
             feedback?.transactionsPerMicroframe ?: 0,
             feedback?.interval ?: 0,
+            if (doP) 1 else 0,
         )
         check(startNative(handle, config) == 0) { "Native UAC2 transfer start failed" }
     }

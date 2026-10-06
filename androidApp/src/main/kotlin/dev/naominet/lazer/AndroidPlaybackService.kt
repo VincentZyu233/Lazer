@@ -837,18 +837,23 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             LazerReplayGainResolution(0.0, LazerReplayGainSource.None)
         }
         val directDeviceId = directUacDeviceId
+        val doPOutput = directDeviceId != null &&
+            track.source is LazerTrackSource.LocalFile &&
+            isLocalDsdUri(this, Uri.parse(url))
         val audioOutputProvider: AudioOutputProvider = if (directDeviceId != null) {
             AndroidUac2DirectAudioOutputProvider(
                 context = this,
                 deviceId = directDeviceId,
+                doP = doPOutput,
                 onOutputConfigured = { config, deviceName, usbBitDepth ->
                     if (generation == loadingGeneration) {
                         val inputIsFloat = config.encoding == C.ENCODING_PCM_FLOAT
+                        val encodingLabel = if (doPOutput) "DoP (PCM24 carrier)" else "PCM $usbBitDepth-bit"
                         val outputData = PlaybackAudioOutputDataSnapshot(
                             sampleRateHz = config.sampleRate,
-                            encodingLabel = "PCM $usbBitDepth-bit",
+                            encodingLabel = encodingLabel,
                             channelCount = Integer.bitCount(config.channelMask),
-                            isLinearPcm = true,
+                            isLinearPcm = !doPOutput,
                             offload = false,
                             tunneling = false,
                         )
@@ -860,7 +865,7 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                                     output = PlaybackOutputSnapshot(
                                         requestedSampleRateHz = config.sampleRate,
                                         audioTrackSampleRateHz = null,
-                                        encodingLabel = "PCM $usbBitDepth-bit",
+                                        encodingLabel = encodingLabel,
                                         channelCount = Integer.bitCount(config.channelMask),
                                         routedDeviceName = deviceName,
                                         mixerAdvertisesBitPerfectBehavior = null,
@@ -873,7 +878,9 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
                                             } else {
                                                 DirectPathReason.DigitalCaptureNotVerified
                                             },
-                                            detail = if (inputIsFloat) {
+                                            detail = if (doPOutput) {
+                                                "Raw DSD is packed into PCM24 DoP carriers; DAC lock and digital capture are not verified"
+                                            } else if (inputIsFloat) {
                                                 "Media3 high-resolution float PCM is dithered to the USB integer format"
                                             } else null,
                                         ),
@@ -923,7 +930,11 @@ class AndroidPlaybackService : Service(), AudioManager.OnAudioFocusChangeListene
             .setUserAgent(mediaRequestHeaders.getValue("User-Agent"))
             .setDefaultRequestProperties(mediaRequestHeaders)
         val upstreamDataSourceFactory = DefaultDataSource.Factory(this, httpFactory)
-        val dataSourceFactory = AndroidDsdPcmDataSourceFactory(this, upstreamDataSourceFactory)
+        val dataSourceFactory = AndroidDsdPcmDataSourceFactory(
+            this,
+            upstreamDataSourceFactory,
+            outputMode = if (doPOutput) AndroidDsdOutputMode.DoP else AndroidDsdOutputMode.Pcm,
+        )
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
         val renderersFactory = DefaultRenderersFactory(this)
             .setEnableAudioFloatOutput(true)
