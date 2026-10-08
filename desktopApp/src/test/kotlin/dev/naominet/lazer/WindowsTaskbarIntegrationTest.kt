@@ -30,6 +30,24 @@ class WindowsTaskbarIntegrationTest {
     }
 
     @Test
+    fun `one playback mode button visits shuffle and every loop mode`() {
+        val modes = generateSequence(DesktopPlayMode.ListLoop, DesktopPlayMode::nextOnClick)
+            .take(5)
+            .toList()
+
+        assertEquals(
+            listOf(
+                DesktopPlayMode.ListLoop,
+                DesktopPlayMode.SingleLoop,
+                DesktopPlayMode.Sequential,
+                DesktopPlayMode.Shuffle,
+                DesktopPlayMode.ListLoop,
+            ),
+            modes,
+        )
+    }
+
+    @Test
     fun `Jump List command arguments only accept known media actions`() {
         assertEquals(
             WindowsMediaCommand.Next,

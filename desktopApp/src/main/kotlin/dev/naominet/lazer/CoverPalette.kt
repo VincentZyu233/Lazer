@@ -197,6 +197,7 @@ private val ArtworkSizeParameter = Regex("([?&]param=)\\d+y\\d+", RegexOption.IG
 internal fun String.toPaletteArtworkUrl(): String {
     val secure = trim().replaceFirst("http://", "https://")
         .let { if (it.startsWith("//")) "https:$it" else it }
+    if (secure.startsWith("file:", ignoreCase = true)) return secure
     if (ArtworkSizeParameter.containsMatchIn(secure)) {
         return secure.replace(ArtworkSizeParameter) { match -> match.groupValues[1] + "96y96" }
     }

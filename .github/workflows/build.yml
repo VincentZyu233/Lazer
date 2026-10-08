@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 jobs:
-  # Android APK, arm64-v8a only.
+  # Ship arm64-v8a APKs; run the native DSD instrumentation gate natively on x86_64.
   android:
     runs-on: ubuntu-latest
     steps:
@@ -27,8 +27,114 @@ jobs:
       # setup-gradle owns the Gradle wrapper, dependency and project build caches.
       # Do not cache generated APKs or build directories across commits.
       - uses: gradle/actions/setup-gradle@v6
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android native build tools
+        run: |
+          sdkmanager --install "ndk;30.0.16248370" "cmake;3.31.6"
+          # Hosted runners can export ANDROID_NDK_HOME pointing at another NDK.
+          # The pinned FFmpeg build must use the same NDK revision as the app.
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/30.0.16248370" >> "$GITHUB_ENV"
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config nasm
+      - name: Test USB 2.0 PCM packetizer on the host
+        run: |
+          cmake -S native/lazer-audio/tools/uac2_packetizer_probe \
+            -B build/native/uac2-packetizer-host
+          cmake --build build/native/uac2-packetizer-host --parallel 2
+          ctest --test-dir build/native/uac2-packetizer-host --output-on-failure
+      - name: Test USB 2.0 native transport lifecycle with fake libusb
+        run: |
+          cmake -S native/lazer-audio/tools/uac2_transport_probe \
+            -B build/native/uac2-transport-host
+          cmake --build build/native/uac2-transport-host --parallel 2
+          ctest --test-dir build/native/uac2-transport-host --output-on-failure
+      - name: Enable KVM for the Android emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Test Android unit suite
+        run: ./gradlew :androidApp:testDebugUnitTest --stacktrace
+      - name: Assemble standalone arm64 and x86_64 UAC2 APK without the DSD SDK
+        run: ./gradlew :androidApp:assembleDebug -PlazerEnableAndroidDsdNative=false -PlazerEnableAndroidUacNative=true -PlazerAbis=arm64-v8a,x86_64 --stacktrace
+      - name: Verify standalone UAC2 ABI packaging
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          apks = glob.glob("androidApp/build/outputs/apk/debug/*.apk")
+          if len(apks) != 1:
+              raise SystemExit(f"Expected one standalone UAC2 debug APK, found {len(apks)}")
+          with zipfile.ZipFile(apks[0]) as apk:
+              entries = set(apk.namelist())
+          required = {
+              f"lib/{abi}/{library}"
+              for abi in ("arm64-v8a", "x86_64")
+              for library in ("liblazer-uac2.so", "libusb-1.0.so")
+          }
+          missing = sorted(required - entries)
+          if missing:
+              raise SystemExit(f"Standalone UAC2 APK is missing {missing}")
+          if any(f"lib/{abi}/liblazer-audio-dsd.so" in entries for abi in ("arm64-v8a", "x86_64")):
+              raise SystemExit("UAC2-only APK unexpectedly packages the DSD decoder")
+          print(f"Verified UAC2-only native ABI packaging in {apks[0]}")
+          PY
       - name: Assemble arm64 release APK
-        run: ./gradlew :androidApp:assembleRelease -PlazerAbis=arm64-v8a --stacktrace
+        run: ./gradlew :androidApp:assembleRelease -PlazerEnableAndroidUacNative=true -PlazerAbis=arm64-v8a --stacktrace
+      - name: Verify DSD and UAC2 libraries are packaged
+        run: |
+          python3 - <<'PY'
+          import glob
+          import zipfile
+
+          apks = glob.glob("androidApp/build/outputs/apk/release/*.apk")
+          if len(apks) != 1:
+              raise SystemExit(f"Expected one release APK, found {len(apks)}")
+          with zipfile.ZipFile(apks[0]) as apk:
+              entries = set(apk.namelist())
+          required = {
+              "lib/arm64-v8a/liblazer-audio-dsd.so",
+              "lib/arm64-v8a/liblazer-uac2.so",
+              "lib/arm64-v8a/libusb-1.0.so",
+          }
+          missing = sorted(required - entries)
+          if missing:
+              raise SystemExit(f"Release APK is missing {missing}")
+          print(f"Verified native DSD and UAC2 libraries in {apks[0]}")
+          PY
+      - name: Generate compact Android DSD fixtures
+        run: ./gradlew :androidApp:generateAndroidDsdInstrumentationFixtures --stacktrace
+      - name: Run x86_64 DSD JNI instrumentation tests on API 35
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set +e
+            ./gradlew :androidApp:connectedDebugAndroidTest -PlazerEnableAndroidUacNative=true -PlazerAbis=x86_64 --stacktrace
+            gradle_status=$?
+            mkdir -p androidApp/build/diagnostics/android-dsd
+            adb logcat -d -v threadtime > androidApp/build/diagnostics/android-dsd/logcat.txt 2>&1 || true
+            exit "$gradle_status"
+      - name: Upload Android DSD instrumentation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-dsd-instrumentation-diagnostics
+          path: |
+            androidApp/build/reports/androidTests/connected/debug/**
+            androidApp/build/outputs/androidTest-results/connected/**
+            androidApp/build/diagnostics/android-dsd/logcat.txt
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v7
         with:
           name: lazer-apk-arm64
@@ -135,20 +241,261 @@ jobs:
           java-version: "21"
       # setup-gradle owns Gradle toolchain/dependency and project build caches.
       - uses: gradle/actions/setup-gradle@v6
-      - name: Install Linux packaging tools
-        run: sudo apt-get update && sudo apt-get install -y fakeroot rpm
-      - name: Test desktop media integration
-        run: ./gradlew :desktopApp:test --stacktrace
+      - name: Set the DSD FFmpeg SDK path
+        run: echo "FFMPEG_ROOT=$RUNNER_TEMP/lazer-ffmpeg" >> "$GITHUB_ENV"
+      - name: Install Linux packaging and HiFi build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y fakeroot rpm pkg-config cmake g++ nasm libasound2-dev
+      - name: Build the pinned DSD-capable FFmpeg SDK
+        run: bash native/lazer-audio/tools/build_dsd_ffmpeg.sh "$FFMPEG_ROOT"
+      - name: Record Linux HiFi toolchain versions
+        run: |
+          set -euo pipefail
+          cat /etc/os-release
+          cmake --version
+          c++ --version
+          cat "$FFMPEG_ROOT/share/lazer-ffmpeg/BUILDINFO.txt"
+          export PKG_CONFIG_PATH="$FFMPEG_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          for module in alsa libavformat libavcodec libavutil libswresample; do
+            version="$(pkg-config --modversion "$module")"
+            printf '%s %s\n' "$module" "$version"
+          done
+      - name: Build Linux HiFi native engine and offline probes
+        run: |
+          set -euo pipefail
+          build_dir="desktopApp/build/native/lazer-audio/linux-x64"
+          fixture_dir="$RUNNER_TEMP/lazer-dsf-fixtures"
+          cmake -S native/lazer-audio -B "$build_dir" \
+            -DCMAKE_BUILD_TYPE=Release -DLAZER_FFMPEG_ROOT="$FFMPEG_ROOT" \
+            -DLAZER_AUDIO_BUILD_PROBE=ON \
+            -DLAZER_AUDIO_TEST_ALLOW_ALSA_NULL=ON
+          cmake --build "$build_dir" --config Release --parallel 2
+          ldd -r "$build_dir/liblazer-audio.so"
+          ctest --test-dir "$build_dir" -C Release --output-on-failure
+          python3 native/lazer-audio/tools/generate_dsf_test_fixtures.py "$fixture_dir" \
+            --duration-ms 4000 --rates 64
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" 44100 \
+            "$fixture_dir/full.raw" 2301 "$fixture_dir/seek.raw"
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" 96000 \
+            "$fixture_dir/full-96k.raw" 2301 "$fixture_dir/seek-96k.raw"
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" --dop \
+            "$fixture_dir/dop-full.raw" 2301 "$fixture_dir/dop-seek.raw"
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" 44100 \
+            - end "$fixture_dir/end-44k.raw"
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" 96000 \
+            - end "$fixture_dir/end-96k.raw"
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" --dop \
+            - end "$fixture_dir/end-dop.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd64_test.dsf" 44100 2301 \
+            "$fixture_dir/pull-full.raw" "$fixture_dir/pull-seek.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd64_test.dsf" 0 2301 \
+            "$fixture_dir/pull-auto-full.raw" "$fixture_dir/pull-auto-seek.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd64_test.dsf" 352800 --cancel-only
+          python3 native/lazer-audio/tools/generate_dsf_test_fixtures.py "$fixture_dir" \
+            --duration-ms 100 --rates 128
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dsd128_test.dsf" 0
+          python3 native/lazer-audio/tools/generate_dff_test_fixtures.py "$fixture_dir" \
+            --duration-ms 4000 --rates 64
+          python3 native/lazer-audio/tools/generate_dst_test_fixtures.py "$fixture_dir" \
+            --frames 300 --rate 64
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dff64_test.dff" 176400 2301 \
+            "$fixture_dir/dff-pull-full.raw" "$fixture_dir/dff-pull-seek.raw"
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dff64_mono_odd_payload_test.dff" 176400
+          "$build_dir/lazer-audio-dsd-pcm-probe" "$fixture_dir/dst64_verbatim.dff" 176400 2301 \
+            "$fixture_dir/dst-pull-full.raw" "$fixture_dir/dst-pull-seek.raw"
+          test ! -s "$fixture_dir/end-44k.raw"
+          test ! -s "$fixture_dir/end-96k.raw"
+          test ! -s "$fixture_dir/end-dop.raw"
+      - name: Exercise ALSA digital loopback when snd-aloop is available
+        run: |
+          set -euo pipefail
+          if modinfo snd-aloop >/dev/null 2>&1; then
+            sudo modprobe snd-aloop pcm_substreams=1
+            cat /proc/asound/cards
+            timeout 60s desktopApp/build/native/lazer-audio/linux-x64/lazer-audio-alsa-output-probe --loopback
+          else
+            echo "::notice::The hosted kernel has no snd-aloop module; skipping digital loopback capture."
+          fi
+      - name: Test desktop media integration and Linux ALSA ABI
+        run: ./gradlew :desktopApp:test -PlazerNativeAudio=false -PlazerAudioLibrary=${{ github.workspace }}/desktopApp/build/native/lazer-audio/linux-x64/liblazer-audio.so --stacktrace
       - name: Build deb and rpm packages
-        run: ./gradlew :desktopApp:packageReleaseDeb :desktopApp:packageReleaseRpm --stacktrace
+        run: |
+          set -euo pipefail
+          native_args=()
+          # Keep native ALSA experimental packages out of version-tag releases until runtime
+          # dependency metadata and clean-install tests are verified on Debian and RPM systems.
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            native_args=(-PlazerNativeAudio=true)
+          else
+            native_args=(-PlazerNativeAudio=false)
+          fi
+          ./gradlew :desktopApp:packageReleaseDeb :desktopApp:packageReleaseRpm "${native_args[@]}" --stacktrace
+      - name: Show jpackage diagnostics after package failure
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+          for diagnostic_dir in desktopApp/build/compose/tmp desktopApp/build/compose/logs; do
+            if [[ -d "$diagnostic_dir" ]]; then
+              find "$diagnostic_dir" -type f \( -name 'packageRelease*.args.txt' -o \
+                -name 'jpackage-*-out.txt' -o -name 'jpackage-*-err.txt' \) -print -exec cat {} \;
+            fi
+          done
       - name: Build Linux app image
-        run: ./gradlew :desktopApp:createReleaseDistributable --stacktrace
+        run: |
+          set -euo pipefail
+          native_args=()
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            native_args=(-PlazerNativeAudio=true)
+          else
+            native_args=(-PlazerNativeAudio=false)
+          fi
+          ./gradlew :desktopApp:createReleaseDistributable "${native_args[@]}" --stacktrace
       - name: Build Linux x64 runnable jar
         run: |
-          ./gradlew :desktopApp:packageUberJarForCurrentOS --stacktrace
+          set -euo pipefail
+          native_args=()
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            native_args=(-PlazerNativeAudio=true)
+          else
+            native_args=(-PlazerNativeAudio=false)
+          fi
+          ./gradlew :desktopApp:packageUberJarForCurrentOS "${native_args[@]}" --stacktrace
           jar_file="$(find desktopApp/build/compose/jars -maxdepth 1 -name '*.jar' -print -quit)"
           test -n "$jar_file"
           cp "$jar_file" desktopApp/build/compose/binaries/Lazer-linux-x64.jar
+      - name: Verify Linux native package profile
+        run: |
+          set -euo pipefail
+          jar_file="desktopApp/build/compose/binaries/Lazer-linux-x64.jar"
+          app_bundle="$(find desktopApp/build/compose/binaries/main-release/app -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -n "$app_bundle"
+          deb_file="$(find desktopApp/build/compose/binaries -name '*.deb' -print -quit)"
+          rpm_file="$(find desktopApp/build/compose/binaries -name '*.rpm' -print -quit)"
+          test -n "$deb_file"
+          test -n "$rpm_file"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            ! jar tf "$jar_file" | grep -Fx 'native/linux-x64/liblazer-audio.so'
+            test ! -e "$app_bundle/lib/app/resources/native/linux-x64/liblazer-audio.so"
+            ! dpkg-deb -c "$deb_file" | grep -E '/lib/app/resources/native/linux-x64/liblazer-audio\.so$'
+            ! rpm -qpl "$rpm_file" | grep -E '/lib/app/resources/native/linux-x64/liblazer-audio\.so$'
+          else
+            jar tf "$jar_file" | grep -Fx 'native/linux-x64/liblazer-audio.so'
+            jar tf "$jar_file" | grep -Fx 'legal/ffmpeg/COPYING.LGPLv2.1'
+            jar tf "$jar_file" | grep -Fx 'legal/ffmpeg/BUILDINFO.txt'
+            jar tf "$jar_file" | grep -E '^native/linux-x64/libavformat\.so(\..*)?$'
+            jar tf "$jar_file" | grep -E '^native/linux-x64/libavcodec\.so(\..*)?$'
+            jar tf "$jar_file" | grep -E '^native/linux-x64/libavutil\.so(\..*)?$'
+            jar tf "$jar_file" | grep -E '^native/linux-x64/libswresample\.so(\..*)?$'
+            test -f "$app_bundle/lib/app/resources/native/linux-x64/liblazer-audio.so"
+            test -f "$app_bundle/lib/app/resources/legal/ffmpeg/COPYING.LGPLv2.1"
+            test -f "$app_bundle/lib/app/resources/legal/ffmpeg/BUILDINFO.txt"
+            dpkg-deb -c "$deb_file" | grep -E '/lib/app/resources/native/linux-x64/liblazer-audio\.so$'
+            dpkg-deb -c "$deb_file" | grep -E '/lib/app/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
+            dpkg-deb -c "$deb_file" | grep -E '/lib/app/resources/legal/ffmpeg/BUILDINFO\.txt$'
+            rpm -qpl "$rpm_file" | grep -E '/lib/app/resources/native/linux-x64/liblazer-audio\.so$'
+            rpm -qpl "$rpm_file" | grep -E '/lib/app/resources/legal/ffmpeg/COPYING\.LGPLv2\.1$'
+            rpm -qpl "$rpm_file" | grep -E '/lib/app/resources/legal/ffmpeg/BUILDINFO\.txt$'
+            for component in avformat avcodec avutil swresample; do
+              test -n "$(find "$app_bundle/lib/app/resources/native/linux-x64" -maxdepth 1 -name "lib$component.so*" -print -quit)"
+              dpkg-deb -c "$deb_file" | grep -E "/lib/app/resources/native/linux-x64/lib$component\.so"
+              rpm -qpl "$rpm_file" | grep -E "/lib/app/resources/native/linux-x64/lib$component\.so"
+            done
+          fi
+      - name: Diagnose Linux native package contents after verification failure
+        if: ${{ failure() }}
+        run: |
+          set +e
+          jar_file="desktopApp/build/compose/binaries/Lazer-linux-x64.jar"
+          if [[ -f "$jar_file" ]]; then
+            echo "Runnable JAR native and legal entries:"
+            jar tf "$jar_file" | grep -E '(^native/linux-x64/|^legal/ffmpeg/)' || true
+          fi
+          app_bundle="$(find desktopApp/build/compose/binaries/main-release/app -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)"
+          if [[ -n "$app_bundle" ]]; then
+            echo "App image native and legal resources:"
+            find desktopApp/build/generated/jpackage-resources -maxdepth 4 -type f -print 2>/dev/null
+            find "$app_bundle" -type f \( -path '*/native/linux-x64/*' -o -path '*/legal/ffmpeg/*' \) -print
+          fi
+          while IFS= read -r package; do
+            echo "Package contents: $package"
+            case "$package" in
+              *.deb) dpkg-deb -c "$package" | grep -E '/(native/linux-x64|legal/ffmpeg)/' || true ;;
+              *.rpm) rpm -qpl "$package" | grep -E '/(native/linux-x64|legal/ffmpeg)/' || true ;;
+            esac
+          done < <(find desktopApp/build/compose/binaries -type f \( -name '*.deb' -o -name '*.rpm' \) -print 2>/dev/null)
+      - name: Verify Linux ALSA package dependencies and installed library loading
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          deb_file="$(find desktopApp/build/compose/binaries -name '*.deb' -print -quit)"
+          rpm_file="$(find desktopApp/build/compose/binaries -name '*.rpm' -print -quit)"
+          test -n "$deb_file"
+          test -n "$rpm_file"
+          deb_file="$(realpath "$deb_file")"
+          rpm_file="$(realpath "$rpm_file")"
+          deb_dependencies="$(dpkg-deb -f "$deb_file" Depends)"
+          printf 'DEB Depends: %s\n' "$deb_dependencies"
+          [[ "$deb_dependencies" == *libasound2* || "$deb_dependencies" == *libasound2t64* ]]
+          rpm -qp --requires "$rpm_file" | tee "$RUNNER_TEMP/lazer-rpm-requires.txt"
+          grep -Eq '^alsa-lib([[:space:](:]|$)' "$RUNNER_TEMP/lazer-rpm-requires.txt"
+
+          # The GitHub runner is headless and may not provide these XDG menu targets;
+          # jpackage's post-install desktop-entry registration expects them to exist.
+          sudo mkdir -p /etc/xdg/menus /usr/share/desktop-directories
+          sudo apt-get install -y "$deb_file"
+          installed_native="$(dpkg -L dev.naominet.lazer | grep -E '/lib/app/resources/native/linux-x64/liblazer-audio\.so$' | head -n 1)"
+          test -n "$installed_native"
+          test -f "$installed_native"
+          relocated_sdk="$RUNNER_TEMP/lazer-ffmpeg-build-sdk"
+          mv "$FFMPEG_ROOT" "$relocated_sdk"
+          test ! -e "$FFMPEG_ROOT"
+          native_dir="$(dirname "$installed_native")"
+          ldd -r "$installed_native" | tee "$RUNNER_TEMP/lazer-installed-native-deps.txt"
+          for component in avformat avcodec avutil swresample; do
+            grep -F "$native_dir/lib$component.so" "$RUNNER_TEMP/lazer-installed-native-deps.txt"
+          done
+          ./gradlew :desktopApp:test --tests 'dev.naominet.lazer.DesktopAudioOutputDeviceTest' \
+            -PlazerNativeAudio=false "-PlazerAudioLibrary=$installed_native" --no-daemon --rerun-tasks --stacktrace
+      - name: Install RPM in Fedora and verify native loading
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          rpm_file="$(find desktopApp/build/compose/binaries -name '*.rpm' -print -quit)"
+          test -n "$rpm_file"
+          rpm_package="$(rpm -qp --queryformat '%{NAME}' "$rpm_file")"
+          rpm_relative_path="$(realpath --relative-to="$GITHUB_WORKSPACE" "$rpm_file")"
+          rpm_install_root="$RUNNER_TEMP/lazer-rpm-install"
+          mkdir -p "$rpm_install_root"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$rpm_install_root:/rpm-installed" \
+            --env "RPM_RELATIVE_PATH=$rpm_relative_path" \
+            --env "RPM_PACKAGE_NAME=$rpm_package" \
+            --workdir /workspace \
+            registry.fedoraproject.org/fedora:44 \
+            bash -euo pipefail -c '
+              mkdir -p /etc/xdg/menus /usr/share/desktop-directories
+              dnf -y install "/workspace/$RPM_RELATIVE_PATH"
+              rpm -q "$RPM_PACKAGE_NAME"
+              installed_native="$(rpm -ql "$RPM_PACKAGE_NAME" | grep -E "/lib/app/resources/native/linux-x64/liblazer-audio\\.so$" | head -n 1)"
+              test -n "$installed_native"
+              test -f "$installed_native"
+              native_dir="$(dirname "$installed_native")"
+              ldd -r "$installed_native" | tee /tmp/lazer-rpm-native-deps.txt
+              for component in avformat avcodec avutil swresample; do
+                grep -F "$native_dir/lib$component.so" /tmp/lazer-rpm-native-deps.txt
+              done
+              mkdir -p "/rpm-installed$native_dir"
+              cp -a "$native_dir/." "/rpm-installed$native_dir/"
+              printf "%s\\n" "$installed_native" > /rpm-installed/native-path.txt
+            '
+          installed_native_path="$(cat "$rpm_install_root/native-path.txt")"
+          installed_native="$rpm_install_root$installed_native_path"
+          test -f "$installed_native"
+          ./gradlew :desktopApp:test --tests 'dev.naominet.lazer.DesktopAudioOutputDeviceTest' \
+            -PlazerNativeAudio=false "-PlazerAudioLibrary=$installed_native" --no-daemon --rerun-tasks --stacktrace
       - name: Assemble AppImage
         shell: bash
         run: |
@@ -185,6 +532,18 @@ jobs:
           chmod +x appimagetool-x86_64.AppImage
           ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run "$app_dir" \
             "desktopApp/build/compose/binaries/Lazer-x86_64.AppImage"
+          appimage_check_dir="$RUNNER_TEMP/lazer-appimage-check"
+          mkdir -p "$appimage_check_dir"
+          (
+            cd "$appimage_check_dir"
+            "$GITHUB_WORKSPACE/desktopApp/build/compose/binaries/Lazer-x86_64.AppImage" --appimage-extract
+          )
+          appimage_root="$appimage_check_dir/squashfs-root"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            test ! -e "$appimage_root/usr/lib/lazer/lib/app/resources/native/linux-x64/liblazer-audio.so"
+          else
+            test -f "$appimage_root/usr/lib/lazer/lib/app/resources/native/linux-x64/liblazer-audio.so"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: lazer-deb-x64
@@ -205,6 +564,119 @@ jobs:
           name: lazer-jar-linux-x64
           path: desktopApp/build/compose/binaries/Lazer-linux-x64.jar
           if-no-files-found: error
+
+  # Compile and run the native CoreAudio HAL backend plus host-independent HiFi probes on macOS.
+  macos-coreaudio:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Set the DSD FFmpeg SDK path
+        run: echo "FFMPEG_ROOT=$RUNNER_TEMP/lazer-ffmpeg" >> "$GITHUB_ENV"
+      - name: Install native audio dependencies
+        run: brew install cmake pkg-config
+      - name: Build the pinned DSD-capable FFmpeg SDK
+        run: bash native/lazer-audio/tools/build_dsd_ffmpeg.sh "$FFMPEG_ROOT"
+      - name: Record CoreAudio build toolchain
+        run: |
+          set -euo pipefail
+          sw_vers
+          cmake --version
+          clang++ --version
+          cat "$FFMPEG_ROOT/share/lazer-ffmpeg/BUILDINFO.txt"
+          export PKG_CONFIG_PATH="$FFMPEG_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+          for module in libavformat libavcodec libavutil libswresample; do
+            pkg-config --modversion "$module"
+          done
+      - name: Build CoreAudio HAL engine and offline probes
+        run: |
+          set -euo pipefail
+          build_dir="build/native/lazer-audio/macos-arm64"
+          fixture_dir="$RUNNER_TEMP/lazer-dsf-fixtures"
+          cmake -S native/lazer-audio -B "$build_dir" \
+            -DCMAKE_BUILD_TYPE=Release -DLAZER_FFMPEG_ROOT="$FFMPEG_ROOT" \
+            -DLAZER_AUDIO_BUILD_PROBE=ON
+          cmake --build "$build_dir" --config Release --parallel 2
+          dylib_dependencies="$(otool -L "$build_dir/liblazer-audio.dylib")"
+          printf '%s\n' "$dylib_dependencies"
+          if grep -F "$FFMPEG_ROOT" <<<"$dylib_dependencies"; then
+            echo "The CoreAudio engine must resolve bundled FFmpeg via @rpath, not its build SDK." >&2
+            exit 1
+          fi
+          for component in libavformat libavcodec libavutil libswresample; do
+            if ! grep -Fq "@rpath/$component." <<<"$dylib_dependencies"; then
+              echo "The CoreAudio engine must link $component through its bundled @rpath install name." >&2
+              exit 1
+            fi
+            dependency="$(awk -v prefix="@rpath/$component." 'index($1, prefix) == 1 { print $1; exit }' \
+              <<<"$dylib_dependencies")"
+            dependency_name="${dependency##*/}"
+            if [[ -z "$dependency_name" || ! -f "$build_dir/$dependency_name" ]]; then
+              echo "The CoreAudio build must stage its exact FFmpeg dependency beside the engine: $dependency_name" >&2
+              exit 1
+            fi
+          done
+          engine_load_commands="$(otool -l "$build_dir/liblazer-audio.dylib")"
+          if ! grep -Fq 'path @loader_path' <<<"$engine_load_commands"; then
+            echo "The CoreAudio engine must search beside itself for bundled FFmpeg dylibs." >&2
+            exit 1
+          fi
+          shopt -s nullglob
+          ffmpeg_dylibs=("$build_dir"/libav*.dylib "$build_dir"/libswresample*.dylib)
+          if ((${#ffmpeg_dylibs[@]} == 0)); then
+            echo "The CoreAudio build must copy its FFmpeg dylibs beside the engine." >&2
+            exit 1
+          fi
+          for dylib in "${ffmpeg_dylibs[@]}"; do
+            dependencies="$(otool -L "$dylib")"
+            if grep -F "$FFMPEG_ROOT" <<<"$dependencies"; then
+              echo "Bundled FFmpeg dylib $dylib retains a dependency on the build SDK." >&2
+              exit 1
+            fi
+            install_id="$(otool -D "$dylib" | sed -n '2p')"
+            if [[ "$install_id" != @rpath/* ]]; then
+              echo "Bundled FFmpeg dylib $dylib has non-relocatable install ID: $install_id" >&2
+              exit 1
+            fi
+            load_commands="$(otool -l "$dylib")"
+            if ! grep -Fq 'path @loader_path (' <<<"$load_commands"; then
+              echo "Bundled FFmpeg dylib $dylib must resolve its own @rpath dependencies beside itself." >&2
+              exit 1
+            fi
+          done
+          ctest --test-dir "$build_dir" -C Release --output-on-failure
+          python3 native/lazer-audio/tools/generate_dsf_test_fixtures.py "$fixture_dir" \
+            --duration-ms 4000 --rates 64
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" 44100 \
+            "$fixture_dir/full.raw" 2301 "$fixture_dir/seek.raw"
+          "$build_dir/lazer-audio-source-probe" "$fixture_dir/dsd64_test.dsf" --dop \
+            "$fixture_dir/dop-full.raw" 2301 "$fixture_dir/dop-seek.raw"
+          relocated_sdk="$RUNNER_TEMP/lazer-ffmpeg-build-sdk"
+          mv "$FFMPEG_ROOT" "$relocated_sdk"
+          test ! -e "$FFMPEG_ROOT"
+      - name: Test desktop media integration and CoreAudio ABI
+        run: ./gradlew :desktopApp:test -PlazerNativeAudio=false -PlazerAudioLibrary=${{ github.workspace }}/build/native/lazer-audio/macos-arm64/liblazer-audio.dylib --stacktrace
+      - name: Print macOS desktop test failure details
+        if: ${{ failure() }}
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          for report in glob.glob("desktopApp/build/test-results/test/TEST-*.xml"):
+              root = ET.parse(report).getroot()
+              for case in root.iter("testcase"):
+                  for failure in (*case.findall("failure"), *case.findall("error")):
+                      print(f"{case.get('classname')} > {case.get('name')}")
+                      print(f"{failure.get('type')}: {failure.get('message')}")
+                      if failure.text:
+                          print(failure.text)
+          PY
 
   # Compile the Kotlin/Native framework, run shared iOS tests, then let Xcode compile and link the
   # real SwiftUI + Compose application. The macOS 26 image supplies Xcode 26 for Liquid Glass APIs.

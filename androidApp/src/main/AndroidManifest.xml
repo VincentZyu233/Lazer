@@ -6,11 +6,17 @@
          called after SuperLyricHelper.isAvailable(), so the lower app floor is safe. -->
     <uses-sdk tools:overrideLibrary="com.hchen.superlyricapi" />
 
+    <!-- Raw USB UAC diagnostics are optional and never required to install the player. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- Camera scanning is optional; the permission is used only by the explicit QR scanner flow. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- Keep the processor awake only while a background track change resolves and buffers. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- Optional: only requested when the user turns on the audio-reactive playlist indicator. The

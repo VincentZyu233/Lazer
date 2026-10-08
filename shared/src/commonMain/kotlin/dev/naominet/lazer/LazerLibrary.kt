@@ -1,6 +1,7 @@
 package dev.naominet.lazer
 
 import dev.naominet.lazer.gateway.model.Artist
+import kotlinx.coroutines.sync.Mutex
 
 /**
  * What the player and the screens need to know about one track. It stays independent from the
@@ -16,8 +17,80 @@ data class LazerTrack(
     val coverUrl: String? = null,
     val artists: List<Artist> = emptyList(),
     val translatedTitle: String? = null,
+    val source: LazerTrackSource = LazerTrackSource.GatewaySong,
+    val replayGain: LazerReplayGainTags? = null,
+    val albumArtist: String? = null,
+    val genre: String? = null,
+    val year: Int? = null,
+    val trackNumber: Int? = null,
+    val totalTracks: Int? = null,
+    val discNumber: Int? = null,
+    val totalDiscs: Int? = null,
 ) {
     val durationLabel: String get() = formatPlaybackTime(durationMillis)
+}
+
+/** Describes where audio bytes come from; track IDs remain queue tokens, not source locators. */
+sealed interface LazerTrackSource {
+    data object GatewaySong : LazerTrackSource
+
+    data class LocalFile(val uri: String) : LazerTrackSource
+}
+
+/** Basic metadata returned by a platform audio picker before a queue entry is created. */
+data class LazerPickedAudioFile(
+    val uri: String,
+    val title: String,
+    val artist: String = "",
+    val album: String = "",
+    val durationMillis: Long = 0L,
+    val coverUrl: String? = null,
+    val replayGain: LazerReplayGainTags? = null,
+    val albumArtist: String? = null,
+    val genre: String? = null,
+    val year: Int? = null,
+    val trackNumber: Int? = null,
+    val totalTracks: Int? = null,
+    val discNumber: Int? = null,
+    val totalDiscs: Int? = null,
+)
+
+data class LazerLocalAudioPickerResult(
+    val files: List<LazerPickedAudioFile> = emptyList(),
+    val unsupportedFileCount: Int = 0,
+    val failedFileCount: Int = 0,
+)
+
+/** Allocates IDs outside the positive Gateway song-ID space for local queue entries. */
+object LazerLocalTrackIdentity {
+    private var nextId = Long.MIN_VALUE
+    private val lock = Mutex()
+
+    fun nextId(): Long = withLock {
+        check(nextId < 0L) { "Local track identity space exhausted" }
+        nextId++
+    }
+
+    /** Keeps newly picked local tracks unique after queue IDs have been restored from disk. */
+    fun reserve(ids: Collection<Long>) {
+        withLock {
+            val highestUsedId = ids.asSequence().filter { it < 0L }.maxOrNull() ?: return@withLock
+            val firstFreeId = if (highestUsedId == -1L) 0L else highestUsedId + 1L
+            if (nextId < firstFreeId) nextId = firstFreeId
+        }
+    }
+
+    private inline fun <T> withLock(block: () -> T): T {
+        while (!lock.tryLock()) {
+            // The critical section only reads or advances one counter. A contending caller waits
+            // for that small operation to finish without blocking a platform-specific thread.
+        }
+        return try {
+            block()
+        } finally {
+            lock.unlock()
+        }
+    }
 }
 
 data class LazerPlaylist(
@@ -60,7 +133,9 @@ internal val lazerArtworkSizeParameter = ArtworkSizeParameter
  */
 fun enlargedArtworkUrl(raw: String?, sizePx: Int = 1024): String? {
     require(sizePx > 0)
-    val normalized = normalizedArtworkUrl(raw) ?: return null
+    val value = raw?.trim()?.takeIf(String::isNotBlank) ?: return null
+    val normalized = normalizedArtworkUrl(value)
+        ?: return value.takeIf { it.startsWith("file://", ignoreCase = true) }
     val host = normalized.substringAfter("://").substringBefore('/')
         .substringAfterLast('@').substringBefore(':')
     if (!host.equals("music.126.net", ignoreCase = true) &&

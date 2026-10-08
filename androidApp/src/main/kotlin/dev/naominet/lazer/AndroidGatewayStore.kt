@@ -120,9 +120,9 @@ class AndroidPlaylistCache(context: Context) {
 
     fun loadTracks(playlistId: Long): List<LazerTrack> = synchronized(lock) {
         tracksMemory[playlistId]
-    } ?: decodeTracks(preferences.getString(tracksKey(playlistId), null)).also { tracks ->
-        synchronized(lock) { tracksMemory[playlistId] = tracks }
-    }
+    } ?: decodeTracks(preferences.getString(tracksKey(playlistId), null))
+        .take(LazerPlaybackQueue.MAX_TRACKS)
+        .also { tracks -> synchronized(lock) { tracksMemory[playlistId] = tracks } }
 
     /** Returns only already-decoded data; safe to call from a click handler without disk or JSON work. */
     fun peekTracks(playlistId: Long): List<LazerTrack>? = synchronized(lock) {
@@ -130,7 +130,7 @@ class AndroidPlaylistCache(context: Context) {
     }
 
     fun saveTracks(playlistId: Long, tracks: List<LazerTrack>) {
-        val snapshot = tracks.toList()
+        val snapshot = tracks.take(LazerPlaybackQueue.MAX_TRACKS)
         synchronized(lock) { tracksMemory[playlistId] = snapshot }
         writeAsync(tracksKey(playlistId)) { encodeTracks(snapshot) }
     }

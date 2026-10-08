@@ -1,30 +1,41 @@
 package dev.naominet.lazer
 
+import java.awt.GraphicsConfiguration
+import java.awt.GraphicsDevice
+import java.awt.GraphicsEnvironment
 import java.awt.Image
-import java.awt.MenuItem
-import java.awt.PopupMenu
+import java.awt.Point
+import java.awt.Rectangle
 import java.awt.SystemTray
-import java.awt.TrayIcon
 import java.awt.Toolkit
+import java.awt.TrayIcon
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.io.Closeable
 import javax.imageio.ImageIO
 
 /**
- * 系统托盘图标 + 右键媒体控制菜单(上一首 / 播放·暂停 / 下一首)。
+ * 托盘右键请求落点:光标所在的屏幕坐标(像素)与该屏幕去掉任务栏后的可用区域,
+ * 供自绘菜单把自身摆在光标左上方且不越界。
+ */
+internal data class DesktopTrayMenuAnchor(
+    val point: Point,
+    val workArea: Rectangle,
+)
+
+/**
+ * 系统托盘图标。左键唤起主窗口;右键只上报一次菜单请求,菜单本身由应用自绘,
+ * 与顶栏账号菜单共用同一套纸面样式,不再使用 AWT 原生 PopupMenu。
  *
- * 跨平台:基于 AWT [SystemTray],Windows 与 Linux(KDE/GNOME/LXQt)通用。菜单项顺序与文案来自
- * 共享的 [mediaControlItems] 蓝图,保证与其它平台控件一致。播放/暂停项随状态刷新标签。
- *
+ * 跨平台:基于 AWT [SystemTray],Windows 与 Linux(KDE/GNOME/LXQt)通用。
  * 集成失败(平台不支持托盘、图标缺失等)绝不能中断播放:全程 [runCatching] 兜底。
  */
 internal class DesktopMediaTray(
-    private val onAction: (MediaControlAction) -> Unit,
+    private val onMenuRequest: (DesktopTrayMenuAnchor) -> Unit,
     private val onShowWindow: () -> Unit,
-    private val onQuit: () -> Unit,
 ) : Closeable {
     private var trayIcon: TrayIcon? = null
-    private var playPauseItem: MenuItem? = null
-    private var lastIsPlaying: Boolean? = null
+    private var lastMenuRequestAt = 0L
 
     fun start() {
         if (trayIcon != null) return
@@ -37,11 +48,9 @@ internal class DesktopMediaTray(
                 PlaybackDebugLog.event("tray-icon-missing")
                 return
             }
-            val menu = buildMenu()
-            val icon = TrayIcon(image, "Lazer", menu).apply {
+            val icon = TrayIcon(image, "Lazer").apply {
                 isImageAutoSize = true
-                // 双击/主点击托盘图标:唤起窗口
-                addActionListener { runCatching { onShowWindow() } }
+                addMouseListener(mouseHandler)
             }
             SystemTray.getSystemTray().add(icon)
             trayIcon = icon
@@ -51,57 +60,62 @@ internal class DesktopMediaTray(
         }
     }
 
-    /**
-     * 刷新播放/暂停菜单项文案。仅在状态变化时改动,避免无谓刷新。
-     * @param isPlaying 当前是否正在播放
-     */
-    fun update(isPlaying: Boolean) {
-        if (trayIcon == null || lastIsPlaying == isPlaying) return
-        runCatching {
-            val items = mediaControlItems(isPlaying, ::tr)
-            val playPause = items.first { it.action == MediaControlAction.PlayPause }
-            playPauseItem?.label = playPause.label
-            lastIsPlaying = isPlaying
-        }.onFailure { error ->
-            PlaybackDebugLog.event("tray-update-error", error.playbackDebugSummary())
-        }
-    }
-
     fun showNotification(title: String, message: String) {
         runCatching { trayIcon?.displayMessage(title, message, TrayIcon.MessageType.WARNING) }
             .onFailure { error -> PlaybackDebugLog.event("tray-notification-error", error.playbackDebugSummary()) }
     }
 
-    private fun buildMenu(): PopupMenu {
-        val menu = PopupMenu()
-        val open = MenuItem(tr("tray.open"))
-        open.addActionListener { runCatching { onShowWindow() } }
-        menu.add(open)
-        menu.addSeparator()
+    override fun close() {
+        val icon = trayIcon ?: return
+        runCatching { SystemTray.getSystemTray().remove(icon) }
+        trayIcon = null
+    }
 
-        mediaControlItems(isPlaying = false, tr = ::tr).forEach { item ->
-            val menuItem = MenuItem(item.label)
-            menuItem.addActionListener { runCatching { onAction(item.action) } }
-            if (item.action == MediaControlAction.PlayPause) playPauseItem = menuItem
-            menu.add(menuItem)
+    // Windows 把 popup trigger 放在 press 上,GTK/macOS 放在 release 上,两处都要接住。
+    private val mouseHandler = object : MouseAdapter() {
+        override fun mousePressed(event: MouseEvent) = handle(event)
+
+        override fun mouseReleased(event: MouseEvent) = handle(event)
+    }
+
+    private fun handle(event: MouseEvent) {
+        if (event.isPopupTrigger) {
+            requestMenu(event.locationOnScreen)
+        } else if (event.id == MouseEvent.MOUSE_RELEASED && event.button == MouseEvent.BUTTON1) {
+            runCatching(onShowWindow)
         }
-        menu.addSeparator()
-        val quit = MenuItem(tr("tray.quit"))
-        quit.addActionListener { runCatching { onQuit() } }
-        menu.add(quit)
-        return menu
+    }
+
+    // 有的平台 press 与 release 都算 popup trigger,一次右键会上报两回;按下节流才敢让菜单做开合。
+    private fun requestMenu(point: Point) {
+        val now = System.currentTimeMillis()
+        if (now - lastMenuRequestAt < MENU_REQUEST_DEBOUNCE_MILLIS) return
+        lastMenuRequestAt = now
+        PlaybackDebugLog.event("tray-menu-request", "${point.x},${point.y}")
+        menuAnchor(point)?.let { onMenuRequest(it) }
+    }
+
+    private fun menuAnchor(point: Point): DesktopTrayMenuAnchor? = runCatching {
+        val screen = screenContaining(point)
+        DesktopTrayMenuAnchor(
+            point = point,
+            workArea = workAreaBounds(screen.bounds, Toolkit.getDefaultToolkit().getScreenInsets(screen)),
+        )
+    }.getOrNull()
+
+    /** 光标可能不在应用所在的屏幕上,按坐标找到它真正落在哪块屏幕。 */
+    private fun screenContaining(point: Point): GraphicsConfiguration {
+        val environment = GraphicsEnvironment.getLocalGraphicsEnvironment()
+        return environment.screenDevices
+            .map(GraphicsDevice::getDefaultConfiguration)
+            .firstOrNull { it.bounds.contains(point) }
+            ?: environment.defaultScreenDevice.defaultConfiguration
     }
 
     private fun loadTrayImage(): Image? = runCatching {
         val stream = javaClass.classLoader.getResourceAsStream("icon.png") ?: return null
         stream.use { ImageIO.read(it) }
     }.getOrNull()
-
-    override fun close() {
-        val icon = trayIcon ?: return
-        runCatching { SystemTray.getSystemTray().remove(icon) }
-        trayIcon = null
-        playPauseItem = null
-        lastIsPlaying = null
-    }
 }
+
+private const val MENU_REQUEST_DEBOUNCE_MILLIS = 250L

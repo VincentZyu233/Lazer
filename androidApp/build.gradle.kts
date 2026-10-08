@@ -1,4 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.GradleException
+import org.gradle.api.tasks.Exec
 import java.util.Properties
 
 plugins {
@@ -104,11 +106,89 @@ val verifyTapHaptics = tasks.register("verifyTapHaptics") {
 }
 tasks.named("check") { dependsOn(verifyTapHaptics) }
 
+val androidDsdNativeEnabled = providers.gradleProperty("lazerEnableAndroidDsdNative")
+    .map(String::toBoolean)
+    .orElse(!System.getProperty("os.name").contains("windows", ignoreCase = true))
+    .get()
+val androidUacNativeEnabled = providers.gradleProperty("lazerEnableAndroidUacNative")
+    .map(String::toBoolean)
+    .orElse(false)
+    .get()
+val androidNativeEnabled = androidDsdNativeEnabled || androidUacNativeEnabled
+val androidDsdAbi = providers.gradleProperty("lazerAbis").orElse("arm64-v8a")
+val defaultAndroidDsdFfmpegRoot = androidDsdAbi.map { abi ->
+    layout.buildDirectory.dir("generated/lazer-android-ffmpeg-$abi").get().asFile.absolutePath
+}
+val androidDsdFfmpegRoot = providers.gradleProperty("lazerAndroidDsdFfmpegRoot")
+    .orElse(defaultAndroidDsdFfmpegRoot)
+val androidDsdNdkRoot = providers.gradleProperty("lazerAndroidNdkRoot")
+    .orElse(providers.environmentVariable("ANDROID_NDK_HOME"))
+    .orElse(providers.environmentVariable("ANDROID_NDK_ROOT"))
+    .orElse(providers.environmentVariable("ANDROID_HOME")
+        .map { "$it/ndk/30.0.16248370" })
+    .orElse(providers.environmentVariable("ANDROID_SDK_ROOT")
+        .map { "$it/ndk/30.0.16248370" })
+    .orElse("")
+val buildAndroidDsdFfmpeg = tasks.register<Exec>("buildAndroidDsdFfmpeg") {
+    group = "build"
+    description = "Builds the pinned static DSD-capable FFmpeg SDK for the selected Android ABI."
+    val buildScript = rootProject.file("native/lazer-audio/tools/build_android_dsd_ffmpeg.sh")
+    inputs.file(buildScript)
+    inputs.property("androidDsdAbi", androidDsdAbi)
+    inputs.property("androidDsdNdkRoot", androidDsdNdkRoot)
+    outputs.dir(androidDsdFfmpegRoot)
+    commandLine(
+        "bash",
+        buildScript.absolutePath,
+        androidDsdFfmpegRoot.get(),
+        androidDsdNdkRoot.get(),
+        androidDsdAbi.get(),
+    )
+}
+
+val androidDsdInstrumentationAssets =
+    layout.buildDirectory.dir("generated/androidTest/dsd-instrumentation-assets")
+val androidDsdFixturePythonExecutable = providers.gradleProperty("lazerPythonExecutable")
+    .orElse(providers.environmentVariable("PYTHON"))
+    .orElse(if (System.getProperty("os.name").contains("windows", ignoreCase = true)) {
+        "python"
+    } else {
+        "python3"
+    })
+val generateAndroidDsdInstrumentationFixtures = tasks.register<Exec>(
+    "generateAndroidDsdInstrumentationFixtures",
+) {
+    group = "verification"
+    description = "Generates compact DSF, raw DFF and verbatim DST fixtures for Android JNI tests."
+    val fixtureGenerator = rootProject.file(
+        "native/lazer-audio/tools/generate_android_dsd_instrumentation_fixtures.py",
+    )
+    inputs.files(
+        fixtureGenerator,
+        rootProject.file("native/lazer-audio/tools/generate_dsf_test_fixtures.py"),
+        rootProject.file("native/lazer-audio/tools/generate_dff_test_fixtures.py"),
+        rootProject.file("native/lazer-audio/tools/generate_dst_test_fixtures.py"),
+    )
+    outputs.dir(androidDsdInstrumentationAssets)
+    commandLine(
+        androidDsdFixturePythonExecutable.get(),
+        fixtureGenerator.absolutePath,
+        androidDsdInstrumentationAssets.get().asFile.absolutePath,
+    )
+}
+
+if (androidDsdNativeEnabled) {
+    tasks.configureEach {
+        if (name.startsWith("configureCMake")) dependsOn(buildAndroidDsdFfmpeg)
+    }
+}
+
 dependencies {
     implementation(project(":shared"))
 
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.media3.exoplayer)
     implementation(libs.kotlinx.coroutines.android)
 
     implementation(libs.compose.animation)
@@ -127,27 +207,71 @@ dependencies {
     debugImplementation(libs.compose.uiTooling)
     testImplementation(kotlin("test"))
     testImplementation(libs.junit)
+    testImplementation("org.robolectric:robolectric:4.17")
+    androidTestImplementation(kotlin("test"))
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.testExt.junit)
 }
 
 android {
     namespace = "dev.naominet.lazer"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "dev.naominet.lazer"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = rootProject.extra["lazerVersionCode"] as Int
         versionName = rootProject.extra["lazerVersionName"] as String
 
-        // CI builds a slimmer APK for a single ABI (e.g. -PlazerAbis=arm64-v8a). Local builds keep
-        // every ABI unless the property is supplied.
+        // CI builds one ABI per APK; local APKs may retain the configured Android defaults.
         providers.gradleProperty("lazerAbis").orNull
             ?.split(',')
             ?.map(String::trim)
             ?.filter(String::isNotEmpty)
             ?.takeIf(List<String>::isNotEmpty)
-            ?.let { abis -> ndk { abiFilters.addAll(abis) } }
+            ?.let { abis ->
+                if (androidDsdNativeEnabled &&
+                    (abis.size != 1 || abis.any { it !in setOf("arm64-v8a", "x86_64") })
+                ) {
+                    throw GradleException(
+                        "The Android DSD native decoder builds one ABI at a time: arm64-v8a or x86_64."
+                    )
+                }
+                if (androidUacNativeEnabled && abis.any { it !in setOf("arm64-v8a", "x86_64") }) {
+                    throw GradleException(
+                        "The Android UAC2 native transport supports arm64-v8a and x86_64."
+                    )
+                }
+                ndk { abiFilters.addAll(abis) }
+            }
+        if (androidDsdNativeEnabled && providers.gradleProperty("lazerAbis").orNull == null) {
+            ndk { abiFilters.add("arm64-v8a") }
+        }
+        if (androidUacNativeEnabled && !androidDsdNativeEnabled &&
+            providers.gradleProperty("lazerAbis").orNull == null
+        ) {
+            ndk { abiFilters.addAll(listOf("arm64-v8a", "x86_64")) }
+        }
+        if (androidNativeEnabled) {
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf(
+                        "-DANDROID_STL=c++_static",
+                        "-DLAZER_ANDROID_BUILD_UAC2=$androidUacNativeEnabled",
+                        "-DLAZER_ANDROID_BUILD_DSD=$androidDsdNativeEnabled",
+                    )
+                    if (androidDsdNativeEnabled) {
+                        arguments += "-DLAZER_FFMPEG_ROOT=${androidDsdFfmpegRoot.get()}"
+                        targets += "lazer-audio-dsd"
+                    }
+                    if (androidUacNativeEnabled) targets += "lazer-uac2"
+                }
+            }
+        }
     }
     packaging {
         resources {
@@ -178,7 +302,38 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            all {
+                it.jvmArgs(
+                    "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                    "--add-opens=java.base/java.util=ALL-UNNAMED",
+                    "--add-opens=java.base/java.io=ALL-UNNAMED",
+                    "--add-opens=java.base/java.net=ALL-UNNAMED",
+                    "--add-opens=java.base/java.security=ALL-UNNAMED",
+                    "--add-opens=java.base/java.text=ALL-UNNAMED",
+                    "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                    "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+                    "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+                )
+            }
+        }
+    }
+    sourceSets.getByName("androidTest").assets.srcDir(androidDsdInstrumentationAssets.get().asFile)
     buildFeatures {
         compose = true
     }
+    if (androidNativeEnabled) {
+        externalNativeBuild {
+            cmake {
+                path = file("../native/lazer-audio/CMakeLists.txt")
+                version = "3.31.6"
+            }
+        }
+    }
+}
+
+tasks.matching { it.name == "mergeDebugAndroidTestAssets" }.configureEach {
+    dependsOn(generateAndroidDsdInstrumentationFixtures)
 }

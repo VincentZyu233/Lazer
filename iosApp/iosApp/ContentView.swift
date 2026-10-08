@@ -3,6 +3,7 @@ import MediaPlayer
 import PhotosUI
 import Shared
 import UIKit
+import UniformTypeIdentifiers
 import WebKit
 
 /// The sheets UIKit only lets a native caller put on screen. Kotlin decides what happens around them.
@@ -11,6 +12,14 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     private var pendingScan: ((String?) -> Void)?
     private var pendingImage: ((String?) -> Void)?
     private var pickerHandler: LazerPickerHandler?
+    private var audioDocumentPickerHandler: LazerAudioDocumentPickerHandler?
+    private var localAudioCachePrepared = false
+    private var localAudioQueuedURIs: Set<String> = []
+    private var localAudioQueueStateAvailable = false
+    // NSUserDefaults may still be flushing a changed queue; prune only against a snapshot read at launch.
+    private var localAudioCanPruneOrphans = false
+    private var localAudioActiveURI: String?
+    private var localAudioInFlightBatchDirectories: Set<URL> = []
     private var backGesture: UIScreenEdgePanGestureRecognizer?
     private var backSink: IosBackGestureSink?
 
@@ -41,6 +50,34 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         pickerHandler = handler
         picker.delegate = handler
         present(picker)
+    }
+
+    func pickLocalAudioFiles(onPicked: @escaping (LazerLocalAudioPickerResult) -> Void) {
+        guard let host = foregroundWindow()?.rootViewController else {
+            onPicked(LazerLocalAudioPickerResult(files: [], unsupportedFileCount: 0, failedFileCount: 0))
+            return
+        }
+        guard prepareLocalAudioCache() else {
+            onPicked(LazerLocalAudioPickerResult(files: [], unsupportedFileCount: 0, failedFileCount: 0))
+            return
+        }
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.audio], asCopy: true)
+        picker.allowsMultipleSelection = true
+        let handler = LazerAudioDocumentPickerHandler { [weak self] urls in
+            guard let self else { return }
+            Task { @MainActor in
+                let imported = await self.importLocalAudioFiles(urls)
+                self.audioDocumentPickerHandler = nil
+                onPicked(imported.result)
+                if let batchDirectory = imported.batchDirectory {
+                    self.localAudioInFlightBatchDirectories.remove(batchDirectory)
+                    self.pruneLocalAudioCache()
+                }
+            }
+        }
+        audioDocumentPickerHandler = handler
+        picker.delegate = handler
+        host.present(picker, animated: true)
     }
 
     func share(text: String, title: String) {
@@ -117,8 +154,28 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
         }.resume()
     }
 
-    func playerLoad(url: String, startPlaying: Bool, positionMillis: Int64) {
-        audio.load(url: url, startPlaying: startPlaying, positionMillis: Double(positionMillis) / 1000)
+    func playerLoad(url: String, startPlaying: Bool, positionMillis: Int64, generation: Int64) {
+        audio.load(
+            url: url,
+            startPlaying: startPlaying,
+            positionMillis: Double(positionMillis) / 1000,
+            playbackGeneration: generation
+        )
+        localAudioActiveURI = managedLocalAudioBatchDirectory(for: url) == nil ? nil : url
+    }
+
+    func playerUpdateLocalAudioQueue(uris: [String], queueStateAvailable: Bool, canPruneOrphans: Bool) {
+        localAudioQueuedURIs = Set(uris)
+        localAudioQueueStateAvailable = queueStateAvailable
+        localAudioCanPruneOrphans = queueStateAvailable && canPruneOrphans
+        if localAudioCanPruneOrphans { pruneLocalAudioCache() }
+    }
+
+    func playerLocalAudioFileExists(uri: String) -> Bool {
+        guard let fileURL = managedLocalAudioFileURL(for: uri) else { return false }
+        let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        return values?.isRegularFile == true && values?.isSymbolicLink != true &&
+            FileManager.default.isReadableFile(atPath: fileURL.path)
     }
 
     func playerPlay() { audio.play() }
@@ -127,7 +184,11 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 
     func playerSeekTo(positionMillis: Int64) { audio.seek(toMillis: positionMillis) }
 
-    func playerRelease() { audio.release() }
+    func playerRelease() {
+        audio.release()
+        localAudioActiveURI = nil
+        pruneLocalAudioCache()
+    }
 
     func playerPositionMillis() -> Int64 { audio.positionMillis }
 
@@ -138,6 +199,12 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
     func playerIsPlaying() -> Bool { audio.isPlaying }
 
     func playerSetEndedHandler(handler: @escaping () -> Void) { audio.onEnded = handler }
+
+    func playerAttachFailureSink(sink: IosPlaybackFailureSink) {
+        audio.onPlaybackFailure = { generation, detail in
+            sink.didFailPlayback(generation: generation, detail: detail)
+        }
+    }
 
     func playerAttachCommands(commands: IosPlayerCommands) { audio.attach(commands: commands) }
 
@@ -158,6 +225,10 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 
     func playerSetAudioMode(exclusive: Bool, systemMedia: Bool) {
         audio.applyMode(exclusive: exclusive, systemMedia: systemMedia)
+    }
+
+    func playerAttachAudioSessionSink(sink: IosAudioSessionSink) {
+        audio.attach(audioSessionSink: sink)
     }
 
     /// The system's own left-edge swipe, reported to the shared page transform while it drags.
@@ -208,6 +279,286 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
             .first
     }
 
+    private var localAudioImportDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("LazerLocalAudio", isDirectory: true)
+    }
+
+    /// Picker URLs are staged in an app-owned folder so the queue never depends on a security-scoped
+    /// URL whose access lifetime cannot be represented by the shared playback model.
+    private func prepareLocalAudioCache() -> Bool {
+        if localAudioCachePrepared { return existingLocalAudioImportRoot() != nil }
+        let fileManager = FileManager.default
+        do {
+            try fileManager.createDirectory(
+                at: localAudioImportDirectory,
+                withIntermediateDirectories: true
+            )
+            guard existingLocalAudioImportRoot() != nil else { return false }
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var directory = localAudioImportDirectory
+            try directory.setResourceValues(values)
+            localAudioCachePrepared = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @MainActor
+    private func importLocalAudioFiles(
+        _ urls: [URL]
+    ) async -> (result: LazerLocalAudioPickerResult, batchDirectory: URL?) {
+        guard prepareLocalAudioCache() else {
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: 0,
+                    failedFileCount: Int32(clamping: urls.count)
+                ),
+                nil
+            )
+        }
+        let supportedExtensions: Set<String> = ["wav", "wave", "flac"]
+        let supported = urls.filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
+        var unsupportedCount = urls.count - supported.count
+        guard !supported.isEmpty else {
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: Int32(clamping: unsupportedCount),
+                    failedFileCount: 0
+                ),
+                nil
+            )
+        }
+
+        let createdBatchDirectory = localAudioImportDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: createdBatchDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: 0,
+                    failedFileCount: Int32(clamping: urls.count)
+                ),
+                nil
+            )
+        }
+        guard let root = existingLocalAudioImportRoot(),
+              let batchDirectory = managedLocalAudioBatchDirectory(at: createdBatchDirectory, root: root) else {
+            return (
+                LazerLocalAudioPickerResult(
+                    files: [],
+                    unsupportedFileCount: 0,
+                    failedFileCount: Int32(clamping: urls.count)
+                ),
+                nil
+            )
+        }
+        localAudioInFlightBatchDirectories.insert(batchDirectory)
+
+        let (copied, copyFailureCount) = await Task.detached(priority: .userInitiated) {
+            () -> ([(url: URL, fallbackTitle: String)], Int) in
+            var copied: [(url: URL, fallbackTitle: String)] = []
+            var failureCount = 0
+            let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let pickerInbox = documentsDirectory.appendingPathComponent("Inbox").standardizedFileURL
+            for source in supported {
+                let target = createdBatchDirectory.appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension(source.pathExtension.lowercased())
+                let accessed = source.startAccessingSecurityScopedResource()
+                defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+                do {
+                    if source.deletingLastPathComponent().standardizedFileURL == pickerInbox {
+                        do {
+                            try FileManager.default.moveItem(at: source, to: target)
+                        } catch {
+                            try FileManager.default.copyItem(at: source, to: target)
+                            try? FileManager.default.removeItem(at: source)
+                        }
+                    } else {
+                        try FileManager.default.copyItem(at: source, to: target)
+                    }
+                    copied.append((target, source.deletingPathExtension().lastPathComponent))
+                } catch {
+                    failureCount += 1
+                }
+            }
+            return (copied, failureCount)
+        }.value
+        let failedFileCount = copyFailureCount
+
+        var files: [LazerPickedAudioFile] = []
+        for item in copied {
+            let url = item.url
+            let metadata = await localAudioMetadata(for: url)
+            let uri = url.absoluteString
+            files.append(LazerPickedAudioFile(
+                uri: uri,
+                title: metadata.title.isEmpty ? item.fallbackTitle : metadata.title,
+                artist: metadata.artist,
+                album: metadata.album,
+                durationMillis: metadata.durationMillis
+            ))
+        }
+        if copied.isEmpty {
+            removeManagedLocalAudioBatch(batchDirectory)
+            localAudioInFlightBatchDirectories.remove(batchDirectory)
+            return (
+                LazerLocalAudioPickerResult(
+                    files: files,
+                    unsupportedFileCount: Int32(clamping: unsupportedCount),
+                    failedFileCount: Int32(clamping: failedFileCount)
+                ),
+                nil
+            )
+        }
+        return (
+            LazerLocalAudioPickerResult(
+                files: files,
+                unsupportedFileCount: Int32(clamping: unsupportedCount),
+                failedFileCount: Int32(clamping: failedFileCount)
+            ),
+            batchDirectory
+        )
+    }
+
+    private func localAudioMetadata(for url: URL) async -> (title: String, artist: String, album: String, durationMillis: Int64) {
+        let asset = AVURLAsset(url: url)
+        let metadata = (try? await asset.load(.commonMetadata)) ?? []
+        let title = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierTitle)
+            .first?.stringValue ?? ""
+        let artist = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierArtist)
+            .first?.stringValue ?? ""
+        let album = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .commonIdentifierAlbumName)
+            .first?.stringValue ?? ""
+        let duration = (try? await asset.load(.duration))?.seconds ?? 0
+        let durationMillis = duration.isFinite ? Int64(max(0, duration) * 1000) : 0
+        return (title, artist, album, durationMillis)
+    }
+
+    private func existingLocalAudioImportRoot() -> URL? {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .resolvingSymlinksInPath().standardizedFileURL
+        let root = localAudioImportDirectory.standardizedFileURL
+        guard root.lastPathComponent == "LazerLocalAudio",
+              root.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path == applicationSupport.path,
+              let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true,
+              values.isSymbolicLink != true else { return nil }
+        let resolved = root.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.deletingLastPathComponent().path == applicationSupport.path else { return nil }
+        return resolved
+    }
+
+    private func managedLocalAudioBatchDirectory(for uri: String) -> URL? {
+        guard let fileURL = managedLocalAudioFileURL(for: uri),
+              let root = existingLocalAudioImportRoot() else { return nil }
+        return managedLocalAudioBatchDirectory(at: fileURL.deletingLastPathComponent(), root: root)
+    }
+
+    private func managedLocalAudioFileURL(for uri: String) -> URL? {
+        guard let fileURL = URL(string: uri), fileURL.isFileURL,
+              let components = URLComponents(url: fileURL, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "file",
+              components.host == nil || components.host == "",
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else { return nil }
+        let encodedPath = components.percentEncodedPath
+        let rawComponents = encodedPath.split(separator: "/", omittingEmptySubsequences: true)
+        for component in rawComponents {
+            guard let decoded = String(component).removingPercentEncoding,
+                  decoded != ".", decoded != "..",
+                  !decoded.contains("/"), !decoded.contains("\\") else { return nil }
+        }
+
+        let standardized = fileURL.standardizedFileURL
+        let rootPathComponents = localAudioImportDirectory.standardizedFileURL.pathComponents
+        let pathComponents = standardized.pathComponents
+        guard pathComponents.count == rootPathComponents.count + 2,
+              Array(pathComponents.prefix(rootPathComponents.count)) == rootPathComponents else { return nil }
+        let batchName = pathComponents[rootPathComponents.count]
+        let filename = pathComponents[rootPathComponents.count + 1]
+        let fileExtension = standardized.pathExtension.lowercased()
+        guard Self.isCanonicalUUID(batchName),
+              ["wav", "wave", "flac"].contains(fileExtension),
+              Self.isCanonicalUUID(standardized.deletingPathExtension().lastPathComponent) else { return nil }
+
+        guard let root = existingLocalAudioImportRoot(),
+              managedLocalAudioBatchDirectory(
+                  at: standardized.deletingLastPathComponent(), root: root
+              ) != nil else { return nil }
+        let resolved = standardized.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedComponents = resolved.pathComponents
+        guard resolvedComponents.count == root.pathComponents.count + 2,
+              Array(resolvedComponents.prefix(root.pathComponents.count)) == root.pathComponents,
+              resolved.lastPathComponent == filename,
+              resolved.deletingLastPathComponent().lastPathComponent == batchName else { return nil }
+        if let values = try? resolved.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           values.isSymbolicLink == true { return nil }
+        return resolved
+    }
+
+    private func managedLocalAudioBatchDirectory(at candidate: URL, root: URL) -> URL? {
+        let standardized = candidate.standardizedFileURL
+        guard standardized.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path == root.path,
+              Self.isCanonicalUUID(standardized.lastPathComponent),
+              let values = try? standardized.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+              values.isDirectory == true,
+              values.isSymbolicLink != true else { return nil }
+        let resolved = standardized.resolvingSymlinksInPath().standardizedFileURL
+        guard resolved.deletingLastPathComponent().path == root.path,
+              resolved.lastPathComponent == standardized.lastPathComponent else { return nil }
+        return resolved
+    }
+
+    private func pruneLocalAudioCache() {
+        guard localAudioQueueStateAvailable, localAudioCanPruneOrphans,
+              let root = existingLocalAudioImportRoot(),
+              let children = try? FileManager.default.contentsOfDirectory(
+                  at: root,
+                  includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+              ) else { return }
+
+        var retainedDirectories = Set<String>()
+        var retainedURIs = localAudioQueuedURIs
+        if let localAudioActiveURI { retainedURIs.insert(localAudioActiveURI) }
+        for uri in retainedURIs {
+            if let directory = managedLocalAudioBatchDirectory(for: uri) {
+                retainedDirectories.insert(directory.path)
+            }
+        }
+        for directory in localAudioInFlightBatchDirectories {
+            if let managed = managedLocalAudioBatchDirectory(at: directory, root: root) {
+                retainedDirectories.insert(managed.path)
+            }
+        }
+        for child in children {
+            guard let directory = managedLocalAudioBatchDirectory(at: child, root: root),
+                  !retainedDirectories.contains(directory.path) else { continue }
+            removeManagedLocalAudioBatch(directory)
+        }
+    }
+
+    private func removeManagedLocalAudioBatch(_ candidate: URL) {
+        guard let root = existingLocalAudioImportRoot(),
+              let directory = managedLocalAudioBatchDirectory(at: candidate, root: root) else { return }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private static func isCanonicalUUID(_ value: String) -> Bool {
+        guard value.count == 36, let uuid = UUID(uuidString: value) else { return false }
+        return value.caseInsensitiveCompare(uuid.uuidString) == .orderedSame
+    }
+
     private func present(_ controller: UIViewController) {
         guard let host = foregroundWindow()?.rootViewController else { return }
         host.present(controller, animated: true)
@@ -217,12 +568,16 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
 /// Owns AVPlayer for the shared queue. Kotlin decides what plays next; this only makes it audible.
 private final class LazerAudio: NSObject {
     var onEnded: (() -> Void)?
+    var onPlaybackFailure: ((Int64, String) -> Void)?
 
     // One player for the life of the app. MPNowPlayingSession is built around a fixed list of players,
     // so the item is what gets swapped between tracks; replacing the player would mean throwing away
     // the session, and with it the lock screen's and Dynamic Island's hold on the song.
     private let player = AVPlayer()
     private var observedItem: AVPlayerItem?
+    private var itemStatusObservation: NSKeyValueObservation?
+    private var currentPlaybackGeneration: Int64?
+    private var reportedFailureGeneration: Int64?
 
     var positionMillis: Int64 {
         let seconds = player.currentTime().seconds
@@ -245,20 +600,54 @@ private final class LazerAudio: NSObject {
         return Int64((CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)) * 1000)
     }
 
-    func load(url: String, startPlaying: Bool, positionMillis: Double) {
-        guard let address = URL(string: url) else { return }
-        // The session has to be configured and active before the first sample plays. iOS decides from
-        // that moment whether this is background audio at all, which is what puts the track on the
-        // lock screen and in the Dynamic Island and keeps it audible once the app is suspended.
-        applySessionCategory()
+    func load(url: String, startPlaying: Bool, positionMillis: Double, playbackGeneration: Int64) {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        currentPlaybackGeneration = playbackGeneration
+        reportedFailureGeneration = nil
+        itemPreparationTask?.cancel()
+        itemPreparationTimeoutTask?.cancel()
+        itemPreparationTask = nil
+        itemPreparationTimeoutTask = nil
+        sourceTrackSampleRateHz = nil
+        selectedSampleRateRequestHz = nil
+        didFinishSampleRatePreparation = false
+        playbackRequested = startPlaying
+        if !audioSessionInterrupted { playbackBlockedByInterruption = false }
         if let previous = observedItem {
             NotificationCenter.default.removeObserver(
-                self, name: .AVPlayerItemDidPlayToEndTime, object: previous
+                self, name: AVPlayerItem.didPlayToEndTimeNotification, object: previous
+            )
+            NotificationCenter.default.removeObserver(
+                self, name: AVPlayerItem.failedToPlayToEndTimeNotification, object: previous
             )
         }
-        let item = AVPlayerItem(url: address)
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        observedItem = nil
+        player.pause()
+        guard let address = URL(string: url) else {
+            player.replaceCurrentItem(with: nil)
+            reportPlaybackFailure(
+                generation: playbackGeneration,
+                item: nil,
+                detail: "The audio URL is invalid."
+            )
+            return
+        }
+        let asset = AVURLAsset(url: address)
+        let item = AVPlayerItem(asset: asset)
         NotificationCenter.default.addObserver(
-            self, selector: #selector(itemDidFinish), name: .AVPlayerItemDidPlayToEndTime, object: item
+            self,
+            selector: #selector(itemDidFinish(_:)),
+            name: AVPlayerItem.didPlayToEndTimeNotification,
+            object: item
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(itemFailedToPlayToEnd(_:)),
+            name: AVPlayerItem.failedToPlayToEndTimeNotification,
+            object: item
         )
         observedItem = item
         // A new song has new metadata, so the next publish writes the whole record again. These
@@ -269,22 +658,85 @@ private final class LazerAudio: NSObject {
             self.publishedPlaying = nil
         }
         player.replaceCurrentItem(with: item)
+        itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] observed, _ in
+            guard observed.status == .failed else { return }
+            let detail = observed.error?.localizedDescription ?? "The audio item failed to load."
+            DispatchQueue.main.async { [weak self, weak item] in
+                guard let self, let item else { return }
+                guard self.observedItem === item,
+                      self.currentPlaybackGeneration == playbackGeneration else { return }
+                self.reportPlaybackFailure(
+                    generation: playbackGeneration,
+                    item: item,
+                    detail: detail
+                )
+            }
+        }
         if positionMillis > 0 {
             player.seek(to: CMTime(seconds: positionMillis / 1000, preferredTimescale: 600))
         }
-        if startPlaying { player.play() }
+        itemPreparationTask = Task { @MainActor [weak self] in
+            let sampleRate = await Self.unambiguousTrackSampleRateHz(in: asset)
+            guard let self, self.loadGeneration == generation else { return }
+            self.sourceTrackSampleRateHz = sampleRate
+            if !self.didFinishSampleRatePreparation {
+                self.finishSampleRatePreparation(generation: generation)
+            } else {
+                // A timeout may already have started playback without a preference request. Show
+                // late metadata, but keep the per-item rate decision made at the deadline.
+                self.publishAudioSessionSnapshot()
+            }
+        }
+        itemPreparationTimeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 750_000_000) } catch { return }
+            guard let self, self.loadGeneration == generation else { return }
+            self.finishSampleRatePreparation(generation: generation)
+        }
     }
 
-    func play() { player.play() }
+    func play() {
+        playbackRequested = true
+        if !audioSessionInterrupted { playbackBlockedByInterruption = false }
+        guard didFinishSampleRatePreparation, !audioSessionInterrupted, !playbackBlockedByInterruption else { return }
+        applySessionCategory(preferredSampleRateHz: selectedSampleRateRequestHz)
+        if audioSessionActive { player.play() }
+    }
 
-    func pause() { player.pause() }
+    func pause() {
+        playbackRequested = false
+        player.pause()
+    }
 
     func seek(toMillis millis: Int64) {
         player.seek(to: CMTime(seconds: Double(millis) / 1000, preferredTimescale: 600))
     }
 
     func release() {
+        loadGeneration &+= 1
+        currentPlaybackGeneration = nil
+        reportedFailureGeneration = nil
+        itemPreparationTask?.cancel()
+        itemPreparationTimeoutTask?.cancel()
+        itemPreparationTask = nil
+        itemPreparationTimeoutTask = nil
+        sourceTrackSampleRateHz = nil
+        selectedSampleRateRequestHz = nil
+        didFinishSampleRatePreparation = true
         player.pause()
+        playbackRequested = false
+        playbackBlockedByInterruption = false
+        audioSessionInterrupted = false
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+            audioSessionActive = false
+            audioSessionInterrupted = false
+            audioSessionConfigurationError = ""
+        } catch {
+            audioSessionActive = false
+            audioSessionConfigurationError = error.localizedDescription
+        }
+        publishAudioSessionSnapshot()
         mediaQueue.async { [weak self] in
             guard let self else { return }
             self.nowPlayingSession?.nowPlayingInfoCenter.nowPlayingInfo = nil
@@ -294,22 +746,71 @@ private final class LazerAudio: NSObject {
             self.publishedPlaying = nil
         }
         if let item = observedItem {
-            NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
+            NotificationCenter.default.removeObserver(self, name: AVPlayerItem.didPlayToEndTimeNotification, object: item)
+            NotificationCenter.default.removeObserver(
+                self, name: AVPlayerItem.failedToPlayToEndTimeNotification, object: item
+            )
         }
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         observedItem = nil
         player.replaceCurrentItem(with: nil)
     }
 
-    @objc private func itemDidFinish() { onEnded?() }
+    @objc private func itemDidFinish(_ notification: Notification) {
+        guard let item = notification.object as? AVPlayerItem, item === observedItem else { return }
+        onEnded?()
+    }
+
+    @objc private func itemFailedToPlayToEnd(_ notification: Notification) {
+        guard let item = notification.object as? AVPlayerItem else { return }
+        let playbackError = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+        let detail = playbackError?.localizedDescription
+            ?? item.error?.localizedDescription
+            ?? "The audio item failed to play."
+        DispatchQueue.main.async { [weak self, weak item] in
+            guard let self, let item else { return }
+            guard self.observedItem === item,
+                  let generation = self.currentPlaybackGeneration else { return }
+            self.reportPlaybackFailure(
+                generation: generation,
+                item: item,
+                detail: detail
+            )
+        }
+    }
+
+    private func reportPlaybackFailure(generation: Int64, item: AVPlayerItem?, detail: String) {
+        guard currentPlaybackGeneration == generation, reportedFailureGeneration != generation else { return }
+        if let item, item !== observedItem { return }
+        reportedFailureGeneration = generation
+        playbackRequested = false
+        player.pause()
+        onPlaybackFailure?(generation, detail)
+    }
 
     /* System media controls. They attach once for the life of the player; the mode switch decides
        whether the system hears about playback at all. Everything that talks to the media services
        daemon keeps to this queue, because a thread that only asked for audio should not wait on it. */
     private let mediaQueue = DispatchQueue(label: "lazer.media")
     private var commands: IosPlayerCommands?
+    private var audioSessionSink: IosAudioSessionSink?
+    // AVAudioSession has no isActive property; track successful activation/deactivation and
+    // interruption notifications to label the app's session lifecycle accurately.
+    private var audioSessionActive = false
+    private var audioSessionInterrupted = false
+    private var audioSessionConfigurationError = ""
+    private var playbackRequested = false
+    private var playbackBlockedByInterruption = false
+    private var sourceTrackSampleRateHz: Double?
+    // Freeze the rate choice when preflight completes so late metadata cannot renegotiate this item.
+    private var selectedSampleRateRequestHz: Double?
+    private var didFinishSampleRatePreparation = true
+    private var loadGeneration: UInt64 = 0
+    private var itemPreparationTask: Task<Void, Never>?
+    private var itemPreparationTimeoutTask: Task<Void, Never>?
     private var wantsSystemMedia = true
     private var exclusiveAudio = false
-    private var wasPlayingBeforeInterruption = false
     private var nowPlayingKey: String?
     private var artworkUrl: String?
     private var artwork: MPMediaItemArtwork?
@@ -324,11 +825,129 @@ private final class LazerAudio: NSObject {
     private var publishedAt: TimeInterval = 0
     private var publishedRate: Double = 0
 
-    /// Sharing audio means ducking whoever else is playing; taking it over means silencing them.
-    private func applySessionCategory() {
-        let options: AVAudioSession.CategoryOptions = exclusiveAudio ? [] : .duckOthers
-        try? AVAudioSession.sharedInstance().setCategory(.playback, options: options)
-        try? AVAudioSession.sharedInstance().setActive(true)
+    /// Shared mode explicitly mixes with other apps; priority mode asks the system to interrupt them.
+    /// AVAudioSession does not expose CoreAudio Hog Mode or prove a bit-perfect DAC path.
+    private func applySessionCategory(preferredSampleRateHz: Double? = nil) {
+        guard !audioSessionInterrupted else {
+            publishAudioSessionSnapshot()
+            return
+        }
+        let session = AVAudioSession.sharedInstance()
+        let options: AVAudioSession.CategoryOptions = exclusiveAudio ? [] : .mixWithOthers
+        let shouldChangeRate = preferredSampleRateHz.map {
+            abs(session.preferredSampleRate - $0) >= 0.5
+        } ?? false
+        audioSessionConfigurationError = ""
+        var canSetPreferredRate = true
+        if shouldChangeRate && audioSessionActive {
+            do {
+                try session.setActive(false, options: [])
+                audioSessionActive = false
+            } catch {
+                canSetPreferredRate = false
+                appendAudioSessionError(error.localizedDescription)
+            }
+        }
+        do {
+            try session.setCategory(.playback, options: options)
+        } catch {
+            appendAudioSessionError(error.localizedDescription)
+        }
+        if shouldChangeRate, canSetPreferredRate, let preferredSampleRateHz {
+            do {
+                try session.setPreferredSampleRate(preferredSampleRateHz)
+            } catch {
+                appendAudioSessionError(error.localizedDescription)
+            }
+        }
+        do {
+            try session.setActive(true)
+            audioSessionActive = true
+            audioSessionInterrupted = false
+        } catch {
+            audioSessionActive = false
+            appendAudioSessionError(error.localizedDescription)
+        }
+        publishAudioSessionSnapshot()
+    }
+
+    private func appendAudioSessionError(_ message: String) {
+        audioSessionConfigurationError = audioSessionConfigurationError.isEmpty
+            ? message
+            : "\(audioSessionConfigurationError); \(message)"
+    }
+
+    private func finishSampleRatePreparation(generation: UInt64) {
+        guard loadGeneration == generation, !didFinishSampleRatePreparation else { return }
+        didFinishSampleRatePreparation = true
+        selectedSampleRateRequestHz = sourceTrackSampleRateHz
+        itemPreparationTimeoutTask?.cancel()
+        itemPreparationTimeoutTask = nil
+        if playbackRequested && !audioSessionInterrupted && !playbackBlockedByInterruption {
+            applySessionCategory(preferredSampleRateHz: selectedSampleRateRequestHz)
+            if audioSessionActive { player.play() }
+        } else {
+            publishAudioSessionSnapshot()
+        }
+    }
+
+    private static func unambiguousTrackSampleRateHz(in asset: AVURLAsset) async -> Double? {
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio), !tracks.isEmpty else {
+            return nil
+        }
+        var trackRates: [Int] = []
+        for track in tracks {
+            guard let descriptions = try? await track.load(.formatDescriptions), !descriptions.isEmpty else {
+                return nil
+            }
+            let rates = descriptions.compactMap { description -> Double? in
+                guard let rate = description.audioStreamBasicDescription?.mSampleRate,
+                      rate.isFinite, rate > 0 else { return nil }
+                return rate
+            }
+            guard rates.count == descriptions.count else { return nil }
+            let roundedRates = rates.compactMap { rate -> Int? in
+                let rounded = rate.rounded()
+                guard rounded >= 1, rounded < Double(Int.max) else { return nil }
+                return Int(rounded)
+            }
+            guard roundedRates.count == rates.count else { return nil }
+            let distinctRates = Set(roundedRates)
+            guard distinctRates.count == 1, let rate = distinctRates.first else { return nil }
+            trackRates.append(rate)
+        }
+        guard Set(trackRates).count == 1, let rate = trackRates.first else { return nil }
+        return Double(rate)
+    }
+
+    private func publishAudioSessionSnapshot() {
+        let publish = { [weak self] in
+            guard let self, let sink = self.audioSessionSink else { return }
+            let session = AVAudioSession.sharedInstance()
+            let outputs = session.currentRoute.outputs
+            sink.didChangeAudioSession(
+                sourceTrackSampleRateHz: self.sourceTrackSampleRateHz ?? .nan,
+                preferredSampleRateHz: session.preferredSampleRate,
+                sampleRateHz: session.sampleRate,
+                outputChannelCount: Int32(session.outputNumberOfChannels),
+                outputRouteName: outputs.map(\.portName).joined(separator: ", "),
+                outputPortTypes: outputs.map { String($0.portType.rawValue) }.joined(separator: ", "),
+                ioBufferDurationSeconds: session.ioBufferDuration,
+                active: self.audioSessionActive,
+                interrupted: self.audioSessionInterrupted,
+                configurationError: self.audioSessionConfigurationError
+            )
+        }
+        if Thread.isMainThread {
+            publish()
+        } else {
+            DispatchQueue.main.async(execute: publish)
+        }
+    }
+
+    func attach(audioSessionSink: IosAudioSessionSink) {
+        self.audioSessionSink = audioSessionSink
+        publishAudioSessionSnapshot()
     }
 
     /// Built once around the one player, then reused for every track.
@@ -389,6 +1008,7 @@ private final class LazerAudio: NSObject {
             self, selector: #selector(handleRouteChange(_:)),
             name: AVAudioSession.routeChangeNotification, object: nil
         )
+        publishAudioSessionSnapshot()
     }
 
     @objc private func handleToggle() -> MPRemoteCommandHandlerStatus {
@@ -413,29 +1033,53 @@ private final class LazerAudio: NSObject {
     @objc private func handleInterruption(_ note: Notification) {
         guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
-        switch type {
-        case .began:
-            wasPlayingBeforeInterruption = player.timeControlStatus == .playing
-            commands?.pause()
-        case .ended:
-            guard wasPlayingBeforeInterruption else { return }
-            wasPlayingBeforeInterruption = false
-            let options = AVAudioSession.InterruptionOptions(
-                rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
-            )
-            applySessionCategory()
-            if options.contains(.shouldResume) { commands?.play() }
-        @unknown default:
-            wasPlayingBeforeInterruption = false
+        let resumeValue = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            switch type {
+            case .began:
+                self.audioSessionInterrupted = true
+                self.audioSessionActive = false
+                self.playbackBlockedByInterruption = true
+                // AVPlayer may pause itself before this notification arrives. Keep the app's
+                // playback intent separate so the end event can decide whether resuming is valid.
+                self.player.pause()
+                self.publishAudioSessionSnapshot()
+            case .ended:
+                self.audioSessionInterrupted = false
+                let options = AVAudioSession.InterruptionOptions(rawValue: resumeValue)
+                let systemAllowsResume = options.contains(.shouldResume)
+                self.playbackBlockedByInterruption = !systemAllowsResume
+                if self.playbackRequested && systemAllowsResume && self.didFinishSampleRatePreparation {
+                    self.applySessionCategory(preferredSampleRateHz: self.selectedSampleRateRequestHz)
+                    if self.audioSessionActive { self.player.play() }
+                } else {
+                    self.publishAudioSessionSnapshot()
+                }
+            @unknown default:
+                self.audioSessionInterrupted = false
+                self.playbackBlockedByInterruption = true
+                self.publishAudioSessionSnapshot()
+            }
         }
     }
 
     @objc private func handleRouteChange(_ note: Notification) {
-        guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-              AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
-        // The output went away with the listener: stop, rather than keep playing into a speaker
-        // nobody is holding.
-        DispatchQueue.main.async { self.commands?.pause() }
+        let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason: AVAudioSession.RouteChangeReason?
+        if let raw {
+            reason = AVAudioSession.RouteChangeReason(rawValue: raw)
+        } else {
+            reason = nil
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.publishAudioSessionSnapshot()
+            guard reason == .oldDeviceUnavailable else { return }
+            // The output went away with the listener: stop, rather than keep playing into a speaker
+            // nobody is holding.
+            self.commands?.pause()
+        }
     }
 
     @objc private func handlePlay() -> MPRemoteCommandHandlerStatus {
@@ -536,7 +1180,11 @@ private final class LazerAudio: NSObject {
     func applyMode(exclusive: Bool, systemMedia: Bool) {
         wantsSystemMedia = systemMedia
         exclusiveAudio = exclusive
-        applySessionCategory()
+        if playbackRequested && didFinishSampleRatePreparation && !audioSessionInterrupted && !playbackBlockedByInterruption {
+            applySessionCategory(preferredSampleRateHz: selectedSampleRateRequestHz)
+        } else {
+            publishAudioSessionSnapshot()
+        }
         mediaQueue.async { [weak self] in
             guard let self else { return }
             self.applySessionOwnership(systemMedia)
@@ -546,6 +1194,10 @@ private final class LazerAudio: NSObject {
                 self.publishedPlaying = nil
             }
         }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 }
 
@@ -887,5 +1539,29 @@ private final class LazerPickerHandler: NSObject, PHPickerViewControllerDelegate
                 DispatchQueue.main.async { self.onDone(nil) }
             }
         }
+    }
+}
+
+/// The document picker retains its delegate only weakly, so LazerShell holds this handler until its
+/// completion arrives. Copy mode gives the app a durable staging URL without a persisted file grant.
+private final class LazerAudioDocumentPickerHandler: NSObject, UIDocumentPickerDelegate {
+    private var onDone: (([URL]) -> Void)?
+
+    init(onDone: @escaping ([URL]) -> Void) {
+        self.onDone = onDone
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        finish(controller, urls: urls)
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        finish(controller, urls: [])
+    }
+
+    private func finish(_ controller: UIDocumentPickerViewController, urls: [URL]) {
+        let callback = onDone
+        onDone = nil
+        controller.dismiss(animated: true) { callback?(urls) }
     }
 }

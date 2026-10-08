@@ -28,6 +28,18 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.math.min
 
 /** Persistent audio cache that can be read while its file is still downloading. */
+internal interface DesktopSeekableAudioSource : Closeable {
+    /** Blocks for bytes; returns -1 at completed EOF/local close and throws on download failure/cancel. */
+    @Throws(IOException::class)
+    fun read(buffer: ByteArray, length: Int): Int
+
+    /** Blocks until [offset] is available. Returns the new position, or -1 on failure. */
+    fun seek(offset: Long): Long
+
+    /** The expected total size in bytes, or -1 when the server never reported one. */
+    fun length(): Long
+}
+
 internal class DesktopAudioCache(
     private val cacheDirectory: Path = Path.of(
         System.getProperty("user.home"),
@@ -35,6 +47,10 @@ internal class DesktopAudioCache(
         "cache",
         "audio",
     ),
+    // Lets the cache tests place a download update in the seek check/wait boundary deterministically.
+    private val beforeSeekAwaitForTest: ((Long, () -> Long) -> Unit)? = null,
+    // Lets tests observe that a reader reached the download condition without timing guesses.
+    private val beforeReadAwaitForTest: ((Long, () -> Long) -> Unit)? = null,
     private val onProgress: (trackId: Long, fraction: Float) -> Unit,
 ) : Closeable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -66,11 +82,43 @@ internal class DesktopAudioCache(
                 onProgress = onProgress,
                 httpClient = httpClient,
                 onIdle = { idleEntry -> entries.remove(fileName, idleEntry) },
+                beforeSeekAwaitForTest = beforeSeekAwaitForTest,
+                beforeReadAwaitForTest = beforeReadAwaitForTest,
             )
         }
         entry.ensureDownload(url, expectedBytes)
         onProgress(trackId, entry.bufferedFraction())
         entry.openInputStream()
+    }
+
+    /**
+     * A seekable view of the same growing file, for engines that seek by byte offset (the native
+     * FFmpeg pipeline) rather than by decoding forward. The download is shared with [open].
+     */
+    fun openSeekable(
+        trackId: Long,
+        variantKey: String,
+        url: String,
+        expectedBytes: Long?,
+    ): DesktopSeekableAudioSource = synchronized(lifecycleLock) {
+        check(!closed) { "音频缓存已关闭" }
+        check(!clearing) { "音频缓存正在清理" }
+        val fileName = audioCacheFileName(trackId, variantKey)
+        val entry = entries.computeIfAbsent(fileName) {
+            AudioCacheEntry(
+                mediaPath = cacheDirectory.resolve(fileName),
+                scope = scope,
+                trackId = trackId,
+                onProgress = onProgress,
+                httpClient = httpClient,
+                onIdle = { idleEntry -> entries.remove(fileName, idleEntry) },
+                beforeSeekAwaitForTest = beforeSeekAwaitForTest,
+                beforeReadAwaitForTest = beforeReadAwaitForTest,
+            )
+        }
+        entry.ensureDownload(url, expectedBytes)
+        onProgress(trackId, entry.bufferedFraction())
+        entry.openSeekableSource()
     }
 
     override fun close() {
@@ -115,6 +163,9 @@ private class AudioCacheEntry(
     private val onProgress: (trackId: Long, fraction: Float) -> Unit,
     private val httpClient: HttpClient,
     private val onIdle: (AudioCacheEntry) -> Unit,
+    // Null in production; see DesktopSeekableAudioSourceTest for the lost-wakeup regression test.
+    private val beforeSeekAwaitForTest: ((Long, () -> Long) -> Unit)? = null,
+    private val beforeReadAwaitForTest: ((Long, () -> Long) -> Unit)? = null,
 ) {
     private val completePath = mediaPath.resolveSibling("${mediaPath.fileName}.complete")
     private val dataLock = ReentrantLock()
@@ -141,6 +192,7 @@ private class AudioCacheEntry(
 
     private var downloadJob: Job? = null
     private val readers = ConcurrentHashMap.newKeySet<GrowingCacheInputStream>()
+    private val seekableReaders = ConcurrentHashMap.newKeySet<Any>()
 
     fun ensureDownload(url: String, requestedExpectedBytes: Long?) {
         synchronized(stateLock) {
@@ -173,6 +225,21 @@ private class AudioCacheEntry(
     }
 
     fun openInputStream(): InputStream = GrowingCacheInputStream(this, mediaPath).also(readers::add)
+
+    fun openSeekableSource(): DesktopSeekableAudioSource =
+        GrowingSeekableSource(
+            this,
+            mediaPath,
+            beforeSeekAwaitForTest,
+            beforeReadAwaitForTest,
+        ).also(seekableReaders::add)
+
+    fun seekableReaderClosed(reader: Any) {
+        seekableReaders.remove(reader)
+        if (isIdle()) onIdle(this)
+    }
+
+    fun expectedSize(): Long = expectedBytes
 
     fun readerClosed(reader: GrowingCacheInputStream) {
         readers.remove(reader)
@@ -215,6 +282,7 @@ private class AudioCacheEntry(
         failure = IOException("音频缓存已关闭")
         synchronized(stateLock) { downloadJob }?.cancel()
         readers.forEach { runCatching { it.close() } }
+        seekableReaders.forEach { runCatching { (it as? DesktopSeekableAudioSource)?.close() } }
         wakeReaders()
         if (isIdle()) onIdle(this)
     }
@@ -226,7 +294,7 @@ private class AudioCacheEntry(
     fun isCancelled(): Boolean = cancelled
 
     private fun isIdle(): Boolean =
-        readers.isEmpty() && (complete || failure != null || cancelled)
+        readers.isEmpty() && seekableReaders.isEmpty() && (complete || failure != null || cancelled)
 
     private suspend fun openHttp(request: HttpRequest): HttpResponse<InputStream> {
         val future = httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream())
@@ -419,6 +487,94 @@ private class GrowingCacheInputStream(
             file.close()
         } finally {
             entry.readerClosed(this)
+            entry.wakeReaders()
+        }
+    }
+}
+
+/**
+ * Random access over the same growing file the streaming reader uses. Reads and forward seeks block
+ * on the download condition, so the native engine's demuxer simply waits for bytes instead of
+ * treating a not-yet-downloaded region as end of stream.
+ */
+private class GrowingSeekableSource(
+    private val entry: AudioCacheEntry,
+    mediaPath: Path,
+    private val beforeSeekAwaitForTest: ((Long, () -> Long) -> Unit)?,
+    private val beforeReadAwaitForTest: ((Long, () -> Long) -> Unit)?,
+) : DesktopSeekableAudioSource {
+    private val file = RandomAccessFile(mediaPath.toFile(), "r")
+    private var position = 0L
+
+    @Volatile
+    private var closed = false
+
+    override fun read(buffer: ByteArray, length: Int): Int {
+        if (length <= 0) return 0
+        while (true) {
+            val observedRevision = entry.currentDataRevision()
+            if (entry.isCancelled()) {
+                throw IOException("音频缓存读取已取消", entry.currentFailure())
+            }
+            if (closed) return -1
+            val available = entry.availableFrom(position)
+            if (available > 0L) {
+                val count = min(length.toLong(), available).toInt()
+                val read = try {
+                    file.seek(position)
+                    file.read(buffer, 0, count)
+                } catch (error: IOException) {
+                    if (entry.isCancelled()) {
+                        throw IOException("音频缓存读取已取消", error)
+                    }
+                    if (closed) return -1
+                    throw error
+                }
+                if (read > 0) {
+                    position += read
+                    return read
+                }
+            }
+            if (entry.isComplete()) return -1
+            entry.currentFailure()?.let { throw IOException("音频缓存下载中断", it) }
+            beforeReadAwaitForTest?.invoke(observedRevision, entry::currentDataRevision)
+            entry.awaitMoreData(observedRevision)
+        }
+    }
+
+    override fun seek(offset: Long): Long {
+        val target = offset.coerceAtLeast(0L)
+        while (true) {
+            val observedRevision = entry.currentDataRevision()
+            if (closed || entry.isCancelled()) return -1
+            val available = entry.availableFrom(0L)
+            if (target <= available) {
+                position = target
+                return target
+            }
+            if (entry.isComplete() || entry.currentFailure() != null) {
+                position = available
+                return position
+            }
+            beforeSeekAwaitForTest?.invoke(observedRevision, entry::currentDataRevision)
+            entry.awaitMoreData(observedRevision)
+        }
+    }
+
+    override fun length(): Long {
+        val expected = entry.expectedSize()
+        if (expected > 0L) return expected
+        return if (entry.isComplete()) entry.availableFrom(0L) else -1L
+    }
+
+    @Synchronized
+    override fun close() {
+        if (closed) return
+        closed = true
+        try {
+            file.close()
+        } finally {
+            entry.seekableReaderClosed(this)
             entry.wakeReaders()
         }
     }

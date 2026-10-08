@@ -16,8 +16,8 @@ internal fun windowsAppTheme(appsUseLightTheme: Int?): WindowsAppTheme =
 /**
  * Resolves media-control ICO files for both Windows taskbar integrations.
  *
- * Packaged applications use jpackage's stable `app/resources` path so Shell links remain valid.
- * Development runs extract the same classpath resource once because LoadImage and IShellLinkW
+ * Packaged applications use jpackage's executable-relative resource path so Shell links remain
+ * valid. Development runs extract the same classpath resource once because LoadImage and IShellLinkW
  * both require a filesystem path.
  */
 internal object WindowsMediaControlIcons {
@@ -43,11 +43,21 @@ internal object WindowsMediaControlIcons {
     /** Finds a stable jpackage resource file without falling back to classpath extraction. */
     fun appResourceFile(resourcePath: String): File? {
         val executable = ProcessHandle.current().info().command().orElse(null) ?: return null
-        val appRoot = File(executable).parentFile ?: return null
-        return listOf(
-            File(appRoot, "app/resources/$resourcePath"),
-            File(appRoot, "resources/$resourcePath"),
-        ).firstOrNull(File::isFile)
+        return appResourceFile(File(executable), resourcePath)
+    }
+
+    internal fun appResourceFile(executable: File, resourcePath: String): File? {
+        var directory = executable.absoluteFile.parentFile ?: return null
+        repeat(12) {
+            listOf(
+                File(directory, "app/resources/$resourcePath"),
+                File(directory, "resources/$resourcePath"),
+                File(directory, "lib/resources/$resourcePath"),
+                File(directory, "lib/app/resources/$resourcePath"),
+            ).firstOrNull(File::isFile)?.let { return it }
+            directory = directory.parentFile ?: return null
+        }
+        return null
     }
 
     internal fun resourcePath(theme: WindowsAppTheme, name: String): String =

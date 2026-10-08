@@ -96,11 +96,13 @@ import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButtonDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -788,7 +790,14 @@ private fun LazerAppContent(
         kotlinx.coroutines.delay(3_000L)
         if (rootMessage == shown) rootMessage = null
     }
-    LaunchedEffect(playback.track?.id) { playback.track?.id?.let(controller::loadLyrics) }
+    LaunchedEffect(playback.track?.id, playback.track?.source) {
+        val track = playback.track
+        if (track == null || track.source is LazerTrackSource.LocalFile) {
+            controller.clearLyrics()
+        } else {
+            controller.loadLyrics(track.id)
+        }
+    }
     // Continuous integration has no finger to tap with, so a launch names the screen it wants and
     // the app walks there through the same calls a tap makes. The player route waits for the real
     // recommendation list instead of inventing a track the listener would never see.
@@ -1346,8 +1355,8 @@ private fun LazerRootContent(
                 LazerRootDestination.SEARCH -> SearchPage(controller, currentTrackId) { track ->
                     onPlay(controller.searchResults, track)
                 }
-                LazerRootDestination.LIBRARY -> LibraryPage(controller, currentTrackId) { track ->
-                    onPlay(controller.homeTracks, track)
+                LazerRootDestination.LIBRARY -> LibraryPage(controller, currentTrackId) { queue, track ->
+                    onPlay(queue, track)
                 }
                 LazerRootDestination.ME -> MePage(controller)
             }
@@ -1469,7 +1478,20 @@ private fun SearchPage(controller: LazerGatewayController, currentId: Long?, onP
 }
 
 @Composable
-private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, onPlay: (LazerTrack) -> Unit) {
+private fun LibraryPage(
+    controller: LazerGatewayController,
+    currentId: Long?,
+    onPlay: (List<LazerTrack>, LazerTrack) -> Unit,
+) {
+    val screen = LocalLazerScreenHost.current
+    val localLibrary = screen.localAudioLibraryState.collectAsState().value
+    var localSearchQuery by remember { mutableStateOf("") }
+    val orderedLocalTracks = remember(localLibrary.tracks) {
+        orderLazerLocalLibraryTracks(localLibrary.tracks)
+    }
+    val visibleLocalTracks = remember(orderedLocalTracks, localSearchQuery) {
+        filterLazerLocalLibraryTracks(orderedLocalTracks, localSearchQuery)
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 12.dp + LocalLazerContentBottomInset.current),
@@ -1488,6 +1510,133 @@ private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, on
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        if (screen.supportsLocalAudioLibrary) {
+            item {
+                SectionTitle(tr("library.local.title"), tr("library.local.count", localLibrary.tracks.size))
+            }
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ThemeTextButton(
+                        onClick = screen::pickLocalAudioLibraryRoot,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(tr("library.local.add_folder"))
+                    }
+                    ThemeTextButton(
+                        onClick = screen::rescanLocalAudioLibrary,
+                        modifier = Modifier.weight(1f),
+                        enabled = localLibrary.roots.isNotEmpty() && !localLibrary.isScanning,
+                    ) {
+                        Text(tr("library.local.scan"))
+                    }
+                }
+            }
+            if (localLibrary.roots.isNotEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        localLibrary.roots.forEach { root ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+                                        Text(
+                                            root.displayName.ifBlank { root.uri },
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        if (!root.available) {
+                                            Text(
+                                                tr("library.local.root_unavailable"),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                    }
+                                    ThemeTextButton(
+                                        onClick = { screen.removeLocalAudioLibraryRoot(root.uri) },
+                                        enabled = !localLibrary.isScanning,
+                                    ) {
+                                        Text(tr("library.local.remove_folder"))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (localLibrary.isScanning) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            tr("library.local.scanning_count", localLibrary.scannedFileCount),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            when (localLibrary.issue) {
+                LazerLocalLibraryIssue.ScanFailed -> item {
+                    Text(
+                        tr("library.local.scan_failed"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                LazerLocalLibraryIssue.RootUnavailable -> item {
+                    Text(
+                        tr("library.local.root_unavailable"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                null -> Unit
+            }
+            if (localLibrary.tracks.isEmpty()) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        QuietState(tr("library.local.empty"))
+                        Text(
+                            tr("library.local.empty.hint"),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                item {
+                    OutlinedTextField(
+                        value = localSearchQuery,
+                        onValueChange = { localSearchQuery = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                        placeholder = { Text(tr("library.local.search")) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                }
+                if (visibleLocalTracks.isEmpty()) {
+                    item { QuietState(tr("library.local.no_results")) }
+                } else {
+                    items(visibleLocalTracks, key = { "local-${it.id}" }) { track ->
+                        TrackRow(track, track.id == currentId) { onPlay(visibleLocalTracks, track) }
+                    }
+                }
+            }
+        }
         when {
             !controller.isSignedIn -> item { SignInInvitation(controller::openLogin) }
             controller.userPlaylists.isEmpty() && controller.isLoading -> item { QuietState(tr("library.syncing")) }
@@ -1496,7 +1645,9 @@ private fun LibraryPage(controller: LazerGatewayController, currentId: Long?, on
         }
         if (controller.homeTracks.isNotEmpty()) {
             item { SectionTitle(tr("library.continue")) }
-            items(controller.homeTracks.take(5), key = LazerTrack::id) { TrackRow(it, it.id == currentId) { onPlay(it) } }
+            items(controller.homeTracks.take(5), key = LazerTrack::id) {
+                TrackRow(it, it.id == currentId) { onPlay(controller.homeTracks, it) }
+            }
         }
     }
 }
@@ -1553,6 +1704,18 @@ private fun MePage(controller: LazerGatewayController) {
 private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
     val screen = LocalLazerScreenHost.current
+    val toneState = screen.pcmTestToneState.collectAsState().value
+    val usbTargetState = screen.usbAudioTargetSelection.collectAsState().value
+    val usbUacState = screen.usbUacVolumeState.collectAsState().value
+    val usbUacDirectOutputState = screen.usbUacDirectOutputState.collectAsState().value
+    val playbackSnapshot = screen.playbackSnapshot.collectAsState().value
+    val audioSessionSnapshot = screen.audioSessionSnapshot.collectAsState().value
+    val playbackOutput = playbackSnapshot.output
+    val rendererInputFormat = playbackSnapshot.audioRendererInputFormat
+    val toneFormats = toneState.availableFormats.ifEmpty {
+        listOf(LazerPcmTestFormat(44_100, 16), LazerPcmTestFormat(48_000, 16))
+    }
+    var selectedToneFormat by remember(toneFormats) { mutableStateOf(toneFormats.first()) }
     val systemMonetAvailable = screen.supportsSystemPalette
     // Only Android hands mixing to an audio-focus model, and only there does bypassing the system
     // transport also mean playing alongside others. Where the platform works differently, the row
@@ -1571,6 +1734,7 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
     }
     val audioLevelsEnabled = controller.audioReactiveLevels && microphoneGranted
     var isAudioQualitySheetVisible by remember { mutableStateOf(false) }
+    var isEqualizerEditorVisible by remember { mutableStateOf(false) }
     var isCacheSheetVisible by remember { mutableStateOf(false) }
     var isCookieSheetVisible by remember { mutableStateOf(false) }
     var cookieCopied by remember { mutableStateOf(false) }
@@ -1886,16 +2050,19 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(tr("settings.exclusive.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("settings.exclusive.title$platformCopySuffix"),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
                         Text(
                             if (controller.independentPlayback) {
                                 tr("settings.exclusive.independent$platformCopySuffix")
                             } else if (controller.exclusiveAudio) {
-                                tr("settings.exclusive.on")
+                                tr("settings.exclusive.on$platformCopySuffix")
                             } else if (screen.usesSystemAudioFocus) {
                                 tr("settings.exclusive.off.android")
                             } else {
-                                tr("settings.exclusive.off")
+                                tr("settings.exclusive.off$platformCopySuffix")
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.onSurfaceVariant,
@@ -1908,6 +2075,668 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
                         onCheckedChange = null,
                         enabled = !controller.independentPlayback,
                     )
+                }
+            }
+        }
+        if (screen.supportsUsbAudioTargetSelection) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(tr("settings.hifi.usb_output.title"), style = MaterialTheme.typography.titleSmall)
+                        val connectedTarget = usbTargetState.connectedTargets.singleOrNull {
+                            it.id == usbTargetState.selectedTargetId
+                        }
+                        val unavailableTarget = usbTargetState.selectedTargetId?.let { selectedId ->
+                            if (connectedTarget != null) null else {
+                                LazerUsbAudioTargetOption(
+                                    selectedId,
+                                    "${usbTargetState.selectedTargetLabel ?: tr("settings.hifi.usb_output.saved_target")} · ${tr(if (usbTargetState.selectedTargetAmbiguous) "settings.hifi.usb_output.ambiguous" else "settings.hifi.usb_output.disconnected")}",
+                                )
+                            }
+                        }
+                        val selectedTarget = connectedTarget ?: unavailableTarget
+                        val targetOptions: List<LazerUsbAudioTargetOption?> =
+                            listOf(null) + usbTargetState.connectedTargets + listOfNotNull(unavailableTarget)
+                        SettingsDropdown(
+                            options = targetOptions,
+                            selected = selectedTarget,
+                            label = { option -> option?.label ?: tr("settings.hifi.usb_output.automatic") },
+                            onSelected = { screen.selectUsbAudioTarget(it?.id) },
+                        )
+                        Text(
+                            tr("settings.hifi.usb_output.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (screen.supportsUsbUacVolumeDiagnostics) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(tr("settings.hifi.usb_uac.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("settings.hifi.usb_uac.independent_route"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.usb_uac.shared_device"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        val selectedUacDevice = usbUacState.devices.singleOrNull {
+                            it.id == usbUacState.selectedDeviceId
+                        }
+                        val uacDeviceOptions: List<LazerUsbUacDeviceOption?> =
+                            listOf(null) + usbUacState.devices
+                        SettingsDropdown(
+                            options = uacDeviceOptions,
+                            selected = selectedUacDevice,
+                            label = { option -> option?.label ?: tr("settings.hifi.usb_uac.choose_device") },
+                            onSelected = { screen.selectUsbUacDevice(it?.id) },
+                        )
+                        val operationRunning = usbUacState.status == LazerUsbUacVolumeStatus.AwaitingPermission ||
+                            usbUacState.status == LazerUsbUacVolumeStatus.Reading
+                        val doPOutputActive = playbackOutput?.outputDataFormat?.encodingLabel?.startsWith("DoP") == true
+                        if (screen.supportsUsbUacDirectOutput) {
+                            val directOutputAwaitingPermission =
+                                usbUacDirectOutputState.status == LazerUsbUacDirectOutputStatus.AwaitingPermission
+                            val directOutputEnabled = usbUacDirectOutputState.enabled
+                            val directOutputStatusKey = when (usbUacDirectOutputState.status) {
+                                LazerUsbUacDirectOutputStatus.Disabled -> null
+                                LazerUsbUacDirectOutputStatus.AwaitingPermission ->
+                                    "settings.hifi.usb_uac.direct_output.permission_prompt"
+                                LazerUsbUacDirectOutputStatus.Enabled ->
+                                    "settings.hifi.usb_uac.direct_output.enabled"
+                                LazerUsbUacDirectOutputStatus.PermissionDenied ->
+                                    usbUacDirectOutputState.detail
+                                        ?: "settings.hifi.usb_uac.direct_output.permission_denied"
+                                LazerUsbUacDirectOutputStatus.Failed ->
+                                    usbUacDirectOutputState.detail
+                                        ?: "settings.hifi.usb_uac.direct_output.failed"
+                            }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .tapClickable(role = Role.Switch) {
+                                        if (!operationRunning && !directOutputAwaitingPermission &&
+                                            (directOutputEnabled || selectedUacDevice != null)
+                                        ) {
+                                            screen.setUsbUacDirectOutput(!directOutputEnabled)
+                                        }
+                                    },
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(
+                                        tr("settings.hifi.usb_uac.direct_output.title"),
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(
+                                        tr("settings.hifi.usb_uac.direct_output.hint"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                    directOutputStatusKey?.let { key ->
+                                        Text(
+                                            tr(key),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = colors.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                LazerSwitch(
+                                    engine = controller.themeEngine,
+                                    checked = directOutputEnabled,
+                                    onCheckedChange = { enabled ->
+                                        if (!operationRunning && !directOutputAwaitingPermission &&
+                                            (!enabled || selectedUacDevice != null)
+                                        ) {
+                                            screen.setUsbUacDirectOutput(enabled)
+                                        }
+                                    },
+                                    enabled = !operationRunning && !directOutputAwaitingPermission &&
+                                        (directOutputEnabled || selectedUacDevice != null),
+                                )
+                            }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ThemeTextButton(
+                                onClick = screen::refreshUsbUacDevices,
+                                enabled = !operationRunning,
+                            ) { Text(tr("settings.hifi.usb_uac.refresh")) }
+                            Spacer(Modifier.weight(1f))
+                            ThemeTextButton(
+                                onClick = screen::readUsbUacVolume,
+                                enabled = selectedUacDevice != null && !operationRunning && !doPOutputActive,
+                            ) { Text(tr(if (operationRunning) "settings.hifi.usb_uac.working" else "settings.hifi.usb_uac.read")) }
+                        }
+                        val statusKey = if (doPOutputActive) "settings.hifi.usb_uac.dop_volume_disabled" else when (usbUacState.status) {
+                            LazerUsbUacVolumeStatus.Idle -> null
+                            LazerUsbUacVolumeStatus.AwaitingPermission -> "settings.hifi.usb_uac.permission_prompt"
+                            LazerUsbUacVolumeStatus.Reading -> "settings.hifi.usb_uac.reading"
+                            LazerUsbUacVolumeStatus.Ready -> "settings.hifi.usb_uac.ready"
+                            LazerUsbUacVolumeStatus.Unsupported -> "settings.hifi.usb_uac.unsupported"
+                            LazerUsbUacVolumeStatus.PermissionDenied -> "settings.hifi.usb_uac.permission_denied"
+                            LazerUsbUacVolumeStatus.Failed -> usbUacState.detail ?: "settings.hifi.usb_uac.transfer_failed"
+                        }
+                        statusKey?.let {
+                            Text(tr(it), style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        }
+                        if (usbUacState.status == LazerUsbUacVolumeStatus.Ready && !doPOutputActive) {
+                            val volumeText = if (usbUacState.muted) {
+                                tr("settings.hifi.usb_uac.muted")
+                            } else {
+                                usbUacState.currentDb256?.let(::formatUsbUacDb256)
+                                    ?: tr("settings.hifi.usb_uac.unknown")
+                            }
+                            Text(
+                                tr("settings.hifi.usb_uac.current", volumeText),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                            val rangeLabel = when {
+                                usbUacState.ranges.isEmpty() -> tr("settings.hifi.usb_uac.range_unknown")
+                                usbUacState.ranges.size == 1 -> {
+                                    val range = usbUacState.ranges.single()
+                                    tr(
+                                        "settings.hifi.usb_uac.range",
+                                        formatUsbUacDb256(range.minimumDb256),
+                                        formatUsbUacDb256(range.maximumDb256),
+                                        formatUsbUacDb256(range.resolutionDb256),
+                                    )
+                                }
+                                else -> tr("settings.hifi.usb_uac.range_count", usbUacState.ranges.size.toString())
+                            }
+                            Text(rangeLabel, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                ThemeTextButton(
+                                    onClick = { screen.adjustUsbUacVolume(increase = false) },
+                                    enabled = usbUacState.canDecrease && !operationRunning && !doPOutputActive,
+                                ) { Text(tr("settings.hifi.usb_uac.down")) }
+                                Spacer(Modifier.weight(1f))
+                                ThemeTextButton(
+                                    onClick = { screen.adjustUsbUacVolume(increase = true) },
+                                    enabled = usbUacState.canIncrease && !operationRunning && !doPOutputActive,
+                                ) { Text(tr("settings.hifi.usb_uac.up")) }
+                            }
+                            Text(
+                                tr("settings.hifi.usb_uac.step_hint"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (screen.supportsPcmTestTone) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        if (screen.supportsLocalReplayGain) {
+                            val replayGainMode = controller.replayGainMode
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(tr("settings.replay_gain.title"), style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        tr("settings.replay_gain.hint"),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = colors.onSurfaceVariant,
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                SettingsDropdown(
+                                    options = LazerReplayGainMode.entries,
+                                    selected = replayGainMode,
+                                    label = { mode -> tr("settings.replay_gain.mode.${mode.name.lowercase()}") },
+                                    onSelected = controller::updateReplayGainMode,
+                                )
+                            }
+                        }
+                        val equalizer = controller.equalizer
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .tapClickable(role = Role.Switch) {
+                                    controller.updateEqualizer(equalizer.copy(enabled = !equalizer.enabled))
+                                },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(tr("settings.equalizer.title"), style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    if (equalizer.enabled) tr("settings.equalizer.on") else tr("settings.equalizer.off"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            LazerSwitch(
+                                engine = controller.themeEngine,
+                                checked = equalizer.enabled,
+                                onCheckedChange = null,
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .tapClickable(role = Role.Switch) {
+                                    controller.updateEqualizer(equalizer.copy(limiterEnabled = !equalizer.limiterEnabled))
+                                },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(tr("settings.equalizer.limiter"), style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    tr("settings.equalizer.limiter_hint"),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            LazerSwitch(
+                                engine = controller.themeEngine,
+                                checked = equalizer.limiterEnabled,
+                                onCheckedChange = null,
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                tr("settings.equalizer.preset"),
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            val selectedPreset = LazerEqualizerPresets.firstOrNull {
+                                it.id == equalizer.matchingPresetId()
+                            }
+                            SettingsDropdown(
+                                options = listOf<LazerEqualizerPreset?>(null) + LazerEqualizerPresets,
+                                selected = selectedPreset,
+                                label = { preset ->
+                                    preset?.let { tr("settings.equalizer.preset.${it.id}") }
+                                        ?: tr("settings.equalizer.custom")
+                                },
+                                onSelected = { preset ->
+                                    preset?.let {
+                                        controller.updateEqualizer(equalizer.activatePreset(it))
+                                    }
+                                },
+                            )
+                            ThemeTextButton(onClick = { isEqualizerEditorVisible = true }) {
+                                Text(tr("settings.equalizer.edit"))
+                            }
+                        }
+                        Text(
+                            tr("settings.equalizer.android_output_note"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (screen.supportsPcmTestTone) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(tr("settings.hifi.test_tone.title"), style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            tr("settings.hifi.test_tone.hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            SettingsDropdown(
+                                options = toneFormats,
+                                selected = selectedToneFormat,
+                                label = { format ->
+                                    tr("settings.hifi.test_tone.format", format.sampleRateHz.toString(), format.bitDepth.toString())
+                                },
+                                onSelected = { selectedToneFormat = it },
+                            )
+                            Spacer(Modifier.weight(1f))
+                            val toneIsActive = toneState.status == LazerPcmTestToneStatus.Preparing ||
+                                toneState.status == LazerPcmTestToneStatus.Playing
+                            ThemeTextButton(
+                                onClick = {
+                                    if (toneIsActive) screen.stopPcmTestTone()
+                                    else screen.playPcmTestTone(selectedToneFormat)
+                                },
+                            ) {
+                                Text(tr(if (toneIsActive) "settings.hifi.test_tone.stop" else "settings.hifi.test_tone.play"))
+                            }
+                        }
+                        val statusText = when (toneState.status) {
+                            LazerPcmTestToneStatus.Idle -> null
+                            LazerPcmTestToneStatus.Preparing -> tr("settings.hifi.test_tone.preparing")
+                            LazerPcmTestToneStatus.Playing -> tr("settings.hifi.test_tone.playing")
+                            LazerPcmTestToneStatus.Completed -> tr("settings.hifi.test_tone.completed")
+                            LazerPcmTestToneStatus.Failed -> tr(toneState.detailKey ?: "settings.hifi.test_tone.failed")
+                        }
+                        statusText?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+                        }
+                        Text(
+                            tr("settings.hifi.test_tone.route", tr(pcmTestToneRouteKey(toneState.route))),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.test_tone.usb_count", toneState.connectedUsbOutputs.toString()),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr(pcmMixerPreferenceKey(toneState.mixerPreference)),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.test_tone.loopback_note"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (screen.supportsPcmTestTone && rendererInputFormat != null) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            tr("settings.hifi.renderer_input.title"),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        val inputDetails = buildList {
+                            rendererInputFormat.sampleRateHz?.let { add("$it Hz") }
+                            rendererInputFormat.encodingLabel?.let(::add)
+                            rendererInputFormat.channelCount?.let { add("$it ch") }
+                            rendererInputFormat.sampleMimeType?.let { add("MIME: $it") }
+                        }
+                        Text(
+                            inputDetails.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+                                ?: tr("settings.hifi.renderer_input.unknown"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.renderer_input.note"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (screen.supportsPcmTestTone && playbackOutput != null) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(tr("settings.hifi.output.title"), style = MaterialTheme.typography.titleSmall)
+                        val actualRate = playbackOutput.audioTrackSampleRateHz
+                        Text(
+                            if (actualRate == null) {
+                                tr("settings.hifi.output.format.unknown")
+                            } else {
+                                tr(
+                                    "settings.hifi.output.format",
+                                    actualRate.toString(),
+                                    playbackOutput.encodingLabel,
+                                    playbackOutput.channelCount.toString(),
+                                )
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.output.requested", playbackOutput.requestedSampleRateHz.toString()),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        playbackOutput.outputDataFormat?.let { dataFormat ->
+                            Text(
+                                tr("settings.hifi.output.data.title"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            val dataDetails = if (dataFormat.isLinearPcm) {
+                                tr(
+                                    "settings.hifi.output.data.pcm",
+                                    dataFormat.sampleRateHz?.toString() ?: "?",
+                                    dataFormat.encodingLabel ?: "PCM",
+                                    dataFormat.channelCount?.toString() ?: "?",
+                                )
+                            } else {
+                                tr(
+                                    "settings.hifi.output.data.non_pcm",
+                                    dataFormat.sampleRateHz?.toString() ?: "?",
+                                    dataFormat.channelCount?.toString() ?: "?",
+                                )
+                            }
+                            Text(
+                                dataDetails,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                            when {
+                                dataFormat.offload -> tr("settings.hifi.output.data.offload")
+                                dataFormat.tunneling -> tr("settings.hifi.output.data.tunneling")
+                                else -> null
+                            }?.let { modeDescription ->
+                                Text(
+                                    modeDescription,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        Text(
+                            tr(
+                                "settings.hifi.output.route",
+                                playbackOutput.routedDeviceName?.takeIf(String::isNotBlank)
+                                    ?: tr("settings.hifi.output.route.unknown"),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        val mixerStatus = when {
+                            playbackOutput.mixerAdvertisesBitPerfectBehavior == true &&
+                                playbackOutput.mixerPreferenceAccepted == true -> "accepted"
+                            playbackOutput.mixerAdvertisesBitPerfectBehavior == true &&
+                                playbackOutput.mixerPreferenceAccepted == false -> "rejected"
+                            playbackOutput.mixerAdvertisesBitPerfectBehavior == false -> "not_advertised"
+                            else -> "unavailable"
+                        }
+                        Text(
+                            tr("settings.hifi.output.mixer.$mixerStatus"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        val dspStatus = when (playbackOutput.appDspMayModifySamples) {
+                            true -> "active"
+                            false -> "bypassed"
+                            null -> "unavailable"
+                        }
+                        Text(
+                            tr("settings.hifi.output.dsp.$dspStatus"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        playbackOutput.replayGainAppliedDb?.let { gainDb ->
+                            Text(
+                                tr("settings.hifi.output.replay_gain", formatEqualizerGain(gainDb)),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        val directPathStatus = when (playbackOutput.directPath.status) {
+                            DirectPathStatus.NotRequested -> "not_requested"
+                            DirectPathStatus.Eligible -> "eligible"
+                            DirectPathStatus.Negotiated -> "negotiated"
+                            DirectPathStatus.Rejected -> "rejected"
+                            DirectPathStatus.Unknown -> "unknown"
+                        }
+                        val directPathReason = when (playbackOutput.directPath.reason) {
+                            DirectPathReason.DigitalCaptureNotVerified -> "digital_capture"
+                            DirectPathReason.SourceIsLossy,
+                            DirectPathReason.DecoderChangedSamples,
+                            DirectPathReason.SourceFormatUnknown,
+                            -> "source_unknown"
+                            DirectPathReason.DspEnabled -> "dsp"
+                            DirectPathReason.SoftwareVolume,
+                            DirectPathReason.SoftwareVolumeUnknown,
+                            -> "software_volume"
+                            DirectPathReason.SampleRateConversion,
+                            DirectPathReason.BitDepthConversion,
+                            DirectPathReason.ChannelLayoutConversion,
+                            DirectPathReason.OutputFormatMismatch,
+                            -> "format_mismatch"
+                            DirectPathReason.MixerBehaviorNotAdvertised,
+                            DirectPathReason.MixerPreferenceRejected,
+                            -> "mixer"
+                            DirectPathReason.UnsupportedEncoding,
+                            DirectPathReason.DsdConvertedToPcm,
+                            DirectPathReason.ExclusiveModeUnavailable,
+                            -> "unsupported"
+                            DirectPathReason.DeviceOrBackendUnknown,
+                            DirectPathReason.Other,
+                            null,
+                            -> "output_unknown"
+                        }
+                        Text(
+                            tr("settings.hifi.output.direct_path.title"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.output.direct_path.status.$directPathStatus"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.output.direct_path.reason.$directPathReason"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr("settings.hifi.output.note"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+        if (screen.supportsAudioSessionSnapshot) {
+            item {
+                SettingsCard {
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            tr("settings.hifi.ios_session.title"),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        val statusKey = when {
+                            audioSessionSnapshot.interrupted -> "interrupted"
+                            audioSessionSnapshot.active -> "active"
+                            else -> "inactive"
+                        }
+                        Text(
+                            tr("settings.hifi.ios_session.status.$statusKey"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr(
+                                "settings.hifi.ios_session.source_rate",
+                                audioSessionSnapshot.sourceTrackSampleRateHz?.roundToInt()?.toString()
+                                    ?: tr("settings.hifi.ios_session.unknown"),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr(
+                                "settings.hifi.ios_session.preferred_rate",
+                                audioSessionSnapshot.preferredSampleRateHz?.roundToInt()?.toString()
+                                    ?: tr("settings.hifi.ios_session.unknown"),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr(
+                                "settings.hifi.ios_session.rate",
+                                audioSessionSnapshot.sampleRateHz?.roundToInt()?.toString()
+                                    ?: tr("settings.hifi.ios_session.unknown"),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Text(
+                            tr(
+                                "settings.hifi.ios_session.route",
+                                audioSessionSnapshot.outputRouteName
+                                    ?: tr("settings.hifi.ios_session.unknown"),
+                                audioSessionSnapshot.outputPortTypes
+                                    ?: tr("settings.hifi.ios_session.unknown"),
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        audioSessionSnapshot.outputChannelCount?.let { channels ->
+                            Text(
+                                tr("settings.hifi.ios_session.channels", channels.toString()),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        audioSessionSnapshot.ioBufferDurationMillis?.let { duration ->
+                            Text(
+                                tr("settings.hifi.ios_session.buffer", duration.toString()),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant,
+                            )
+                        }
+                        audioSessionSnapshot.configurationError?.let { detail ->
+                            Text(
+                                tr("settings.hifi.ios_session.error", detail),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.error,
+                            )
+                        }
+                        Text(
+                            tr("settings.hifi.ios_session.note"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -2322,6 +3151,13 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             onDismiss = { isAudioQualitySheetVisible = false },
         )
     }
+    if (isEqualizerEditorVisible) {
+        LazerEqualizerEditorDialog(
+            controller = controller,
+            initialState = controller.equalizer,
+            onDismiss = { isEqualizerEditorVisible = false },
+        )
+    }
     if (isCacheSheetVisible) {
         CacheChoiceSheet(
             onClearSongs = {
@@ -2348,6 +3184,175 @@ private fun SettingsPage(controller: LazerGatewayController, modifier: Modifier 
             onDismiss = { isCookieSheetVisible = false },
         )
     }
+}
+
+@Composable
+private fun LazerEqualizerEditorDialog(
+    controller: LazerGatewayController,
+    initialState: LazerEqualizerState,
+    onDismiss: () -> Unit,
+) {
+    var draft by remember(initialState) { mutableStateOf(initialState) }
+    val colors = MaterialTheme.colorScheme
+
+    fun preview(next: LazerEqualizerState) {
+        draft = next
+        controller.previewEqualizer(next)
+    }
+
+    fun commit(next: LazerEqualizerState) {
+        draft = next
+        controller.updateEqualizer(next)
+    }
+
+    fun finishEditing() {
+        controller.updateEqualizer(draft)
+        onDismiss()
+    }
+
+    AlertDialog(
+        onDismissRequest = ::finishEditing,
+        title = { Text(tr("settings.equalizer.title")) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 560.dp)
+                    .heightIn(max = 560.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    tr("settings.equalizer.hint"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tapClickable(role = Role.Switch) {
+                            commit(draft.copy(enabled = !draft.enabled))
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.equalizer.enable"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (draft.enabled) tr("settings.equalizer.on") else tr("settings.equalizer.off"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = draft.enabled,
+                        onCheckedChange = null,
+                    )
+                }
+                HorizontalDivider()
+                EqualizerGainSliderRow(
+                    label = tr("settings.equalizer.preamp"),
+                    gainDb = draft.preampDb,
+                    engine = controller.themeEngine,
+                    onPreview = { preview(draft.copy(preampDb = clampLazerEqPreampDb(it))) },
+                    onCommit = { commit(draft.copy(preampDb = clampLazerEqPreampDb(it))) },
+                    valueRange = MIN_LAZER_EQ_PREAMP_DB.toFloat()..MAX_LAZER_EQ_PREAMP_DB.toFloat(),
+                )
+                HorizontalDivider()
+                draft.bands.forEachIndexed { index, band ->
+                    EqualizerGainSliderRow(
+                        label = lazerEqFrequencyLabel(band.frequencyHz),
+                        gainDb = band.gainDb,
+                        engine = controller.themeEngine,
+                        onPreview = { preview(draft.withBandGain(index, it)) },
+                        onCommit = { commit(draft.withBandGain(index, it)) },
+                        valueRange = MIN_LAZER_EQ_GAIN_DB.toFloat()..MAX_LAZER_EQ_GAIN_DB.toFloat(),
+                    )
+                }
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tapClickable(role = Role.Switch) {
+                            commit(draft.copy(limiterEnabled = !draft.limiterEnabled))
+                        }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tr("settings.equalizer.limiter"), style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            tr("settings.equalizer.limiter_hint"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    LazerSwitch(
+                        engine = controller.themeEngine,
+                        checked = draft.limiterEnabled,
+                        onCheckedChange = null,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            ThemeTextButton(onClick = ::finishEditing) { Text(tr("settings.equalizer.close")) }
+        },
+        dismissButton = {
+            ThemeTextButton(
+                onClick = { commit(LazerEqualizerState(enabled = draft.enabled)) },
+            ) { Text(tr("settings.equalizer.reset")) }
+        },
+    )
+}
+
+@Composable
+private fun EqualizerGainSliderRow(
+    label: String,
+    gainDb: Double,
+    engine: LazerThemeEngine,
+    onPreview: (Double) -> Unit,
+    onCommit: (Double) -> Unit,
+    valueRange: ClosedFloatingPointRange<Float>,
+) {
+    var local by remember(gainDb) { mutableFloatStateOf(gainDb.toFloat()) }
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(52.dp),
+        )
+        TapSlider(
+            engine = engine,
+            value = local,
+            onValueChange = {
+                local = it
+                onPreview(it.toDouble())
+            },
+            onValueChangeFinished = { onCommit(local.toDouble()) },
+            valueRange = valueRange,
+            modifier = Modifier.weight(1f).semantics { contentDescription = label },
+        )
+        Text(
+            formatEqualizerGain(local.toDouble()),
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.primary,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(58.dp),
+        )
+    }
+}
+
+private fun lazerEqFrequencyLabel(frequencyHz: Double): String =
+    if (frequencyHz >= 1_000.0) "${(frequencyHz / 1_000.0).toInt()} kHz" else "${frequencyHz.toInt()} Hz"
+
+private fun formatEqualizerGain(gainDb: Double): String {
+    val rounded = (gainDb * 10.0).roundToInt() / 10.0
+    val value = if (rounded == 0.0) 0.0 else rounded
+    val sign = if (value > 0.0) "+" else ""
+    return "$sign$value dB"
 }
 
 /** What this build is, and what it stands on. Reached from the foot of the settings list. */
@@ -2408,6 +3413,33 @@ private fun paletteLabel(palette: LazerPalette): String = when (palette) {
     LazerPalette.System -> tr("settings.palette.system")
     LazerPalette.NowPlaying -> tr("settings.palette.now_playing")
     is LazerPalette.Custom -> tr("settings.palette.custom")
+}
+
+private fun pcmTestToneRouteKey(route: LazerPcmTestToneRoute): String = when (route) {
+    LazerPcmTestToneRoute.Unknown -> "settings.hifi.test_tone.route.unknown"
+    LazerPcmTestToneRoute.Usb -> "settings.hifi.test_tone.route.usb"
+    LazerPcmTestToneRoute.Wired -> "settings.hifi.test_tone.route.wired"
+    LazerPcmTestToneRoute.Bluetooth -> "settings.hifi.test_tone.route.bluetooth"
+    LazerPcmTestToneRoute.BuiltIn -> "settings.hifi.test_tone.route.built_in"
+    LazerPcmTestToneRoute.Hdmi -> "settings.hifi.test_tone.route.hdmi"
+    LazerPcmTestToneRoute.Other -> "settings.hifi.test_tone.route.other"
+}
+
+private fun formatUsbUacDb256(value: Int): String {
+    val magnitude = if (value < 0) -value.toLong() else value.toLong()
+    val thousandths = (magnitude * 1_000 + 128) / 256
+    val whole = thousandths / 1_000
+    val fraction = (thousandths % 1_000).toString().padStart(3, '0')
+    val sign = if (value < 0) "−" else "+"
+    return "$sign$whole.$fraction dB"
+}
+
+private fun pcmMixerPreferenceKey(status: LazerMixerPreferenceStatus): String = when (status) {
+    LazerMixerPreferenceStatus.NotAvailable -> "settings.hifi.test_tone.mixer.unavailable"
+    LazerMixerPreferenceStatus.NoExactMatch -> "settings.hifi.test_tone.mixer.no_exact_format"
+    LazerMixerPreferenceStatus.NotBitPerfect -> "settings.hifi.test_tone.mixer.not_bit_perfect"
+    LazerMixerPreferenceStatus.Accepted -> "settings.hifi.test_tone.mixer.accepted"
+    LazerMixerPreferenceStatus.Rejected -> "settings.hifi.test_tone.mixer.rejected"
 }
 
 private fun backgroundModeLabel(mode: LazerBackgroundMode): String = when (mode) {
@@ -2614,6 +3646,9 @@ private val LazerPlayMode.labelKey: String
  * title + translated title + artist, which is the tallest a queue row can be. */
 private val QueueRowHeight = 72.dp
 
+/** The most room the queue sheet ever gives its list, on a screen tall enough to spare it. */
+private val QueueListMaxHeight = 340.dp
+
 /**
  * The two actions that sit on either side of the top of the seek bar. They are labelled rather
  * than icon-only because nothing else on the card explains what either one opens.
@@ -2678,6 +3713,7 @@ private fun PlayQueueSheet(
     onDismiss: () -> Unit,
 ) {
     val colors = MaterialTheme.colorScheme
+    val screen = LocalLazerScreenHost.current
     val room = controller.listenTogether
     val queue by controller.player.queue.collectAsState()
     val snapshot by controller.player.snapshot.collectAsState()
@@ -2695,57 +3731,75 @@ private fun PlayQueueSheet(
         containerColor = colors.surface,
         contentColor = colors.onSurface,
     ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            PlayerSheetHeader(
-                imageVector = Icons.AutoMirrored.Outlined.QueueMusic,
-                title = tr(if (inRoom) "player.queue.room_title" else "player.queue"),
-                subtitle = when {
-                    inRoom && tracks.isEmpty() -> tr("player.queue.room_empty")
-                    inRoom -> tr("player.queue.room_hint", tracks.size)
-                    tracks.isEmpty() -> tr("player.queue.empty")
-                    currentIndex >= 0 -> tr("player.queue.position", currentIndex + 1, tracks.size)
-                    else -> null
-                },
-            )
-            if (!inRoom && tracks.isNotEmpty()) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        tr("player.mode"),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = colors.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    LazerPlayMode.entries.forEach { mode ->
-                        FilterChip(
-                            selected = queue.mode == mode,
-                            onClick = tapFeedback { controller.setPlayMode(mode) },
-                            label = { Text(tr(mode.labelKey)) },
-                        )
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            // A list that only answers to a fixed ceiling is a problem on a short screen: the rows under
+            // the sheet are laid out but can never be reached, so the list also takes the room the
+            // sheet actually has.
+            val listMaxHeight = minOf(QueueListMaxHeight, maxHeight * 0.6f).coerceAtLeast(120.dp)
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(start = 24.dp, end = 24.dp, top = 4.dp, bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                PlayerSheetHeader(
+                    imageVector = Icons.AutoMirrored.Outlined.QueueMusic,
+                    title = tr(if (inRoom) "player.queue.room_title" else "player.queue"),
+                    subtitle = when {
+                        inRoom && tracks.isEmpty() -> tr("player.queue.room_empty")
+                        inRoom -> tr("player.queue.room_hint", tracks.size)
+                        tracks.isEmpty() -> tr("player.queue.empty")
+                        currentIndex >= 0 -> tr("player.queue.position", currentIndex + 1, tracks.size)
+                        else -> null
+                    },
+                )
+                if (!inRoom && screen.supportsLocalAudioFiles) {
+                    Button(
+                        onClick = tapFeedback {
+                            screen.pickLocalAudioFiles(controller::handleLocalAudioPickerResult)
+                        },
+                    ) {
+                        Icon(Icons.Outlined.LibraryMusic, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
+                        Text(tr("player.queue.open_local_audio"))
                     }
                 }
-            }
-            when {
-                tracks.isEmpty() -> Text(
-                    tr("player.queue.empty_hint"),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.onSurfaceVariant,
-                )
-                inRoom -> StaticQueueList(tracks, currentIndex, snapshot.isPlaying)
-                else -> ReorderableQueueList(
-                    tracks = tracks,
-                    currentIndex = currentIndex,
-                    isPlaying = snapshot.isPlaying,
-                    onPlayAt = controller::playQueueAt,
-                    onRemoveAt = controller::removeFromQueue,
-                    onMove = controller::moveInQueue,
-                )
+                if (!inRoom && tracks.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            tr("player.mode"),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = colors.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        LazerPlayMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = queue.mode == mode,
+                                onClick = tapFeedback { controller.setPlayMode(mode) },
+                                label = { Text(tr(mode.labelKey)) },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                    }
+                }
+                when {
+                    tracks.isEmpty() -> Text(
+                        tr("player.queue.empty_hint"),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                    )
+                    inRoom -> StaticQueueList(tracks, currentIndex, snapshot.isPlaying, listMaxHeight)
+                    else -> ReorderableQueueList(
+                        tracks = tracks,
+                        currentIndex = currentIndex,
+                        isPlaying = snapshot.isPlaying,
+                        maxHeight = listMaxHeight,
+                        onPlayAt = controller::playQueueAt,
+                        onRemoveAt = controller::removeFromQueue,
+                        onMove = controller::moveInQueue,
+                    )
+                }
             }
         }
     }
@@ -2756,9 +3810,10 @@ private fun StaticQueueList(
     tracks: List<LazerTrack>,
     currentIndex: Int,
     isPlaying: Boolean,
+    maxHeight: Dp,
 ) {
     val colors = MaterialTheme.colorScheme
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
             QueueRowBody(
                 index = index,
@@ -2780,6 +3835,7 @@ private fun ReorderableQueueList(
     tracks: List<LazerTrack>,
     currentIndex: Int,
     isPlaying: Boolean,
+    maxHeight: Dp,
     onPlayAt: (Int) -> Unit,
     onRemoveAt: (Int) -> Unit,
     onMove: (Int, Int) -> Unit,
@@ -2800,7 +3856,7 @@ private fun ReorderableQueueList(
         dragOffset = 0f
     }
 
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 340.dp)) {
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = maxHeight)) {
         itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
             val lifted = index == dragged
             val translation = when {
@@ -3680,6 +4736,35 @@ private fun TranslatedTrackTitle(title: String?, color: Color = MaterialTheme.co
 }
 
 @Composable
+private fun LocalAudioMetadataCaption(track: LazerTrack) {
+    val details = buildList {
+        track.albumArtist?.takeIf { it.isNotBlank() && it != track.artist }?.let {
+            add(tr("metadata.album_artist", it))
+        }
+        track.genre?.takeIf(String::isNotBlank)?.let { add(tr("metadata.genre", it)) }
+        track.year?.let { add(tr("metadata.year", it)) }
+        track.trackNumber?.let { number ->
+            val index = if (track.totalTracks != null) "$number/${track.totalTracks}" else number.toString()
+            add(tr("metadata.track", index))
+        }
+        track.discNumber?.let { number ->
+            val index = if (track.totalDiscs != null) "$number/${track.totalDiscs}" else number.toString()
+            add(tr("metadata.disc", index))
+        }
+    }
+    if (details.isNotEmpty()) {
+        Text(
+            details.joinToString(" · "),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+@Composable
 private fun MobileArtwork(
     url: String?,
     label: String,
@@ -4060,6 +5145,7 @@ private fun NowPlayingPage(
                             MaterialTheme.typography.bodyMedium, colors.onSurfaceVariant,
                             offerCopy = true,
                         )
+                        LocalAudioMetadataCaption(track)
                         Spacer(Modifier.weight(1f))
                         Column(
                             Modifier.fillMaxWidth()
@@ -4218,6 +5304,7 @@ private fun NowPlayingPage(
                                 MaterialTheme.typography.bodySmall, colors.onSurfaceVariant,
                                 offerCopy = true,
                             )
+                            LocalAudioMetadataCaption(track)
                         }
                         // The liked state belongs to the song, so it stays beside its title
                         // instead of travelling with the transport controls below.

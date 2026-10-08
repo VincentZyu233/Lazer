@@ -2,6 +2,30 @@ import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Exec
 import org.gradle.language.jvm.tasks.ProcessResources
+import org.gradle.api.tasks.testing.Test
+import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
+
+val desktopOsName = System.getProperty("os.name").orEmpty().lowercase()
+val desktopOsArch = System.getProperty("os.arch").orEmpty().lowercase()
+val isWindowsHost = desktopOsName.contains("win")
+val isLinuxHost = desktopOsName.contains("linux")
+val isMacOSHost = desktopOsName.contains("mac") || desktopOsName.contains("darwin")
+val hostWindowsArch = if (desktopOsArch.contains("aarch64") || desktopOsArch == "arm64") "arm64" else "x64"
+val windowsArch = providers.gradleProperty("windowsArch").orElse(hostWindowsArch).get().lowercase()
+require(windowsArch == "arm64" || windowsArch == "x64") {
+    "windowsArch must be arm64 or x64, but was '$windowsArch'"
+}
+val nativeAudioArch = when {
+    desktopOsArch.contains("aarch64") || desktopOsArch == "arm64" -> "arm64"
+    desktopOsArch == "x86_64" || desktopOsArch == "amd64" || desktopOsArch == "x64" -> "x64"
+    else -> "unsupported"
+}
+val nativeAudioPlatformId = when {
+    isWindowsHost -> "windows-$windowsArch"
+    isLinuxHost -> "linux-$nativeAudioArch"
+    isMacOSHost -> "macos-$nativeAudioArch"
+    else -> "unsupported"
+}
 
 plugins {
     alias(libs.plugins.kotlinJvm)
@@ -14,15 +38,7 @@ dependencies {
 
     // Select the Windows native runtime explicitly with -PwindowsArch=arm64|x64.
     // The host architecture remains the default when no property is supplied.
-    val osName = System.getProperty("os.name").orEmpty().lowercase()
-    val osArch = System.getProperty("os.arch").orEmpty().lowercase()
-    val hostWindowsArch = if (osArch.contains("aarch64") || osArch == "arm64") "arm64" else "x64"
-    val windowsArch = providers.gradleProperty("windowsArch").orElse(hostWindowsArch).get().lowercase()
-    require(windowsArch == "arm64" || windowsArch == "x64") {
-        "windowsArch must be arm64 or x64, but was '$windowsArch'"
-    }
-
-    if (osName.contains("win")) {
+    if (isWindowsHost) {
         val composeVersion = libs.versions.composeMultiplatform.get()
         if (windowsArch == "arm64") {
             implementation("org.jetbrains.compose.desktop:desktop-jvm-windows-arm64:$composeVersion")
@@ -48,10 +64,10 @@ dependencies {
     testImplementation(libs.junit)
 }
 
-val isWindowsHost = System.getProperty("os.name").contains("windows", ignoreCase = true)
 val nativeBridgeBuildDir = layout.buildDirectory.dir("native/windows-taskbar")
 val nativeBridgeFile = nativeBridgeBuildDir.map { it.file("Release/lazer-taskbar-bridge.dll") }
-val nativeCmakeGenerator = providers.gradleProperty("nativeCmakeGenerator").orElse("Visual Studio 17 2022").get()
+val nativeCmakeGenerator = providers.gradleProperty("nativeCmakeGenerator")
+    .orElse(if (isWindowsHost) "Visual Studio 17 2022" else "").get()
 
 val configureWindowsTaskbarBridge = tasks.register<Exec>("configureWindowsTaskbarBridge") {
     onlyIf("Windows host") { System.getProperty("os.name").contains("windows", ignoreCase = true) }
@@ -75,12 +91,91 @@ val buildWindowsTaskbarBridge = tasks.register<Exec>("buildWindowsTaskbarBridge"
     commandLine("cmake", "--build", nativeBridgeBuildDir.get().asFile.absolutePath, "--config", "Release")
 }
 
+// The native FFmpeg engine is opt-in unless a DSD-capable SDK was configured. Linux/macOS use
+// pkg-config metadata under FFMPEG_ROOT when supplied; Windows uses the supplied import package.
+val nativeAudioBuildDir = layout.buildDirectory.dir("native/lazer-audio/$nativeAudioPlatformId")
+val ffmpegRoot = providers.environmentVariable("FFMPEG_ROOT").orElse(providers.gradleProperty("lazerFfmpegRoot"))
+val ffmpegLicenseDir = ffmpegRoot.orNull?.let { file("$it/share/lazer-ffmpeg") }
+val buildNativeAudio = providers.gradleProperty("lazerNativeAudio")
+    .map { it.toBoolean() }
+    .orElse(ffmpegRoot.isPresent)
+val nativeAudioFile = nativeAudioBuildDir.map {
+    it.file(when {
+        isWindowsHost -> "Release/lazer-audio.dll"
+        isLinuxHost -> "liblazer-audio.so"
+        isMacOSHost -> "liblazer-audio.dylib"
+        else -> "unsupported"
+    })
+}
+
+val configureLazerAudio = tasks.register<Exec>("configureLazerAudio") {
+    inputs.file(rootProject.layout.projectDirectory.file("native/lazer-audio/CMakeLists.txt"))
+    inputs.dir(rootProject.layout.projectDirectory.dir("native/lazer-audio/cmake"))
+    inputs.dir(rootProject.layout.projectDirectory.dir("native/lazer-audio/src"))
+    inputs.dir(rootProject.layout.projectDirectory.dir("native/lazer-audio/include"))
+    outputs.dir(nativeAudioBuildDir)
+    val arguments = mutableListOf(
+        "cmake",
+        "-S", rootProject.layout.projectDirectory.dir("native/lazer-audio").asFile.absolutePath,
+        "-B", nativeAudioBuildDir.get().asFile.absolutePath,
+        "-DLAZER_FFMPEG_ROOT=${ffmpegRoot.orNull.orEmpty()}",
+        // CI's standalone CMake probes use the test-only ALSA null PCM route. Keep it out of any
+        // Gradle-built distributable even when both builds share the same CMake cache directory.
+        "-DLAZER_AUDIO_BUILD_PROBE=OFF",
+        "-DLAZER_AUDIO_TEST_ALLOW_ALSA_NULL=OFF",
+    )
+    if (nativeCmakeGenerator.isNotBlank()) arguments += listOf("-G", nativeCmakeGenerator)
+    if (isWindowsHost && nativeCmakeGenerator.contains("Visual Studio", ignoreCase = true)) {
+        arguments += listOf("-A", windowsArch)
+    }
+    if (!isWindowsHost) arguments += listOf("-DCMAKE_BUILD_TYPE=Release")
+    commandLine(arguments)
+}
+
+val buildLazerAudio = tasks.register<Exec>("buildLazerAudio") {
+    dependsOn(configureLazerAudio)
+    inputs.dir(rootProject.layout.projectDirectory.dir("native/lazer-audio/src"))
+    outputs.file(nativeAudioFile)
+    commandLine("cmake", "--build", nativeAudioBuildDir.get().asFile.absolutePath, "--config", "Release")
+}
+
 val prepareJpackageResources = tasks.register<Copy>("prepareJpackageResources") {
     from(layout.projectDirectory.dir("src/main/jpackage"))
     into(layout.buildDirectory.dir("generated/jpackage-resources"))
     if (isWindowsHost) {
         dependsOn(buildWindowsTaskbarBridge)
         from(nativeBridgeFile) { into("common/native/windows-x64") }
+    }
+    if (buildNativeAudio.get() && (isWindowsHost || isLinuxHost || isMacOSHost)) {
+        require(nativeAudioArch != "unsupported") {
+            "The native audio engine is not available for architecture '$desktopOsArch'"
+        }
+        dependsOn(buildLazerAudio)
+        from(nativeAudioFile) { into("$nativeAudioPlatformId/native/$nativeAudioPlatformId") }
+        from(nativeAudioBuildDir) {
+            include("*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
+            exclude(nativeAudioFile.get().asFile.name)
+            into("$nativeAudioPlatformId/native/$nativeAudioPlatformId")
+        }
+        if (isWindowsHost) {
+            from(nativeAudioBuildDir.map { it.dir("Release") }) {
+                include("*.dll")
+                exclude(nativeAudioFile.get().asFile.name)
+                into("$nativeAudioPlatformId/native/$nativeAudioPlatformId")
+            }
+        }
+        if (!isWindowsHost) {
+            require(ffmpegLicenseDir != null &&
+                ffmpegLicenseDir.resolve("COPYING.LGPLv2.1").isFile &&
+                ffmpegLicenseDir.resolve("BUILDINFO.txt").isFile) {
+                "Bundling the native FFmpeg engine requires COPYING.LGPLv2.1 and BUILDINFO.txt " +
+                    "under FFMPEG_ROOT/share/lazer-ffmpeg"
+            }
+            from(ffmpegLicenseDir!!) {
+                include("COPYING.LGPLv2.1", "BUILDINFO.txt")
+                into("$nativeAudioPlatformId/legal/ffmpeg")
+            }
+        }
     }
 }
 
@@ -94,6 +189,42 @@ if (isWindowsHost && embedTaskbarBridgeInJar) {
     }
 }
 
+// The runnable JAR resolves the optional HiFi engine from the classpath, and Compose's
+// packageUberJarForCurrentOS only flattens the runtime classpath (it does not copy
+// appResourcesRootDir), so a native-enabled Linux/macOS jar must embed the engine here.
+// Windows keeps the bridge behind a dedicated property; the other hosts only build the
+// engine when the native flag is present, so they key off that same flag.
+if (buildNativeAudio.get() && (isLinuxHost || isMacOSHost)) {
+    require(ffmpegLicenseDir != null &&
+        ffmpegLicenseDir.resolve("COPYING.LGPLv2.1").isFile &&
+        ffmpegLicenseDir.resolve("BUILDINFO.txt").isFile) {
+        "Bundling the native FFmpeg engine requires COPYING.LGPLv2.1 and BUILDINFO.txt " +
+            "under FFMPEG_ROOT/share/lazer-ffmpeg"
+    }
+    tasks.named<ProcessResources>("processResources") {
+        dependsOn(buildLazerAudio)
+        from(nativeAudioFile) { into("native/$nativeAudioPlatformId") }
+        from(nativeAudioBuildDir) {
+            include("Release/*.dll", "*.dll", "*.so", "*.so.*", "*.dylib", "*.dylib.*")
+            exclude(nativeAudioFile.get().asFile.name)
+            into("native/$nativeAudioPlatformId")
+        }
+        from(ffmpegLicenseDir!!) {
+            include("COPYING.LGPLv2.1", "BUILDINFO.txt")
+            into("legal/ffmpeg")
+        }
+    }
+}
+
+// Gradle's test workers are separate JVMs. Forward the optional native library override
+// explicitly so smoke tests load the same library path as the Gradle invocation.
+val lazerAudioLibraryForTests = providers.gradleProperty("lazerAudioLibrary")
+tasks.withType<Test>().configureEach {
+    lazerAudioLibraryForTests.orNull
+        ?.takeIf { it.isNotBlank() }
+        ?.let { systemProperty("lazer.audio.library", it) }
+}
+
 compose.desktop {
     application {
         mainClass = "dev.naominet.lazer.MainKt"
@@ -105,10 +236,9 @@ compose.desktop {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm)
             packageName = "dev.naominet.lazer"
             packageVersion = rootProject.extra["lazerPackageVersion"] as String
-            // DesktopAudioCache uses java.net.http.HttpClient via the JDK module API.
-            // It is not visible to jdeps through the Kotlin bytecode analysis, so retain it
-            // explicitly in jpackage's custom runtime image.
-            modules("java.net.http")
+            // Runtime-only JDK APIs are not all visible to jdeps through Kotlin bytecode analysis.
+            // Retain both the HTTP client used by DesktopAudioCache and the LAN source server.
+            modules("java.net.http", "jdk.httpserver")
             buildTypes.release.proguard {
                 // Runtime-discovered libraries such as Ktor engines cannot be safely inferred
                 // by the shrinker. Keep release app images functionally identical to dev builds.
@@ -124,6 +254,24 @@ compose.desktop {
                 appCategory = "AudioVideo"
                 menuGroup = "AudioVideo"
             }
+        }
+    }
+}
+
+// The native ALSA backend links against libasound.so.2. Compose's Linux DSL does not expose
+// jpackage's package-dependency option, so add the runtime package requirement to DEB/RPM tasks
+// only when the optional native engine is being packaged.
+tasks.withType<AbstractJPackageTask>().configureEach {
+    if (buildNativeAudio.get()) {
+        when (targetFormat) {
+            TargetFormat.Deb -> freeArgs.addAll(
+                // Keep the alternative dependency as one token in Compose's jpackage args file.
+                listOf("--linux-package-deps", "libasound2|libasound2t64"),
+            )
+            TargetFormat.Rpm -> freeArgs.addAll(
+                listOf("--linux-package-deps", "alsa-lib"),
+            )
+            else -> Unit
         }
     }
 }
@@ -146,6 +294,13 @@ tasks.register<JavaExec>("runDesktop") {
         dependsOn(buildWindowsTaskbarBridge)
         jvmArgs("-Dlazer.taskbar.bridge=${nativeBridgeFile.get().asFile.absolutePath}")
     }
+    if (buildNativeAudio.get() && (isWindowsHost || isLinuxHost || isMacOSHost)) {
+        require(nativeAudioArch != "unsupported") {
+            "The native audio engine is not available for architecture '$desktopOsArch'"
+        }
+        dependsOn(buildLazerAudio)
+        jvmArgs("-Dlazer.audio.library=${nativeAudioFile.get().asFile.absolutePath}")
+    }
     mainClass.set("dev.naominet.lazer.MainKt")
     classpath = sourceSets["main"].runtimeClasspath
     standardInput = System.`in`
@@ -165,6 +320,13 @@ tasks.withType<JavaExec>().configureEach {
         if (isWindowsHost) {
             dependsOn(buildWindowsTaskbarBridge)
             jvmArgs("-Dlazer.taskbar.bridge=${nativeBridgeFile.get().asFile.absolutePath}")
+        }
+        if (buildNativeAudio.get() && (isWindowsHost || isLinuxHost || isMacOSHost)) {
+            require(nativeAudioArch != "unsupported") {
+                "The native audio engine is not available for architecture '$desktopOsArch'"
+            }
+            dependsOn(buildLazerAudio)
+            jvmArgs("-Dlazer.audio.library=${nativeAudioFile.get().asFile.absolutePath}")
         }
     }
 }

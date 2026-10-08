@@ -70,7 +70,7 @@ class AndroidPlayer(private val context: Context) : LazerPlayer {
 
     override fun removeAt(position: Int) = AndroidPlaybackConnection.removeAt(context, position)
 
-    override fun moveTrack(from: Int, to: Int) = AndroidPlaybackConnection.moveTrack(from, to)
+    override fun moveTrack(from: Int, to: Int) = AndroidPlaybackConnection.moveTrack(context, from, to)
 
     override fun setPlayMode(mode: LazerPlayMode) = AndroidPlaybackConnection.setPlayMode(context, mode)
 
@@ -93,6 +93,12 @@ class AndroidPlayer(private val context: Context) : LazerPlayer {
         AndroidPlaybackConnection.updatePlaybackInterface(context)
 
     override fun updateAudioLevels(enabled: Boolean) = AndroidPlaybackConnection.updateAudioLevels(context)
+
+    override fun updateEqualizer(state: LazerEqualizerState) =
+        AndroidPlaybackConnection.updateEqualizer(context, state)
+
+    override fun updateReplayGainMode(mode: LazerReplayGainMode) =
+        AndroidPlaybackConnection.updateReplayGainMode(context, mode)
 
     override fun stopAndClearSession() = AndroidPlaybackConnection.stopAndClearSession(context)
 }

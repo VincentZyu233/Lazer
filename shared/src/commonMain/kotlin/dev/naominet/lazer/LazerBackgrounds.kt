@@ -238,7 +238,12 @@ private fun rgbToHsl(red: Float, green: Float, blue: Float): FloatArray {
 }
 
 private fun String.toLazerPaletteArtworkUrl(): String {
-    val secure = trim().replaceFirst("http://", "https://")
+    val value = trim()
+    if (!value.startsWith("http://", ignoreCase = true) &&
+        !value.startsWith("https://", ignoreCase = true) &&
+        !value.startsWith("//")
+    ) return value
+    val secure = value.replaceFirst("http://", "https://", ignoreCase = true)
         .let { if (it.startsWith("//")) "https:$it" else it }
     if (lazerArtworkSizeParameter.containsMatchIn(secure)) {
         return secure.replace(lazerArtworkSizeParameter) { match -> match.groupValues[1] + "96y96" }
