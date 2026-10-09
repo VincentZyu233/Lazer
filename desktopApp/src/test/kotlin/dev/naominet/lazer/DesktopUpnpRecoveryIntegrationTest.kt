@@ -30,7 +30,7 @@ import org.junit.Test
 class DesktopUpnpRecoveryIntegrationTest {
     @Test
     fun `stale endpoint rediscovers same udn restores playback and swaps queue media lease`() = runBlocking {
-        val directory = Files.createTempDirectory("upnp-recovery-integration")
+        val directory = Files.createTempDirectory("upnp-recovery-integration").toRealPath()
         val audioFile = directory.resolve("fixture.wav")
         Files.write(audioFile, minimalWav())
         val queueStore = DesktopLocalPlaybackQueueStore(directory.resolve("queue.json"))
