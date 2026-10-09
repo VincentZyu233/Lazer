@@ -118,12 +118,13 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set +e
-            ./gradlew :androidApp:connectedDebugAndroidTest -PlazerEnableAndroidUacNative=true -PlazerAbis=x86_64 --stacktrace
-            gradle_status=$?
+            # android-emulator-runner feeds the script to sh one line at a time, so a shell variable
+            # set by one line is empty on the next. Hand the status over in a file instead, and keep
+            # the capture on the gradle line so $? still refers to gradle.
+            ./gradlew :androidApp:connectedDebugAndroidTest -PlazerEnableAndroidUacNative=true -PlazerAbis=x86_64 --stacktrace; echo $? > "$RUNNER_TEMP/lazer-dsd-gradle-status"
             mkdir -p androidApp/build/diagnostics/android-dsd
             adb logcat -d -v threadtime > androidApp/build/diagnostics/android-dsd/logcat.txt 2>&1 || true
-            exit "$gradle_status"
+            exit "$(cat "$RUNNER_TEMP/lazer-dsd-gradle-status")"
       - name: Upload Android DSD instrumentation diagnostics
         if: always()
         uses: actions/upload-artifact@v7
