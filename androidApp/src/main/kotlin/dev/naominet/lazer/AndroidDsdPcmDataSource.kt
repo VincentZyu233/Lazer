@@ -311,6 +311,7 @@ internal class AndroidFloatPcmWavDataSource(
 
         var written = 0
         while (written < readLength && bytesRemaining > 0L) {
+            val producedBefore = written
             if (headerOffset < wavHeader.size) {
                 val count = minOf(readLength - written, wavHeader.size - headerOffset)
                 System.arraycopy(wavHeader, headerOffset, buffer, offset + written, count)
@@ -328,9 +329,12 @@ internal class AndroidFloatPcmWavDataSource(
                 pcmBufferOffset += count
                 written += count
             }
-            if (written > 0) {
-                virtualPosition += written
-                bytesRemaining -= written
+            // Charge the stream map once per produced chunk; charging the call's running total
+            // would consume bytesRemaining several times over on reads that cross PCM fills.
+            val produced = written - producedBefore
+            if (produced > 0) {
+                virtualPosition += produced
+                bytesRemaining -= produced
             }
         }
         if (written > 0) return written

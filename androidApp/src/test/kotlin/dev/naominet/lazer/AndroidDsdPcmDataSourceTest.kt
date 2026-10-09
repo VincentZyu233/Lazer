@@ -19,6 +19,7 @@ import java.io.EOFException
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -309,6 +310,35 @@ class AndroidDsdPcmDataSourceTest {
         } finally {
             source.close()
         }
+    }
+
+    @Test
+    fun `virtual WAV source delivers every declared byte to reads spanning several PCM fills`() {
+        val frameCount = 8_192
+        val pcm = floatRampBytes(frameCount, 2)
+        val source = AndroidFloatPcmWavDataSource(
+            FakeFloatPcmDecoder(176_400, 2, frameCount.toLong(), pcm),
+            null,
+        )
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        val length = source.openVirtualStream()
+
+        try {
+            assertEquals(44L + pcm.size, length)
+            while (true) {
+                val count = source.read(buffer, 0, buffer.size)
+                if (count == C.RESULT_END_OF_INPUT) break
+                assertTrue(count > 0, "The virtual PCM source stopped making progress.")
+                output.write(buffer, 0, count)
+            }
+        } finally {
+            source.close()
+        }
+
+        val bytes = output.toByteArray()
+        assertEquals(length, bytes.size.toLong())
+        assertContentEquals(pcm, bytes.copyOfRange(44, bytes.size))
     }
 
     private fun fourCc(bytes: ByteArray, offset: Int): String =
