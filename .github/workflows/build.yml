@@ -737,7 +737,7 @@ jobs:
             -scheme iosApp \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination "id=$simulator_udid" \
+            -destination "platform=iOS Simulator,id=$simulator_udid" \
             -derivedDataPath iosApp/build/SimulatorDerivedData \
             CODE_SIGNING_ALLOWED=NO \
             COMPILER_INDEX_STORE_ENABLE=NO \
