@@ -405,7 +405,19 @@ final class LazerShell: NSObject, IosShellBridge, WKNavigationDelegate {
                 title: metadata.title.isEmpty ? item.fallbackTitle : metadata.title,
                 artist: metadata.artist,
                 album: metadata.album,
-                durationMillis: metadata.durationMillis
+                durationMillis: metadata.durationMillis,
+                // Kotlin default arguments are not bridged into the Obj-C initializer, so every
+                // parameter the shared picker gained has to be named here. AVFoundation's common
+                // metadata carries no equivalent of Android's extended tag read, so these stay empty.
+                coverUrl: nil,
+                replayGain: nil,
+                albumArtist: nil,
+                genre: nil,
+                year: nil,
+                trackNumber: nil,
+                totalTracks: nil,
+                discNumber: nil,
+                totalDiscs: nil
             ))
         }
         if copied.isEmpty {
