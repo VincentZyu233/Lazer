@@ -233,7 +233,13 @@ class AndroidDsdPcmNativeInstrumentedTest {
         ).bytes
         val expected = full.pcm.copyOfRange(carrierByteOffset.toInt(), full.pcm.size)
         assertEquals(expected.size, actual.size, "$name DoP seek suffix byte count")
-        assertDoPMarkers(name, actual, firstMarker = 0x05)
+        assertTrue(actual.size >= 6, "$name DoP seek suffix holds a carrier frame")
+        // Only construction and reset start the marker clock at 0x05. A seek keeps the packer alive
+        // and discards whatever carrier frames the pump had already queued, so the phase a seek
+        // enters on is ring geometry, not a contract; strict alternation is.
+        val entryMarker = actual[2].toInt() and 0xff
+        assertTrue(entryMarker == 0x05 || entryMarker == 0xFA, "$name DoP seek entry marker 0x$entryMarker")
+        assertDoPMarkers(name, actual, firstMarker = entryMarker)
         for (offset in actual.indices) {
             if (offset % 3 != 2) {
                 assertEquals(expected[offset].toInt() and 0xff, actual[offset].toInt() and 0xff,
