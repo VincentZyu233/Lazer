@@ -2096,66 +2096,54 @@ class _NetworkProxySectionState extends State<_NetworkProxySection>
 
   @override
   Widget build(BuildContext context) {
-    return AppleGroupedCard(
-      margin: EdgeInsets.zero,
-      child: Column(
-        children: <Widget>[
-          AppleListTile(
-            key: const ValueKey('network-proxy-direct'),
-            padding: SettingsSpacing.rowPadding,
-            minHeight: SettingsSpacing.rowMinHeight,
-            leading: Radio<ProxyMode>(
-              value: ProxyMode.direct,
-              groupValue: _mode,
-              onChanged: (ProxyMode? value) {
-                if (value != null) unawaited(_updateMode(value));
-              },
-            ),
-            title: context.tr('不使用代理'),
-            subtitle: context.tr('直接连接到网络目标'),
-            onTap: () => unawaited(_updateMode(ProxyMode.direct)),
-          ),
-          AppleListTile(
-            key: const ValueKey('network-proxy-system'),
-            padding: SettingsSpacing.rowPadding,
-            minHeight: SettingsSpacing.rowMinHeight,
-            leading: Radio<ProxyMode>(
-              value: ProxyMode.system,
-              groupValue: _mode,
-              onChanged: (ProxyMode? value) {
-                if (value != null) unawaited(_updateMode(value));
-              },
-            ),
-            title: context.tr('使用系统代理'),
-            subtitle: context.tr('遵循操作系统的网络代理设置（默认）'),
-            onTap: () => unawaited(_updateMode(ProxyMode.system)),
-          ),
-          AppleListTile(
-            key: const ValueKey('network-proxy-custom'),
-            padding: SettingsSpacing.rowPadding,
-            minHeight: SettingsSpacing.rowMinHeight,
-            leading: Radio<ProxyMode>(
-              value: ProxyMode.custom,
-              groupValue: _mode,
-              onChanged: (ProxyMode? value) {
-                if (value != null) unawaited(_updateMode(value));
-              },
-            ),
-            title: context.tr('手动配置代理'),
-            subtitle: context.tr('通过指定的 HTTP 或 SOCKS 代理路由外部流量'),
-            onTap: () => unawaited(_updateMode(ProxyMode.custom)),
-          ),
-          if (_mode == ProxyMode.custom)
+    return RadioGroup<ProxyMode>(
+      groupValue: _mode,
+      onChanged: (ProxyMode? value) {
+        if (value != null) unawaited(_updateMode(value));
+      },
+      child: AppleGroupedCard(
+        margin: EdgeInsets.zero,
+        child: Column(
+          children: <Widget>[
             AppleListTile(
+              key: const ValueKey('network-proxy-direct'),
               padding: SettingsSpacing.rowPadding,
               minHeight: SettingsSpacing.rowMinHeight,
-              key: const ValueKey('open-proxy-endpoint-dialog'),
-              title: context.tr('代理服务器地址'),
-              subtitle: _endpoint,
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: _editEndpoint,
+              leading: const Radio<ProxyMode>(value: ProxyMode.direct),
+              title: context.tr('不使用代理'),
+              subtitle: context.tr('直接连接到网络目标'),
+              onTap: () => unawaited(_updateMode(ProxyMode.direct)),
             ),
-        ],
+            AppleListTile(
+              key: const ValueKey('network-proxy-system'),
+              padding: SettingsSpacing.rowPadding,
+              minHeight: SettingsSpacing.rowMinHeight,
+              leading: const Radio<ProxyMode>(value: ProxyMode.system),
+              title: context.tr('使用系统代理'),
+              subtitle: context.tr('遵循操作系统的网络代理设置（默认）'),
+              onTap: () => unawaited(_updateMode(ProxyMode.system)),
+            ),
+            AppleListTile(
+              key: const ValueKey('network-proxy-custom'),
+              padding: SettingsSpacing.rowPadding,
+              minHeight: SettingsSpacing.rowMinHeight,
+              leading: const Radio<ProxyMode>(value: ProxyMode.custom),
+              title: context.tr('手动配置代理'),
+              subtitle: context.tr('通过指定的 HTTP 或 SOCKS 代理路由外部流量'),
+              onTap: () => unawaited(_updateMode(ProxyMode.custom)),
+            ),
+            if (_mode == ProxyMode.custom)
+              AppleListTile(
+                padding: SettingsSpacing.rowPadding,
+                minHeight: SettingsSpacing.rowMinHeight,
+                key: const ValueKey('open-proxy-endpoint-dialog'),
+                title: context.tr('代理服务器地址'),
+                subtitle: _endpoint,
+                trailing: const Icon(Icons.chevron_right_rounded),
+                onTap: _editEndpoint,
+              ),
+          ],
+        ),
       ),
     );
   }
