@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 
 import 'plugin_manifest.dart';
 import '../gateway/music_gateway.dart';
+import '../utils/system_http.dart';
 import 'lua_plugin_runtime.dart';
 
 class InstalledPlugin {
@@ -28,7 +29,7 @@ class PluginManager extends ChangeNotifier with BuildSafeNotifier {
   List<MusicGateway> get gateways => const [];
   bool busy = false;
 
-  void notifyProxyUpdated({required bool enabled, String? endpoint}) {}
+  void notifyProxyUpdated({required ProxyMode mode, String? endpoint}) {}
   Future<void> Function(String pluginId)? beforeChange;
   Future<void> Function()? afterChange;
   Future<void> restore() async {}

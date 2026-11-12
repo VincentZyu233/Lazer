@@ -43,25 +43,28 @@ void main() {
     });
   });
 
-  group('custom proxy configuration', () {
+  group('proxy mode configuration', () {
     final uri = Uri.parse('https://music.youtube.com');
 
-    test('defaults to DIRECT when custom proxy is disabled', () {
-      SystemHttpProxy.setCustomProxy(enabled: false);
-      expect(SystemHttpProxy.isCustomEnabled, isFalse);
+    test('direct mode always returns DIRECT', () {
+      SystemHttpProxy.setMode(ProxyMode.direct);
+      expect(SystemHttpProxy.currentMode, ProxyMode.direct);
       expect(SystemHttpProxy.currentFindProxyRule(uri), 'DIRECT');
     });
 
-    test('returns PROXY rules when custom proxy is enabled', () {
-      SystemHttpProxy.setCustomProxy(enabled: true, endpoint: '127.0.0.1:7890');
-      expect(SystemHttpProxy.isCustomEnabled, isTrue);
-      expect(SystemHttpProxy.customEndpoint, '127.0.0.1:7890');
+    test('custom mode returns PROXY rules for configured endpoint', () {
+      SystemHttpProxy.setMode(
+        ProxyMode.custom,
+        endpoint: 'http://127.0.0.1:7890',
+      );
+      expect(SystemHttpProxy.currentMode, ProxyMode.custom);
+      expect(SystemHttpProxy.customEndpoint, 'http://127.0.0.1:7890');
       expect(SystemHttpProxy.currentFindProxyRule(uri), 'PROXY 127.0.0.1:7890');
     });
 
-    test('supports SOCKS5 endpoints', () {
-      SystemHttpProxy.setCustomProxy(
-        enabled: true,
+    test('custom mode supports SOCKS5 endpoints', () {
+      SystemHttpProxy.setMode(
+        ProxyMode.custom,
         endpoint: 'socks5://127.0.0.1:10808',
       );
       expect(
@@ -70,11 +73,23 @@ void main() {
       );
     });
 
-    test('falls back to default endpoint on empty string', () {
-      SystemHttpProxy.setCustomProxy(enabled: true, endpoint: '  ');
+    test('custom mode falls back to default endpoint on empty string', () {
+      SystemHttpProxy.setMode(ProxyMode.custom, endpoint: '  ');
       expect(
         SystemHttpProxy.currentFindProxyRule(uri),
         'PROXY 127.0.0.1:7890',
+      );
+    });
+
+    test('system mode uses cached or resolved system rules', () {
+      SystemHttpProxy.setMode(
+        ProxyMode.system,
+        initialSystemRules: 'PROXY 127.0.0.1:8888',
+      );
+      expect(SystemHttpProxy.currentMode, ProxyMode.system);
+      expect(
+        SystemHttpProxy.currentFindProxyRule(uri),
+        'PROXY 127.0.0.1:8888',
       );
     });
   });

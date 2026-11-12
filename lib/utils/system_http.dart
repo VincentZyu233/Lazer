@@ -1,8 +1,21 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// Supported routing modes for external HTTP traffic.
+enum ProxyMode {
+  /// Always connect directly without any proxy.
+  direct,
+
+  /// Follow the operating system proxy settings (registry on Windows, env elsewhere).
+  system,
+
+  /// Route through a user-specified HTTP or SOCKS proxy endpoint.
+  custom,
+}
 
 /// The HTTP proxy the operating system routes traffic through.
 ///
@@ -23,77 +36,97 @@ class SystemHttpProxy {
   final bool socks;
 
   static const String defaultEndpoint = 'http://127.0.0.1:7890';
-  static const String prefKeyEnabled = 'network_proxy_enabled';
+  static const ProxyMode defaultMode = ProxyMode.system;
+  static const String prefKeyMode = 'network_proxy_mode';
   static const String prefKeyEndpoint = 'network_proxy_endpoint';
 
+  static ProxyMode _currentMode = defaultMode;
+  static String? _customEndpoint;
   static SystemHttpProxy? _current;
   static DateTime? _checkedAt;
-  static bool? _customEnabled;
-  static String? _customEndpoint;
 
   /// Re-checked once a minute so starting the proxy after the app still works.
   static const Duration _retryAfter = Duration(minutes: 1);
 
-  /// Configure or update the user's manual proxy preference.
-  static void setCustomProxy({required bool enabled, String? endpoint}) {
-    _customEnabled = enabled;
-    _customEndpoint = endpoint;
-    _current = null;
-    _checkedAt = null;
-  }
+  /// Current proxy routing mode.
+  static ProxyMode get currentMode => _currentMode;
 
-  /// Initialize custom proxy settings from SharedPreferences.
-  static void initFromPreferences(SharedPreferences prefs) {
-    final bool? enabled = prefs.getBool(prefKeyEnabled);
-    final String? endpoint = prefs.getString(prefKeyEndpoint);
-    if (enabled != null) {
-      setCustomProxy(enabled: enabled, endpoint: endpoint ?? defaultEndpoint);
-    }
-  }
+  /// Cached system proxy rules string if already resolved, e.g. `PROXY 127.0.0.1:7890`.
+  static String? get cachedSystemRules => _current?.rules;
 
-  /// Current user-configured proxy state.
-  static bool get isCustomEnabled => _customEnabled ?? false;
+  /// Current user-configured proxy endpoint.
   static String get customEndpoint =>
       (_customEndpoint != null && _customEndpoint!.trim().isNotEmpty)
           ? _customEndpoint!
           : defaultEndpoint;
 
+  /// Configure or update the active proxy mode and optional endpoint.
+  static void setMode(
+    ProxyMode mode, {
+    String? endpoint,
+    String? initialSystemRules,
+  }) {
+    _currentMode = mode;
+    if (endpoint != null && endpoint.trim().isNotEmpty) {
+      _customEndpoint = endpoint.trim();
+    }
+    if (initialSystemRules != null && initialSystemRules.trim().isNotEmpty) {
+      _current = parse(initialSystemRules);
+    } else {
+      _current = null;
+    }
+    _checkedAt = null;
+    if (mode == ProxyMode.system) {
+      unawaited(resolve());
+    }
+  }
+
+  /// Initialize proxy mode and settings from SharedPreferences.
+  static void initFromPreferences(SharedPreferences prefs) {
+    final String? modeStr = prefs.getString(prefKeyMode);
+    final String? endpoint = prefs.getString(prefKeyEndpoint);
+    final ProxyMode mode = modeStr != null
+        ? ProxyMode.values.firstWhere(
+            (m) => m.name == modeStr,
+            orElse: () => defaultMode,
+          )
+        : defaultMode;
+    setMode(mode, endpoint: endpoint ?? defaultEndpoint);
+  }
+
   /// Find-proxy callback suitable for [HttpClient.findProxy].
   static String currentFindProxyRule(Uri uri) {
-    if (_customEnabled == true) {
-      final String endpoint = (_customEndpoint?.trim().isNotEmpty ?? false)
-          ? _customEndpoint!.trim()
-          : defaultEndpoint;
-      final SystemHttpProxy? p = parse(endpoint);
-      if (p != null) return p.rules;
-    } else if (_customEnabled == false) {
-      return 'DIRECT';
+    switch (_currentMode) {
+      case ProxyMode.direct:
+        return 'DIRECT';
+      case ProxyMode.custom:
+        final SystemHttpProxy? p = parse(customEndpoint);
+        return p?.rules ?? 'DIRECT';
+      case ProxyMode.system:
+        final SystemHttpProxy? current = _current;
+        return current?.rules ?? 'DIRECT';
     }
-    final SystemHttpProxy? current = _current;
-    if (current != null) return current.rules;
-    return 'DIRECT';
   }
 
   /// Resolves the proxy the machine is configured to use; `null` means direct.
   static Future<SystemHttpProxy?> resolve() async {
-    if (_customEnabled == true) {
-      final String endpoint = (_customEndpoint?.trim().isNotEmpty ?? false)
-          ? _customEndpoint!.trim()
-          : defaultEndpoint;
-      return parse(endpoint);
-    } else if (_customEnabled == false) {
-      return null;
+    switch (_currentMode) {
+      case ProxyMode.direct:
+        return null;
+      case ProxyMode.custom:
+        return parse(customEndpoint);
+      case ProxyMode.system:
+        final SystemHttpProxy? current = _current;
+        if (current != null) return current;
+        final DateTime? checkedAt = _checkedAt;
+        if (checkedAt != null &&
+            DateTime.now().difference(checkedAt) < _retryAfter) {
+          return null;
+        }
+        _checkedAt = DateTime.now();
+        _current = _fromEnvironment() ?? await _fromWindowsRegistry();
+        return _current;
     }
-    final SystemHttpProxy? current = _current;
-    if (current != null) return current;
-    final DateTime? checkedAt = _checkedAt;
-    if (checkedAt != null &&
-        DateTime.now().difference(checkedAt) < _retryAfter) {
-      return null;
-    }
-    _checkedAt = DateTime.now();
-    _current = _fromEnvironment() ?? await _fromWindowsRegistry();
-    return _current;
   }
 
   /// The value [HttpClient.findProxy] expects.

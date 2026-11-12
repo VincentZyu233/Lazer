@@ -2059,18 +2059,18 @@ class _NetworkProxySection extends StatefulWidget {
 
 class _NetworkProxySectionState extends State<_NetworkProxySection>
     with BuildSafeState<_NetworkProxySection> {
-  bool _enabled = SystemHttpProxy.isCustomEnabled;
+  ProxyMode _mode = SystemHttpProxy.currentMode;
   String _endpoint = SystemHttpProxy.customEndpoint;
 
-  Future<void> _toggleEnabled(bool value) async {
-    setState(() => _enabled = value);
-    SystemHttpProxy.setCustomProxy(enabled: value, endpoint: _endpoint);
+  Future<void> _updateMode(ProxyMode mode) async {
+    setState(() => _mode = mode);
+    SystemHttpProxy.setMode(mode, endpoint: _endpoint);
     widget.state.pluginManager.notifyProxyUpdated(
-      enabled: value,
+      mode: mode,
       endpoint: _endpoint,
     );
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(SystemHttpProxy.prefKeyEnabled, value);
+    await prefs.setString(SystemHttpProxy.prefKeyMode, mode.name);
   }
 
   Future<void> _editEndpoint() async {
@@ -2084,9 +2084,9 @@ class _NetworkProxySectionState extends State<_NetworkProxySection>
           ? SystemHttpProxy.defaultEndpoint
           : result.trim();
       setState(() => _endpoint = trimmed);
-      SystemHttpProxy.setCustomProxy(enabled: _enabled, endpoint: trimmed);
+      SystemHttpProxy.setMode(_mode, endpoint: trimmed);
       widget.state.pluginManager.notifyProxyUpdated(
-        enabled: _enabled,
+        mode: _mode,
         endpoint: trimmed,
       );
       final prefs = await SharedPreferences.getInstance();
@@ -2100,22 +2100,61 @@ class _NetworkProxySectionState extends State<_NetworkProxySection>
       margin: EdgeInsets.zero,
       child: Column(
         children: <Widget>[
-          _AppSwitchRow(
-            key: const ValueKey('network-proxy-switch'),
-            label: '启用网络代理',
-            subtitle: '通过指定的 HTTP 或 SOCKS 代理路由外部流量',
-            value: _enabled,
-            onChanged: (bool value) => unawaited(_toggleEnabled(value)),
-          ),
           AppleListTile(
+            key: const ValueKey('network-proxy-direct'),
             padding: SettingsSpacing.rowPadding,
             minHeight: SettingsSpacing.rowMinHeight,
-            key: const ValueKey('open-proxy-endpoint-dialog'),
-            title: context.tr('代理服务器地址'),
-            subtitle: _endpoint,
-            trailing: const Icon(Icons.chevron_right_rounded),
-            onTap: _editEndpoint,
+            leading: Radio<ProxyMode>(
+              value: ProxyMode.direct,
+              groupValue: _mode,
+              onChanged: (ProxyMode? value) {
+                if (value != null) unawaited(_updateMode(value));
+              },
+            ),
+            title: context.tr('不使用代理'),
+            subtitle: context.tr('直接连接到网络目标'),
+            onTap: () => unawaited(_updateMode(ProxyMode.direct)),
           ),
+          AppleListTile(
+            key: const ValueKey('network-proxy-system'),
+            padding: SettingsSpacing.rowPadding,
+            minHeight: SettingsSpacing.rowMinHeight,
+            leading: Radio<ProxyMode>(
+              value: ProxyMode.system,
+              groupValue: _mode,
+              onChanged: (ProxyMode? value) {
+                if (value != null) unawaited(_updateMode(value));
+              },
+            ),
+            title: context.tr('使用系统代理'),
+            subtitle: context.tr('遵循操作系统的网络代理设置（默认）'),
+            onTap: () => unawaited(_updateMode(ProxyMode.system)),
+          ),
+          AppleListTile(
+            key: const ValueKey('network-proxy-custom'),
+            padding: SettingsSpacing.rowPadding,
+            minHeight: SettingsSpacing.rowMinHeight,
+            leading: Radio<ProxyMode>(
+              value: ProxyMode.custom,
+              groupValue: _mode,
+              onChanged: (ProxyMode? value) {
+                if (value != null) unawaited(_updateMode(value));
+              },
+            ),
+            title: context.tr('手动配置代理'),
+            subtitle: context.tr('通过指定的 HTTP 或 SOCKS 代理路由外部流量'),
+            onTap: () => unawaited(_updateMode(ProxyMode.custom)),
+          ),
+          if (_mode == ProxyMode.custom)
+            AppleListTile(
+              padding: SettingsSpacing.rowPadding,
+              minHeight: SettingsSpacing.rowMinHeight,
+              key: const ValueKey('open-proxy-endpoint-dialog'),
+              title: context.tr('代理服务器地址'),
+              subtitle: _endpoint,
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: _editEndpoint,
+            ),
         ],
       ),
     );
@@ -2157,7 +2196,7 @@ class _ProxyEndpointDialogState extends State<_ProxyEndpointDialog>
               controller: _controller,
               autofocus: true,
               decoration: InputDecoration(
-                hintText: context.tr('输入代理地址，例如 127.0.0.1:7890'),
+                hintText: context.tr('输入代理地址，例如 http://127.0.0.1:7890'),
                 border: const OutlineInputBorder(),
                 isDense: true,
               ),

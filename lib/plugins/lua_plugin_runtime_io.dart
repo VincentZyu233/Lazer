@@ -113,8 +113,9 @@ class LuaPluginRuntime {
           'sources': sources,
           'data': dataDirectory,
           'externalHttp': httpHandler != null,
-          'customProxyEnabled': SystemHttpProxy.isCustomEnabled,
-          'customProxyEndpoint': SystemHttpProxy.customEndpoint,
+          'proxyMode': SystemHttpProxy.currentMode.name,
+          'proxyEndpoint': SystemHttpProxy.customEndpoint,
+          'cachedSystemRules': SystemHttpProxy.cachedSystemRules,
         },
         onError: port.sendPort,
         onExit: port.sendPort,
@@ -134,10 +135,10 @@ class LuaPluginRuntime {
     }
   }
 
-  void updateProxy({required bool enabled, String? endpoint}) {
+  void updateProxy({required ProxyMode mode, String? endpoint}) {
     _commands?.send({
       'action': 'setProxy',
-      'enabled': enabled,
+      'mode': mode.name,
       'endpoint': endpoint,
     });
   }
@@ -268,10 +269,15 @@ class LuaPluginRuntime {
 }
 
 Future<void> _runPlugin(Map<String, dynamic> config) async {
-  if (config['customProxyEnabled'] is bool) {
-    SystemHttpProxy.setCustomProxy(
-      enabled: config['customProxyEnabled'] as bool,
-      endpoint: config['customProxyEndpoint'] as String?,
+  if (config['proxyMode'] is String) {
+    final mode = ProxyMode.values.firstWhere(
+      (m) => m.name == config['proxyMode'],
+      orElse: () => ProxyMode.system,
+    );
+    SystemHttpProxy.setMode(
+      mode,
+      endpoint: config['proxyEndpoint'] as String?,
+      initialSystemRules: config['cachedSystemRules'] as String?,
     );
   }
   final output = config['port'] as SendPort;
@@ -308,8 +314,12 @@ Future<void> _runPlugin(Map<String, dynamic> config) async {
   commands.listen((dynamic request) {
     if (request is! Map) return;
     if (request['action'] == 'setProxy') {
-      SystemHttpProxy.setCustomProxy(
-        enabled: request['enabled'] == true,
+      final mode = ProxyMode.values.firstWhere(
+        (m) => m.name == request['mode'],
+        orElse: () => ProxyMode.system,
+      );
+      SystemHttpProxy.setMode(
+        mode,
         endpoint: request['endpoint'] as String?,
       );
       return;
