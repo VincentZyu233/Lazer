@@ -67,8 +67,9 @@ class SystemHttpProxy {
     String? initialSystemRules,
   }) {
     _currentMode = mode;
-    if (endpoint != null && endpoint.trim().isNotEmpty) {
-      _customEndpoint = endpoint.trim();
+    if (endpoint != null) {
+      final trimmed = endpoint.trim();
+      _customEndpoint = trimmed.isEmpty ? defaultEndpoint : trimmed;
     }
     if (initialSystemRules != null && initialSystemRules.trim().isNotEmpty) {
       _current = parse(initialSystemRules);
@@ -181,7 +182,16 @@ class SystemHttpProxy {
   static SystemHttpProxy? parse(String raw) {
     String value = raw.trim();
     if (value.isEmpty) return null;
-    if (value.contains('=')) {
+    bool socks = false;
+    final String upper = value.toUpperCase();
+    if (upper.startsWith('PROXY ')) {
+      value = value.substring(6).trim();
+    } else if (upper.startsWith('SOCKS ') || upper.startsWith('SOCKS5 ')) {
+      socks = true;
+      value = value.substring(value.indexOf(' ') + 1).trim();
+    } else if (upper == 'DIRECT') {
+      return null;
+    }
       final Map<String, String> entries = <String, String>{};
       for (final String part in value.split(';')) {
         final int at = part.indexOf('=');

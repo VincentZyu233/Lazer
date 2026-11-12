@@ -570,8 +570,6 @@ class _SettingsOverview extends StatelessWidget {
               const _AppSectionLabel('数据存储'),
               const StorageSettings(),
             ],
-            const _AppSectionLabel('网络与代理'),
-            _NetworkProxySection(state: state),
             const _AppSectionLabel('下载'),
             PlaybackCacheSettings(controller: state.playbackCache),
             const SizedBox(height: SettingsSpacing.groupGap),
@@ -1048,6 +1046,8 @@ class _SettingsOverview extends StatelessWidget {
                 ),
               ),
             ),
+            const _AppSectionLabel('网络与代理'),
+            _NetworkProxySection(state: state),
             const _AppSectionLabel('关于'),
             AppleGroupedCard(
               key: const ValueKey('free-open-source-declaration'),
