@@ -192,6 +192,7 @@ class SystemHttpProxy {
     } else if (upper == 'DIRECT') {
       return null;
     }
+    if (value.contains('=')) {
       final Map<String, String> entries = <String, String>{};
       for (final String part in value.split(';')) {
         final int at = part.indexOf('=');
@@ -207,7 +208,6 @@ class SystemHttpProxy {
       if (chosen == null || chosen.isEmpty) return null;
       value = chosen;
     }
-    bool socks = false;
     final int schemeEnd = value.indexOf('://');
     if (schemeEnd > 0) {
       final String scheme = value.substring(0, schemeEnd).toLowerCase();
