@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// The HTTP proxy the operating system routes traffic through.
 ///
@@ -21,14 +22,68 @@ class SystemHttpProxy {
   final int port;
   final bool socks;
 
+  static const String defaultEndpoint = '127.0.0.1:7890';
+  static const String prefKeyEnabled = 'network_proxy_enabled';
+  static const String prefKeyEndpoint = 'network_proxy_endpoint';
+
   static SystemHttpProxy? _current;
   static DateTime? _checkedAt;
+  static bool? _customEnabled;
+  static String? _customEndpoint;
 
   /// Re-checked once a minute so starting the proxy after the app still works.
   static const Duration _retryAfter = Duration(minutes: 1);
 
+  /// Configure or update the user's manual proxy preference.
+  static void setCustomProxy({required bool enabled, String? endpoint}) {
+    _customEnabled = enabled;
+    _customEndpoint = endpoint;
+    _current = null;
+    _checkedAt = null;
+  }
+
+  /// Initialize custom proxy settings from SharedPreferences.
+  static void initFromPreferences(SharedPreferences prefs) {
+    final bool? enabled = prefs.getBool(prefKeyEnabled);
+    final String? endpoint = prefs.getString(prefKeyEndpoint);
+    if (enabled != null) {
+      setCustomProxy(enabled: enabled, endpoint: endpoint ?? defaultEndpoint);
+    }
+  }
+
+  /// Current user-configured proxy state.
+  static bool get isCustomEnabled => _customEnabled ?? false;
+  static String get customEndpoint =>
+      (_customEndpoint != null && _customEndpoint!.trim().isNotEmpty)
+          ? _customEndpoint!
+          : defaultEndpoint;
+
+  /// Find-proxy callback suitable for [HttpClient.findProxy].
+  static String currentFindProxyRule(Uri uri) {
+    if (_customEnabled == true) {
+      final String endpoint = (_customEndpoint?.trim().isNotEmpty ?? false)
+          ? _customEndpoint!.trim()
+          : defaultEndpoint;
+      final SystemHttpProxy? p = parse(endpoint);
+      if (p != null) return p.rules;
+    } else if (_customEnabled == false) {
+      return 'DIRECT';
+    }
+    final SystemHttpProxy? current = _current;
+    if (current != null) return current.rules;
+    return 'DIRECT';
+  }
+
   /// Resolves the proxy the machine is configured to use; `null` means direct.
   static Future<SystemHttpProxy?> resolve() async {
+    if (_customEnabled == true) {
+      final String endpoint = (_customEndpoint?.trim().isNotEmpty ?? false)
+          ? _customEndpoint!.trim()
+          : defaultEndpoint;
+      return parse(endpoint);
+    } else if (_customEnabled == false) {
+      return null;
+    }
     final SystemHttpProxy? current = _current;
     if (current != null) return current;
     final DateTime? checkedAt = _checkedAt;

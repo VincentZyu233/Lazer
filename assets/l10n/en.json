@@ -1194,5 +1194,10 @@
   "输入 Lua 或 /help；Enter 执行，Shift+Enter 换行，↑↓ 浏览历史。": "Enter Lua or /help. Enter runs, Shift+Enter adds a line, ↑↓ browses history.",
   "输入 Lua 或指令": "Enter Lua or a command",
   "运行 Lua、检查播放状态和查看调试日志": "Run Lua, inspect playback state and view debug logs",
-  "/help — 指令帮助\n/status — 播放状态\n/queue — 播放队列（最多 100 首）\n/plugins — 已安装的 Lua 插件\n/play /pause /next /previous /stop — 播放控制\n/seek <seconds> — 跳转到指定秒数\n/volume <0-100> — 设置音量\n/logs [text] — 查看最近日志，可按文本筛选\n/clear — 清空控制台\n/reset — 重置 Lua 会话\nLua: 1 + 2 · print(\"hello\") · x = 42 · return x": "/help — Command help\n/status — Playback status\n/queue — Playback queue (up to 100 tracks)\n/plugins — Installed Lua plugins\n/play /pause /next /previous /stop — Playback controls\n/seek <seconds> — Seek to a position in seconds\n/volume <0-100> — Set volume\n/logs [text] — Recent logs, optionally filtered by text\n/clear — Clear the console\n/reset — Reset the Lua session\nLua: 1 + 2 · print(\"hello\") · x = 42 · return x"
+  "/help — 指令帮助\n/status — 播放状态\n/queue — 播放队列（最多 100 首）\n/plugins — 已安装的 Lua 插件\n/play /pause /next /previous /stop — 播放控制\n/seek <seconds> — 跳转到指定秒数\n/volume <0-100> — 设置音量\n/logs [text] — 查看最近日志，可按文本筛选\n/clear — 清空控制台\n/reset — 重置 Lua 会话\nLua: 1 + 2 · print(\"hello\") · x = 42 · return x": "/help — Command help\n/status — Playback status\n/queue — Playback queue (up to 100 tracks)\n/plugins — Installed Lua plugins\n/play /pause /next /previous /stop — Playback controls\n/seek <seconds> — Seek to a position in seconds\n/volume <0-100> — Set volume\n/logs [text] — Recent logs, optionally filtered by text\n/clear — Clear the console\n/reset — Reset the Lua session\nLua: 1 + 2 · print(\"hello\") · x = 42 · return x",
+  "网络与代理": "Network & Proxy",
+  "启用网络代理": "Enable Network Proxy",
+  "通过指定的 HTTP 或 SOCKS 代理路由外部流量": "Route external traffic through a specified HTTP or SOCKS proxy",
+  "代理服务器地址": "Proxy Server Address",
+  "输入代理地址，例如 127.0.0.1:7890": "Enter proxy address, e.g. 127.0.0.1:7890"
 }

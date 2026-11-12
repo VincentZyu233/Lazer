@@ -40,6 +40,7 @@ import '../updates/update_checker.dart';
 import '../updates/update_dialog.dart';
 import '../utils/background_image.dart';
 import '../utils/byte_format.dart';
+import '../utils/system_http.dart';
 import '../widgets/ui_scaling.dart';
 import 'login.dart';
 import 'widgets.dart';
@@ -568,6 +569,8 @@ class _SettingsOverview extends StatelessWidget {
               const _AppSectionLabel('数据存储'),
               const StorageSettings(),
             ],
+            const _AppSectionLabel('网络与代理'),
+            const _NetworkProxySection(),
             const _AppSectionLabel('下载'),
             PlaybackCacheSettings(controller: state.playbackCache),
             const SizedBox(height: SettingsSpacing.groupGap),
@@ -2041,6 +2044,137 @@ class _AppGradientSlider extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _NetworkProxySection extends StatefulWidget {
+  const _NetworkProxySection();
+
+  @override
+  State<_NetworkProxySection> createState() => _NetworkProxySectionState();
+}
+
+class _NetworkProxySectionState extends State<_NetworkProxySection>
+    with BuildSafeState<_NetworkProxySection> {
+  bool _enabled = SystemHttpProxy.isCustomEnabled;
+  String _endpoint = SystemHttpProxy.customEndpoint;
+
+  Future<void> _toggleEnabled(bool value) async {
+    setState(() => _enabled = value);
+    SystemHttpProxy.setCustomProxy(enabled: value, endpoint: _endpoint);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(SystemHttpProxy.prefKeyEnabled, value);
+  }
+
+  Future<void> _editEndpoint() async {
+    final result = await showAppleDialog<String>(
+      context: context,
+      builder: (BuildContext context) =>
+          _ProxyEndpointDialog(initial: _endpoint),
+    );
+    if (result != null && mounted) {
+      final String trimmed = result.trim().isEmpty
+          ? SystemHttpProxy.defaultEndpoint
+          : result.trim();
+      setState(() => _endpoint = trimmed);
+      SystemHttpProxy.setCustomProxy(enabled: _enabled, endpoint: trimmed);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(SystemHttpProxy.prefKeyEndpoint, trimmed);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AppleGroupedCard(
+      margin: EdgeInsets.zero,
+      child: Column(
+        children: <Widget>[
+          _AppSwitchRow(
+            key: const ValueKey('network-proxy-switch'),
+            label: '启用网络代理',
+            subtitle: '通过指定的 HTTP 或 SOCKS 代理路由外部流量',
+            value: _enabled,
+            onChanged: (bool value) => unawaited(_toggleEnabled(value)),
+          ),
+          AppleListTile(
+            padding: SettingsSpacing.rowPadding,
+            minHeight: SettingsSpacing.rowMinHeight,
+            key: const ValueKey('open-proxy-endpoint-dialog'),
+            title: context.tr('代理服务器地址'),
+            subtitle: Text(
+              _endpoint,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.primary,
+                fontFamily: 'monospace',
+              ),
+            ),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: _editEndpoint,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProxyEndpointDialog extends StatefulWidget {
+  const _ProxyEndpointDialog({required this.initial});
+  final String initial;
+
+  @override
+  State<_ProxyEndpointDialog> createState() => _ProxyEndpointDialogState();
+}
+
+class _ProxyEndpointDialogState extends State<_ProxyEndpointDialog>
+    with BuildSafeState<_ProxyEndpointDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const TrText('代理服务器地址'),
+      contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+      content: SizedBox(
+        width: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            TextField(
+              controller: _controller,
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: context.tr('输入代理地址，例如 127.0.0.1:7890'),
+                border: const OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        SpringTextButton(
+          onPressed: () => _controller.text = SystemHttpProxy.defaultEndpoint,
+          child: const TrText('恢复默认'),
+        ),
+        SpringTextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const TrText('取消'),
+        ),
+        SpringTextButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const TrText('保存'),
+        ),
+      ],
     );
   }
 }

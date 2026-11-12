@@ -15,6 +15,7 @@ import 'package:path/path.dart' as p;
 import 'plugin_manifest.dart';
 import 'lua_console_evaluator.dart';
 import '../diagnostics/app_log.dart';
+import '../utils/system_http.dart';
 
 /// Each VM has its own isolate, session, serial call queue and time budget.
 /// No executable, dynamic library, JIT or platform-specific Lua installation.
@@ -333,7 +334,8 @@ class _PluginHost {
   externalHttp;
   final ConsoleCapableLuaState lua = ConsoleCapableLuaState();
   final HttpClient client = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 20);
+    ..connectionTimeout = const Duration(seconds: 20)
+    ..findProxy = SystemHttpProxy.currentFindProxyRule;
   final Random random = Random.secure();
   Map<String, dynamic> storage = {};
 

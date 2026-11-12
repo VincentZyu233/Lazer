@@ -42,4 +42,40 @@ void main() {
       expect(SystemHttpProxy.parse('host:70000'), isNull);
     });
   });
+
+  group('custom proxy configuration', () {
+    final uri = Uri.parse('https://music.youtube.com');
+
+    test('defaults to DIRECT when custom proxy is disabled', () {
+      SystemHttpProxy.setCustomProxy(enabled: false);
+      expect(SystemHttpProxy.isCustomEnabled, isFalse);
+      expect(SystemHttpProxy.currentFindProxyRule(uri), 'DIRECT');
+    });
+
+    test('returns PROXY rules when custom proxy is enabled', () {
+      SystemHttpProxy.setCustomProxy(enabled: true, endpoint: '127.0.0.1:7890');
+      expect(SystemHttpProxy.isCustomEnabled, isTrue);
+      expect(SystemHttpProxy.customEndpoint, '127.0.0.1:7890');
+      expect(SystemHttpProxy.currentFindProxyRule(uri), 'PROXY 127.0.0.1:7890');
+    });
+
+    test('supports SOCKS5 endpoints', () {
+      SystemHttpProxy.setCustomProxy(
+        enabled: true,
+        endpoint: 'socks5://127.0.0.1:10808',
+      );
+      expect(
+        SystemHttpProxy.currentFindProxyRule(uri),
+        'SOCKS 127.0.0.1:10808',
+      );
+    });
+
+    test('falls back to default endpoint on empty string', () {
+      SystemHttpProxy.setCustomProxy(enabled: true, endpoint: '  ');
+      expect(
+        SystemHttpProxy.currentFindProxyRule(uri),
+        'PROXY 127.0.0.1:7890',
+      );
+    });
+  });
 }
