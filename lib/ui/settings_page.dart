@@ -3,6 +3,7 @@ import '../widgets/spring_buttons.dart';
 import '../storage/app_storage.dart';
 import '../storage/storage_settings.dart';
 import 'dart:async';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform, kIsWeb;
@@ -2102,13 +2103,7 @@ class _NetworkProxySectionState extends State<_NetworkProxySection>
             minHeight: SettingsSpacing.rowMinHeight,
             key: const ValueKey('open-proxy-endpoint-dialog'),
             title: context.tr('代理服务器地址'),
-            subtitle: Text(
-              _endpoint,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.primary,
-                fontFamily: 'monospace',
-              ),
-            ),
+            subtitle: _endpoint,
             trailing: const Icon(Icons.chevron_right_rounded),
             onTap: _editEndpoint,
           ),
