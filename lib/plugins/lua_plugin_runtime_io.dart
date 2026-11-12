@@ -113,6 +113,8 @@ class LuaPluginRuntime {
           'sources': sources,
           'data': dataDirectory,
           'externalHttp': httpHandler != null,
+          'customProxyEnabled': SystemHttpProxy.isCustomEnabled,
+          'customProxyEndpoint': SystemHttpProxy.customEndpoint,
         },
         onError: port.sendPort,
         onExit: port.sendPort,
@@ -130,6 +132,14 @@ class LuaPluginRuntime {
       close();
       rethrow;
     }
+  }
+
+  void updateProxy({required bool enabled, String? endpoint}) {
+    _commands?.send({
+      'action': 'setProxy',
+      'enabled': enabled,
+      'endpoint': endpoint,
+    });
   }
 
   /// Runs one plugin operation on the serialized VM queue.
@@ -258,6 +268,12 @@ class LuaPluginRuntime {
 }
 
 Future<void> _runPlugin(Map<String, dynamic> config) async {
+  if (config['customProxyEnabled'] is bool) {
+    SystemHttpProxy.setCustomProxy(
+      enabled: config['customProxyEnabled'] as bool,
+      endpoint: config['customProxyEndpoint'] as String?,
+    );
+  }
   final output = config['port'] as SendPort;
   final commands = ReceivePort();
   final host = _PluginHost(
@@ -291,6 +307,13 @@ Future<void> _runPlugin(Map<String, dynamic> config) async {
   Future<void> tail = Future.value();
   commands.listen((dynamic request) {
     if (request is! Map) return;
+    if (request['action'] == 'setProxy') {
+      SystemHttpProxy.setCustomProxy(
+        enabled: request['enabled'] == true,
+        endpoint: request['endpoint'] as String?,
+      );
+      return;
+    }
     tail = tail.then((_) async {
       try {
         final value = request['source'] is String

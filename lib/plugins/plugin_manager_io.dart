@@ -43,6 +43,12 @@ class PluginManager extends ChangeNotifier with BuildSafeNotifier {
   bool _disposed = false;
   Future<void>? _restoring;
 
+  void notifyProxyUpdated({required bool enabled, String? endpoint}) {
+    for (final plugin in _plugins) {
+      plugin.runtime?.updateProxy(enabled: enabled, endpoint: endpoint);
+    }
+  }
+
   /// Stop owned playback and detach gateways before shutting down a VM.
   Future<void> Function(String pluginId)? beforeChange;
   Future<void> Function()? afterChange;

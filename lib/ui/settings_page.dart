@@ -571,7 +571,7 @@ class _SettingsOverview extends StatelessWidget {
               const StorageSettings(),
             ],
             const _AppSectionLabel('网络与代理'),
-            const _NetworkProxySection(),
+            _NetworkProxySection(state: state),
             const _AppSectionLabel('下载'),
             PlaybackCacheSettings(controller: state.playbackCache),
             const SizedBox(height: SettingsSpacing.groupGap),
@@ -2050,7 +2050,8 @@ class _AppGradientSlider extends StatelessWidget {
 }
 
 class _NetworkProxySection extends StatefulWidget {
-  const _NetworkProxySection();
+  const _NetworkProxySection({required this.state});
+  final AppState state;
 
   @override
   State<_NetworkProxySection> createState() => _NetworkProxySectionState();
@@ -2064,6 +2065,10 @@ class _NetworkProxySectionState extends State<_NetworkProxySection>
   Future<void> _toggleEnabled(bool value) async {
     setState(() => _enabled = value);
     SystemHttpProxy.setCustomProxy(enabled: value, endpoint: _endpoint);
+    widget.state.pluginManager.notifyProxyUpdated(
+      enabled: value,
+      endpoint: _endpoint,
+    );
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(SystemHttpProxy.prefKeyEnabled, value);
   }
@@ -2080,6 +2085,10 @@ class _NetworkProxySectionState extends State<_NetworkProxySection>
           : result.trim();
       setState(() => _endpoint = trimmed);
       SystemHttpProxy.setCustomProxy(enabled: _enabled, endpoint: trimmed);
+      widget.state.pluginManager.notifyProxyUpdated(
+        enabled: _enabled,
+        endpoint: trimmed,
+      );
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(SystemHttpProxy.prefKeyEndpoint, trimmed);
     }

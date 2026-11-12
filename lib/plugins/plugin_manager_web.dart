@@ -47,6 +47,8 @@ class PluginManager extends ChangeNotifier with BuildSafeNotifier {
   ];
   bool busy = false;
   bool _disposed = false;
+
+  void notifyProxyUpdated({required bool enabled, String? endpoint}) {}
   Future<void>? _restoring;
 
   Future<void> Function(String pluginId)? beforeChange;

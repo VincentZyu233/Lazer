@@ -27,6 +27,8 @@ class PluginManager extends ChangeNotifier with BuildSafeNotifier {
   List<InstalledPlugin> get plugins => List.unmodifiable(_plugins);
   List<MusicGateway> get gateways => const [];
   bool busy = false;
+
+  void notifyProxyUpdated({required bool enabled, String? endpoint}) {}
   Future<void> Function(String pluginId)? beforeChange;
   Future<void> Function()? afterChange;
   Future<void> restore() async {}

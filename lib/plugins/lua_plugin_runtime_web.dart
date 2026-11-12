@@ -48,6 +48,8 @@ class LuaPluginRuntime {
 
   Future<void> start() => _starting ??= _start();
 
+  void updateProxy({required bool enabled, String? endpoint}) {}
+
   Future<void> _start() async {
     if (_closed) throw const PluginException('插件已停止。');
     AppLog.shared.event('lua', 'starting', {'plugin': manifest.id});

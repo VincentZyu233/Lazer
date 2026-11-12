@@ -22,7 +22,7 @@ class SystemHttpProxy {
   final int port;
   final bool socks;
 
-  static const String defaultEndpoint = '127.0.0.1:7890';
+  static const String defaultEndpoint = 'http://127.0.0.1:7890';
   static const String prefKeyEnabled = 'network_proxy_enabled';
   static const String prefKeyEndpoint = 'network_proxy_endpoint';
 
