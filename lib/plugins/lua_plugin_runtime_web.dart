@@ -7,6 +7,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:html' as html;
 
+import 'package:archive/archive.dart' as archive;
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:lua_dardo_plus/lua.dart';
@@ -490,6 +491,28 @@ class _WebPluginHost {
         return base64Encode(utf8.encode(input));
       case 'base64_decode':
         return utf8.decode(base64Decode(input));
+      case 'krc_decode':
+        try {
+          final raw = base64Decode(input);
+          if (raw.length <= 4) return '';
+          const enKey = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105];
+          final payload = Uint8List(raw.length - 4);
+          for (var i = 0; i < payload.length; i++) {
+            payload[i] = raw[i + 4] ^ enKey[i % enKey.length];
+          }
+          final decompressed = archive.ZLibDecoder().decodeBytes(payload);
+          return utf8.decode(decompressed);
+        } catch (_) {
+          return '';
+        }
+      case 'zlib_inflate':
+        try {
+          final raw = base64Decode(input);
+          final decompressed = archive.ZLibDecoder().decodeBytes(raw);
+          return utf8.decode(decompressed);
+        } catch (_) {
+          return '';
+        }
       case 'rsa_modpow':
         final modulus = BigInt.parse(spec['modulus'] as String, radix: 16);
         final text = spec['reverse'] == true

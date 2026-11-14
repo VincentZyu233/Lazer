@@ -689,6 +689,26 @@ end
         return base64Encode(utf8.encode(input));
       case 'base64_decode':
         return utf8.decode(base64Decode(input));
+      case 'krc_decode':
+        try {
+          final raw = base64Decode(input);
+          if (raw.length <= 4) return '';
+          const enKey = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105];
+          final payload = Uint8List(raw.length - 4);
+          for (var i = 0; i < payload.length; i++) {
+            payload[i] = raw[i + 4] ^ enKey[i % enKey.length];
+          }
+          return utf8.decode(zlib.decode(payload));
+        } catch (_) {
+          return '';
+        }
+      case 'zlib_inflate':
+        try {
+          final raw = base64Decode(input);
+          return utf8.decode(zlib.decode(raw));
+        } catch (_) {
+          return '';
+        }
       case 'rsa_modpow':
         final modulus = BigInt.parse(spec['modulus'] as String, radix: 16);
         final text = spec['reverse'] == true
