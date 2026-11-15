@@ -421,6 +421,12 @@ class Catalog {
 
   Future<void> invalidateLyrics(String trackId) => _expire('lyrics:$trackId');
 
+  /// Deletes every durable lyric file and returns how many were removed.
+  ///
+  /// A stored lyric has no version marker, so a plugin that starts answering
+  /// better would otherwise keep showing the older reply forever.
+  Future<int> clearLyricsCache() => lyricsCache.clear();
+
   /// Drops every discovery-chart snapshot, in memory and on disk.
   Future<void> invalidateDiscoveryCharts() async {
     await Future.wait(<Future<void>>[
@@ -551,16 +557,18 @@ class Catalog {
                   ChartEntry(
                     rank: i + 1,
                     title: songs.items[i].title,
-                  artist: songs.items[i].artists.map((a) => a.name).join(' / '),
-                  track: _platform.track(songs.items[i]),
-                ),
-            ],
-            providerKey: list.id.cacheKey,
-          );
-        }),
-      );
-    },
-  );
+                    artist: songs.items[i].artists
+                        .map((a) => a.name)
+                        .join(' / '),
+                    track: _platform.track(songs.items[i]),
+                  ),
+              ],
+              providerKey: list.id.cacheKey,
+            );
+          }),
+        );
+      },
+    );
   }
 
   Future<MusicChart> chartIssue(MusicChart chart, ChartIssue issue) => _cached(
@@ -1074,12 +1082,8 @@ class Catalog {
     AudioQuality quality = AudioQuality.exhigh,
     bool useCache = true,
     bool Function()? isCancelled,
-  }) => _platform.audioSource(
-    track,
-    quality,
-    useCache,
-    isCancelled: isCancelled,
-  );
+  }) =>
+      _platform.audioSource(track, quality, useCache, isCancelled: isCancelled);
   static bool isRateLimited(Object? error) =>
       error is MusicGatewayException && error.httpStatus == 429;
   Future<String?> audioUrlFor(
@@ -1120,6 +1124,9 @@ class Catalog {
       yrc: json['yrc'] as String?,
       tlyric: json['tlyric'] as String?,
       ytlrc: json['ytlrc'] as String?,
+      rlyric: json['rlyric'] as String?,
+      yromalrc: json['yromalrc'] as String?,
+      ttml: json['ttml'] as String?,
       pureMusic: json['pureMusic'] as bool? ?? false,
     ),
     (lyrics) => {
@@ -1127,6 +1134,9 @@ class Catalog {
       'yrc': lyrics.yrc,
       'tlyric': lyrics.tlyric,
       'ytlrc': lyrics.ytlrc,
+      'rlyric': lyrics.rlyric,
+      'yromalrc': lyrics.yromalrc,
+      'ttml': lyrics.ttml,
       'pureMusic': lyrics.pureMusic,
     },
     () async {
