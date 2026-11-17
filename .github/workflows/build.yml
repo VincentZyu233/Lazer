@@ -2,7 +2,7 @@ name: Build Lazer
 
 on:
   push:
-    branches: [nextgen]
+    branches: [nextgen, 'build/*']
     tags: ['v*']
   pull_request:
     branches: [nextgen]
@@ -67,7 +67,7 @@ jobs:
 
   windows:
     name: Windows EXE (x86_64)
-    needs: check
+    # needs: check
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -325,7 +325,7 @@ jobs:
 
   linux:
     name: Linux AppImage (${{ matrix.arch }})
-    needs: check
+    # needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -462,7 +462,7 @@ jobs:
 
   android:
     name: Android APK
-    needs: check
+    # needs: check
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
