@@ -67,7 +67,7 @@ jobs:
 
   windows:
     name: Windows EXE (x86_64)
-    needs: check
+    # needs: check
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
